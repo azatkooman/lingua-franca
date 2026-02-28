@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Lock, ShieldAlert } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Lock, ShieldAlert, ArrowLeft } from 'lucide-react';
 import { settingsService } from '../lib/SettingsService';
 import { useTranslation } from '../lib/i18n';
 import '../pages/Admin.css';
@@ -9,7 +10,8 @@ interface AdminGuardProps {
 }
 
 export default function AdminGuard({ children }: AdminGuardProps) {
-    const { t } = useTranslation();
+    const navigate = useNavigate();
+    const { t, locale, setLocale } = useTranslation();
     const [isAuthorized, setIsAuthorized] = useState(false);
     const [pinDigits, setPinDigits] = useState(['', '', '', '']);
     const [error, setError] = useState(false);
@@ -59,6 +61,31 @@ export default function AdminGuard({ children }: AdminGuardProps) {
 
     return (
         <div className="page-container admin-gate">
+            <button
+                className="btn-icon"
+                onClick={() => navigate('/')}
+                style={{ position: 'fixed', top: '1.5rem', left: '1.5rem', zIndex: 1000 }}
+                title={t('back')}
+            >
+                <ArrowLeft size={24} />
+            </button>
+
+            <div className="language-toggle">
+                <button
+                    className={`lang-btn ${locale === 'en' ? 'active' : ''}`}
+                    onClick={() => setLocale('en')}
+                >
+                    EN
+                </button>
+                <div className="divider"></div>
+                <button
+                    className={`lang-btn ${locale === 'ru' ? 'active' : ''}`}
+                    onClick={() => setLocale('ru')}
+                >
+                    RU
+                </button>
+            </div>
+
             <div className="card fade-in" style={{ maxWidth: 450, margin: '20px auto', padding: '3rem' }}>
                 <div style={{ textAlign: 'center', marginBottom: '2.5rem' }}>
                     <div className="icon-wrapper" style={{

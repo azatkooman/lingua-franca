@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Save, Plus, Trash2, Edit2, QrCode, Monitor, Languages, Home as HomeIcon } from 'lucide-react';
+import { ArrowLeft, Save, Plus, Trash2, Edit2, QrCode, Monitor, Languages, X } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { settingsService } from '../lib/SettingsService';
@@ -118,9 +118,6 @@ export default function Admin() {
                             RU
                         </button>
                     </div>
-                    <button className="btn-icon" onClick={() => navigate('/')} title={t('home')}>
-                        <HomeIcon size={24} />
-                    </button>
                 </div>
             </header>
 
@@ -131,7 +128,7 @@ export default function Admin() {
                         <QrCode size={20} color="var(--primary)" />
                         <h3>{t('active_session')}</h3>
                         <button className="btn-icon-small" onClick={() => setShowQr(false)} style={{ marginLeft: 'auto' }}>
-                            <ArrowLeft size={18} style={{ transform: 'rotate(90deg)' }} />
+                            <X size={18} />
                         </button>
                     </div>
                     <div className="qr-container" style={{ marginTop: 0, paddingBottom: '2rem' }}>

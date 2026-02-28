@@ -98,21 +98,30 @@ async function startServers() {
         cert: pems.cert
     };
 
-    // 1. Initialize Express and PeerJS
+    // 1. Initialize Express
     const expressApp = express();
     const { ExpressPeerServer } = require('peer');
+    expressApp.use(express.json());
 
-    // Create a temporary server for PeerJS to attach to (will be overridden by our main listen calls)
-    const tempServer = http.createServer(expressApp);
-    const peerServer = ExpressPeerServer(tempServer, {
+    // 2. Create the actual servers
+    const httpsServer = https.createServer(sslOptions, expressApp);
+    const httpServer = http.createServer(expressApp);
+
+    // 3. Initialize PeerJS attached to httpsServer (for phones)
+    const peerServer = ExpressPeerServer(httpsServer, {
         debug: true,
         path: '/'
     });
 
-    expressApp.use('/peerjs', peerServer);
-    expressApp.use(express.json());
+    // 4. Manually handle upgrade for httpServer (for local Electron window)
+    httpServer.on('upgrade', (req, socket, head) => {
+        if (req.url.startsWith('/peerjs')) {
+            peerServer.handleUpgrade(req, socket, head);
+        }
+    });
 
-    console.log('PeerJS signaling server attached to Express at /peerjs');
+    expressApp.use('/peerjs', peerServer);
+    console.log('PeerJS signaling server attached to /peerjs and handling upgrades on both HTTP(4174) and HTTPS(4173)');
 
     // PeerJS events
     peerServer.on('connection', (client) => console.log('Peer connected:', client.getId()));
@@ -174,15 +183,14 @@ async function startServers() {
         });
     }
 
-    // HTTPS server on port 4173 for external devices (phones)
-    const httpsServer = https.createServer(sslOptions, expressApp);
-
-    // HTTP server on port 4174 for the local Electron window (no SSL issues)
-    http.createServer(expressApp).listen(4174, 'localhost');
+    // Listen
+    httpServer.listen(4174, 'localhost', () => {
+        console.log('Local HTTP server listening on port 4174 (for Electron window)');
+    });
 
     httpsServer.listen(4173, '0.0.0.0', () => {
         console.log('====================================================');
-        console.log('🌐 Web UI and API are now live!');
+        console.log('🌐 Lingua Franca Web UI and API are now live!');
         console.log(`📱 Connect devices at: https://${localIp}:4173`);
         console.log('====================================================');
     });

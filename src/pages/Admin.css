@@ -12,6 +12,10 @@
     border-bottom: 1px solid var(--border);
 }
 
+.admin-page .card {
+    margin-bottom: 2rem;
+}
+
 .admin-header-left {
     display: flex;
     align-items: center;

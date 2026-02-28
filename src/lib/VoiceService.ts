@@ -52,14 +52,15 @@ export class VoiceService {
         let defaultPort = parseInt(window.location.port) || 443;
         let defaultSecure = window.location.protocol === 'https:';
 
-        // Fix for development environment if needed
+        // Fix for development environment
         if (window.location.port === '5173') {
             // In Vite dev mode, Electron is still hosting PeerJS on 4173
-            // But we need to find the local IP for the desktop app usually
-            // However, on the desktop itself 'localhost' works
+            defaultPort = 4173;
+            // For dev mode, if we are on localhost, we should use localhost even for phones
+            // if they are on the same network, but usually it's easier to use the detected IP
         }
 
-        return {
+        const options = {
             host: defaultHost,
             port: defaultPort,
             path: '/peerjs',
@@ -68,9 +69,15 @@ export class VoiceService {
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
                     { urls: 'stun:stun1.l.google.com:19302' }
-                ]
+                ],
+                // Performance & Stability tweaks
+                bundlePolicy: 'max-bundle' as RTCBundlePolicy,
+                rtcpMuxPolicy: 'require' as RTCRtcpMuxPolicy,
+                iceCandidatePoolSize: 10
             }
         };
+        console.log("PeerJS Options:", options);
+        return options;
     }
 
     private dataConnections: Map<string, any> = new Map();
@@ -112,6 +119,40 @@ export class VoiceService {
         }
     }
 
+    // Helper to mangle SDP for voice optimization (Opus)
+    private optimizeSDP(sdp: string): string {
+        // 1. Force Opus to use a lower bitrate for better scalability (32kbps is plenty for clear voice)
+        // 2. Force mono to save bandwidth
+        // 3. Enable Forward Error Correction (FEC) for stability
+        // 4. Set packetization interval (ptime) for lower latency
+        let lines = sdp.split('\r\n');
+        const opusFmtpLineIndex = lines.findIndex(line => line.includes('a=fmtp') && line.includes('111')); // 111 is usually Opus
+
+        if (opusFmtpLineIndex !== -1) {
+            let line = lines[opusFmtpLineIndex];
+            // Add or update parameters
+            if (!line.includes('maxaveragebitrate')) line += ';maxaveragebitrate=32000';
+            if (!line.includes('stereo=0')) line += ';stereo=0';
+            if (!line.includes('useinbandfec=1')) line += ';useinbandfec=1';
+            if (!line.includes('minptime=10')) line += ';minptime=10';
+            lines[opusFmtpLineIndex] = line;
+        }
+
+        // Also prioritize Opus by moving it to the front of the m=audio line if needed
+        const mAudioIndex = lines.findIndex(line => line.startsWith('m=audio'));
+        if (mAudioIndex !== -1) {
+            let mLine = lines[mAudioIndex].split(' ');
+            const opusIndex = mLine.indexOf('111');
+            if (opusIndex > 3) { // 0:m, 1:audio, 2:port, 3:proto, 4+:payload types
+                mLine.splice(opusIndex, 1);
+                mLine.splice(3, 0, '111');
+                lines[mAudioIndex] = mLine.join(' ');
+            }
+        }
+
+        return lines.join('\r\n');
+    }
+
     // INTERPRETER: Start broadcasting on a specific channel name
     async startBroadcast(channelName: string,
         onStatus: (status: string) => void,
@@ -123,13 +164,17 @@ export class VoiceService {
         this.currentLanguageName = channelName;
 
         try {
-            // 1. Get audio stream with low bandwidth constraints
+            // 1. Get audio stream with voice-optimized constraints
             this.stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     deviceId: deviceId ? { exact: deviceId } : undefined,
                     echoCancellation: true,
                     noiseSuppression: true,
                     autoGainControl: true,
+                    // Advanced voice-first constraints
+                    channelCount: 1,
+                    sampleRate: 48000,
+                    sampleSize: 16
                 }
             });
 
@@ -147,9 +192,11 @@ export class VoiceService {
                 });
             });
 
-            // 3. Answer incoming listener calls with our audio stream
+            // 3. Answer incoming listener calls with optimized SDP
             this.peer.on('call', (call) => {
-                call.answer(this.stream!);
+                call.answer(this.stream!, {
+                    sdpTransform: (sdp: string) => this.optimizeSDP(sdp)
+                });
                 this.connections.set(call.peer, call);
                 this.onPeerConnected?.(this.connections.size);
 
@@ -244,9 +291,10 @@ export class VoiceService {
                 track.enabled = false;
             });
 
-            // Call the interpreter with our silent stream
+            // Call the interpreter with our silent stream and optimized SDP
             const call = this.peer.call(targetPeerId, dst.stream, {
-                metadata: { role: 'listener' }
+                metadata: { role: 'listener' },
+                sdpTransform: (sdp: string) => this.optimizeSDP(sdp)
             });
 
             // Also establish a data connection for metadata (mute status)

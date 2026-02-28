@@ -1,0 +1,267 @@
+/* Admin Page Layout */
+.admin-page {
+    padding-bottom: 4rem;
+}
+
+.card-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.admin-header-left {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex: 1;
+}
+
+.admin-header-left h1 {
+    margin: 0;
+    margin-left: 0.5rem;
+    font-size: 1.5rem;
+}
+
+.card-header h3 {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+.highlight-card {
+    border-top: 4px solid var(--primary);
+    background: linear-gradient(to bottom, rgba(56, 189, 248, 0.05), transparent);
+}
+
+/* Connection Info */
+.url-display {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--bg-color);
+    padding: 0.75rem 1rem;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    margin-top: 1rem;
+    font-family: var(--font-mono);
+}
+
+.url-display code {
+    color: var(--primary);
+    font-size: 1.1rem;
+}
+
+.qr-container {
+    margin-top: 2rem;
+    text-align: center;
+}
+
+.qr-box {
+    display: inline-block;
+    background: white;
+    /* Force white background for QR contrast */
+    padding: 2rem;
+    border-radius: var(--radius-lg);
+    box-shadow: 0 15px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* Language Editor */
+.lang-editor-form {
+    background: var(--surface-2);
+    padding: 1.25rem;
+    border-radius: var(--radius-md);
+    margin-bottom: 1.5rem;
+}
+
+.custom-input {
+    background: var(--surface-2);
+    /* Darker for better contrast on surface-1 cards */
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    color: var(--text-main);
+    padding: 0.8rem 1.2rem;
+    font-size: 1rem;
+    transition: all var(--transition-fast);
+    width: 100%;
+}
+
+.custom-input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px var(--primary-glow);
+    background: var(--surface-2);
+}
+
+.custom-input::placeholder {
+    color: var(--text-muted);
+    opacity: 0.6;
+}
+
+textarea.custom-input {
+    resize: none;
+    line-height: 1.5;
+}
+
+.input-row {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    justify-content: center;
+    margin: 1.5rem 0;
+}
+
+.input-row .custom-input {
+    flex: 1;
+    min-width: 0;
+    /* Prevents flex items from overflowing */
+}
+
+.input-row button {
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.pin-digit-container {
+    display: flex;
+    gap: 0.75rem;
+    justify-content: center;
+    margin: 1.5rem 0;
+}
+
+.pin-digit-input {
+    width: 50px;
+    height: 64px;
+    background: var(--surface-1);
+    border: 2px solid var(--border);
+    border-radius: var(--radius-md);
+    color: var(--text-main);
+    font-size: 2rem;
+    font-weight: 700;
+    text-align: center;
+    transition: all var(--transition-fast);
+}
+
+.pin-digit-input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 4px var(--primary-glow);
+    background: var(--surface-2);
+    transform: translateY(-2px);
+}
+
+.pin-digit-input.error {
+    border-color: var(--danger);
+}
+
+.lang-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.lang-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem;
+    transition: transform var(--transition-fast);
+}
+
+.lang-item:hover {
+    transform: translateX(4px);
+    border-color: var(--primary);
+}
+
+.lang-info {
+    display: flex;
+    flex-direction: column;
+}
+
+.lang-info strong {
+    font-size: 1rem;
+}
+
+.lang-info span {
+    font-size: 0.85rem;
+}
+
+.lang-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+/* Common Components */
+.btn-primary-small {
+    background: var(--primary);
+    color: white;
+    border: none;
+    padding: 0.5rem 1rem;
+    border-radius: var(--radius-md);
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: opacity var(--transition-fast);
+}
+
+.btn-icon-small {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.btn-icon-small:hover {
+    background: var(--primary);
+    color: white;
+    border-color: var(--primary);
+}
+
+.btn-icon-subtle {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    padding: 0.4rem;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.btn-icon-subtle:hover {
+    background: var(--surface-2);
+    color: var(--text-main);
+}
+
+.text-danger:hover {
+    color: #ef4444;
+}
+
+.mt-2 {
+    margin-top: 0.5rem;
+}
+
+.mb-4 {
+    margin-bottom: 1rem;
+}
+
+.mt-4 {
+    margin-top: 1.5rem;
+}
+
+/* Admin Gate Overlay */
+.admin-gate {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 80vh;
+}

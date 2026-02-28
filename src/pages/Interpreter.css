@@ -1,0 +1,170 @@
+.page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 2rem;
+}
+
+.btn-icon {
+    background: var(--surface-2);
+    border-radius: var(--radius-full);
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all var(--transition-fast);
+    border: 1px solid var(--border);
+}
+
+.btn-icon:hover {
+    background: rgba(255, 255, 255, 0.1);
+    transform: scale(1.05);
+}
+
+/* Interpreter specific Styles */
+.interpreter-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2rem;
+}
+
+.status-indicator {
+    background: var(--surface-2);
+    padding: 0.5rem 1rem;
+    border-radius: var(--radius-full);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 600;
+    font-size: 0.9rem;
+    letter-spacing: 1px;
+}
+
+.led {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+}
+
+.led-on {
+    background: var(--danger);
+    box-shadow: 0 0 10px var(--danger);
+    animation: blink 2s infinite;
+}
+
+.led-off {
+    background: var(--text-muted);
+}
+
+@keyframes blink {
+    0% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.5;
+    }
+
+    100% {
+        opacity: 1;
+    }
+}
+
+.language-selector {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.language-selector label {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    font-weight: 500;
+}
+
+.custom-select {
+    width: 100%;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: white;
+    padding: 1rem;
+    border-radius: var(--radius-md);
+    font-size: 1.1rem;
+    font-family: inherit;
+    outline: none;
+    appearance: none;
+    cursor: pointer;
+}
+
+.mic-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+    margin: 1.5rem 0;
+}
+
+.mic-btn {
+    width: 120px;
+    height: 120px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    border: 4px solid var(--border);
+}
+
+.mic-active {
+    background: var(--danger);
+    border-color: rgba(239, 68, 68, 0.5);
+    box-shadow: 0 0 40px var(--danger-glow);
+}
+
+.mic-inactive {
+    background: var(--surface-2);
+}
+
+.mic-inactive:hover {
+    background: #2d3247;
+    transform: scale(1.05);
+}
+
+.mic-status {
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.stats-panel {
+    width: 100%;
+    display: flex;
+    justify-content: space-around;
+    padding: 1.5rem;
+    animation: fadeIn 0.3s ease-out;
+}
+
+.stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.stat-value {
+    font-size: 1.8rem;
+    font-weight: 700;
+}
+
+.stat-label {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.text-accent {
+    color: var(--accent);
+}

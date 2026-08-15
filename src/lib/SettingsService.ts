@@ -9,6 +9,7 @@ export interface AppSettings {
     languages: Language[];
     adminPin: string;
     interfaceLanguage?: 'en' | 'ru';
+    geminiApiKey?: string;
 }
 
 type SettingsListener = (settings: AppSettings) => void;
@@ -104,6 +105,11 @@ class SettingsService {
 
     async setAdminPin(newPin: string) {
         this.settings.adminPin = newPin;
+        await this.save();
+    }
+
+    async setGeminiApiKey(key: string) {
+        this.settings.geminiApiKey = key;
         await this.save();
     }
 

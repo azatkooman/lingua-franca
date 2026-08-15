@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Save, Plus, Trash2, Edit2, QrCode, Monitor, Languages, X } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { ArrowLeft, Save, Plus, Trash2, Edit2, QrCode, Monitor, Languages, X, Cpu } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { settingsService } from '../lib/SettingsService';
 import type { Language, AppSettings } from '../lib/SettingsService';
@@ -18,7 +18,15 @@ export default function Admin() {
     const [editingLang, setEditingLang] = useState<Language | null>(null);
     const [newLangName, setNewLangName] = useState('');
     const [newLangDesc, setNewLangDesc] = useState('');
-    const [pin, setPin] = useState('');
+    const [pinDigits, setPinDigits] = useState(['', '', '', '']);
+    const isPinInitialized = useRef(false);
+
+    // AI State
+    const [geminiKey, setGeminiKey] = useState('');
+    const [showKey, setShowKey] = useState(false);
+    const [testInput, setTestInput] = useState('Hello, how are you?');
+    const [testResult, setTestResult] = useState('');
+    const [testing, setTesting] = useState(false);
 
     useEffect(() => {
         fetch('/api/local-ip')
@@ -37,7 +45,14 @@ export default function Admin() {
         // Subscribe to settings changes
         const unsubscribe = settingsService.subscribe((s) => {
             setSettings(s);
-            setPin(s.adminPin);
+            if (s.geminiApiKey !== undefined && !isPinInitialized.current) {
+                setGeminiKey(s.geminiApiKey || '');
+            }
+            // Initialize pin digits only once from settings
+            if (!isPinInitialized.current && s.adminPin) {
+                setPinDigits(s.adminPin.split('').slice(0, 4));
+                isPinInitialized.current = true;
+            }
         });
 
         return unsubscribe;
@@ -81,12 +96,45 @@ export default function Admin() {
     };
 
     const savePin = async () => {
-        if (pin.length < 4) {
+        const pin = pinDigits.join('');
+        if (pin.length < 4 || pinDigits.some(d => d === '')) {
             alert(t('enter_pin'));
             return;
         }
         await settingsService.setAdminPin(pin);
         alert(t('save') + '!');
+    };
+
+    const handleSaveGeminiKey = async () => {
+        await settingsService.setGeminiApiKey(geminiKey);
+        alert(t('save') + '!');
+    };
+
+    const handleTestTranslation = async () => {
+        if (!testInput) return;
+        setTesting(true);
+        setTestResult('');
+        try {
+            const res = await fetch('/api/translate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    text: testInput,
+                    sourceLang: 'English',
+                    targetLang: 'Spanish'
+                })
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setTestResult(data.translatedText || t('error'));
+            } else {
+                setTestResult(t('test_failed') + res.statusText);
+            }
+        } catch (err: any) {
+            setTestResult(t('test_failed') + (err.message || String(err)));
+        } finally {
+            setTesting(false);
+        }
     };
 
     const connectionUrl = serverIp ? `https://${serverIp}:4173` : '';
@@ -226,40 +274,107 @@ export default function Admin() {
             <div className="card fade-in">
                 <div className="card-header">
                     <Save size={20} color="var(--primary)" />
-                    <h3>{t('admin_title')}</h3>
+                    <h3>{t('change_pin')}</h3>
                 </div>
                 <div style={{ padding: '0.5rem' }}>
-                    <p className="text-muted mb-4">{t('enter_pin')}</p>
+                    <p className="text-muted mb-4">{t('enter_new_pin')}</p>
                     <div className="pin-digit-container" style={{ margin: '1rem 0' }}>
-                        {[0, 1, 2, 3].map((idx) => (
+                        {pinDigits.map((digit, idx) => (
                             <input
                                 key={idx}
                                 id={`setting-pin-${idx}`}
                                 type="text"
                                 inputMode="numeric"
-                                maxLength={1}
-                                value={pin[idx] || ''}
+                                value={digit}
+                                onFocus={(e) => e.target.select()}
                                 onChange={(e) => {
                                     const val = e.target.value.replace(/\D/g, '');
-                                    if (!val) return;
-                                    const newPin = pin.split('');
-                                    newPin[idx] = val.slice(-1);
-                                    setPin(newPin.join(''));
-                                    if (idx < 3) document.getElementById(`setting-pin-${idx + 1}`)?.focus();
+                                    const newDigits = [...pinDigits];
+                                    // Take the last digit entered (supports overwrite)
+                                    newDigits[idx] = val.slice(-1);
+                                    setPinDigits(newDigits);
+
+                                    if (val && idx < 3) {
+                                        document.getElementById(`setting-pin-${idx + 1}`)?.focus();
+                                    }
                                 }}
                                 onKeyDown={(e) => {
-                                    if (e.key === 'Backspace' && !pin[idx] && idx > 0) {
+                                    if (e.key === 'Backspace' && !pinDigits[idx] && idx > 0) {
                                         document.getElementById(`setting-pin-${idx - 1}`)?.focus();
                                     }
                                 }}
                                 className="pin-digit-input"
                                 style={{ width: 50, height: 60, fontSize: '1.5rem' }}
+                                autoComplete="off"
                             />
                         ))}
                     </div>
                     <button className="btn-primary mt-4" onClick={savePin} style={{ maxWidth: 250, margin: '2rem auto 0' }}>
                         {t('save')}
                     </button>
+                </div>
+            </div>
+
+            {/* 4. AI Settings Section */}
+            <div className="card fade-in">
+                <div className="card-header">
+                    <Cpu size={20} color="var(--primary)" />
+                    <h3>{t('ai_mode')} Settings</h3>
+                </div>
+                <div style={{ padding: '0.5rem' }}>
+                    <p className="text-muted mb-4">{t('no_key_warning')}</p>
+                    
+                    <div style={{ display: 'flex', gap: '1rem', flexDirection: 'column', width: '100%' }}>
+                        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                            <input
+                                type={showKey ? 'text' : 'password'}
+                                placeholder={t('gemini_api_key')}
+                                value={geminiKey}
+                                onChange={(e) => setGeminiKey(e.target.value)}
+                                className="custom-input"
+                                style={{ flex: 1 }}
+                            />
+                            <button
+                                className="btn-secondary"
+                                style={{ width: 'auto', padding: '0.75rem 1rem', height: '42px', fontSize: '0.9rem' }}
+                                onClick={() => setShowKey(!showKey)}
+                            >
+                                {showKey ? 'Hide' : 'Show'}
+                            </button>
+                        </div>
+
+                        <button className="btn-primary" onClick={handleSaveGeminiKey} style={{ maxWidth: 250, margin: '1rem 0 0' }}>
+                            {t('save')} Key
+                        </button>
+
+                        <div className="glass-panel" style={{ marginTop: '2rem', padding: '1.5rem' }}>
+                            <h4 style={{ marginBottom: '1rem', fontSize: '1.1rem' }}>{t('test_translation')} (EN → ES)</h4>
+                            <input
+                                type="text"
+                                value={testInput}
+                                onChange={(e) => setTestInput(e.target.value)}
+                                className="custom-input"
+                                style={{ marginBottom: '1rem' }}
+                            />
+                            <button
+                                className="btn-secondary"
+                                style={{ padding: '0.75rem 1.5rem', width: 'auto' }}
+                                onClick={handleTestTranslation}
+                                disabled={testing}
+                            >
+                                {testing ? t('loading') : t('test_translation')}
+                            </button>
+
+                            {testResult && (
+                                <div style={{ marginTop: '1.5rem', background: 'rgba(255,255,255,0.05)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
+                                    <strong style={{ fontSize: '0.85rem', color: 'var(--primary)', textTransform: 'uppercase', display: 'block', marginBottom: '0.25rem' }}>
+                                        Result
+                                    </strong>
+                                    <p style={{ fontSize: '1rem', wordBreak: 'break-all' }}>{testResult}</p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>

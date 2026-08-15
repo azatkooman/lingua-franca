@@ -22,16 +22,17 @@
     "directories": {
       "output": "release"
     },
-    "files": [
-      "dist",
-      "desktop",
-      "main.cjs",
-      "package.json"
+    "asarUnpack": [
+      "node_modules/mediasoup/**/*"
     ],
     "mac": {
       "target": [
         "dmg"
       ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "desktop/entitlements.mac.plist",
+      "entitlementsInherit": "desktop/entitlements.mac.inherit.plist",
       "extendInfo": {
         "NSMicrophoneUsageDescription": "Lingua Franca needs microphone access for translation broadcasting."
       }
@@ -40,7 +41,16 @@
       "target": [
         "nsis"
       ]
-    }
+    },
+    "extraResources": [
+      {
+        "from": "node_modules/mediasoup/worker/out/Release",
+        "to": "bin",
+        "filter": [
+          "mediasoup-worker*"
+        ]
+      }
+    ]
   },
   "dependencies": {
     "@capacitor/android": "^8.1.0",
@@ -49,13 +59,15 @@
     "express": "^5.2.1",
     "https": "^1.0.0",
     "lucide-react": "^0.575.0",
+    "mediasoup": "^3.19.17",
+    "mediasoup-client": "^3.18.7",
     "node-forge": "^1.3.3",
-    "peer": "^1.0.2",
-    "peerjs": "^1.5.5",
     "qrcode.react": "^4.2.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "react-router-dom": "^7.13.1"
+    "react-router-dom": "^7.13.1",
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
     "@capacitor/cli": "^8.1.0",

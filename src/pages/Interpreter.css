@@ -153,6 +153,13 @@
     gap: 0.25rem;
 }
 
+.stat .signal-meter {
+    height: 32px !important;
+    width: auto !important;
+    padding: 0 1rem !important;
+    border-right: 1px solid rgba(255, 255, 255, 0.1);
+}
+
 .stat-value {
     font-size: 1.8rem;
     font-weight: 700;
@@ -167,4 +174,29 @@
 
 .text-accent {
     color: var(--accent);
+}
+
+/* AI Mode & Tabs Styling */
+.mode-toggle-tabs {
+    border: 1px solid var(--border);
+    width: 100%;
+}
+
+.tab-btn {
+    transition: all var(--transition-smooth);
+    border: none;
+    outline: none;
+    cursor: pointer;
+}
+
+.tab-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.08) !important;
+}
+
+.tab-btn.active {
+    box-shadow: 0 4px 12px var(--primary-glow);
+}
+
+.ai-active-badge {
+    animation: pulse 2.5s infinite;
 }

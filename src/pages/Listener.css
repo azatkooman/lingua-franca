@@ -132,18 +132,89 @@
 .volume-slider {
     flex: 1;
     -webkit-appearance: none;
-    height: 6px;
-    background: var(--surface-2);
-    border-radius: 3px;
+    appearance: none;
+    height: 8px;
+    background: linear-gradient(to right,
+            var(--primary) 0%,
+            var(--primary) var(--volume-percent, 80%),
+            var(--surface-2) var(--volume-percent, 80%),
+            var(--surface-2) 100%);
+    border-radius: 4px;
     outline: none;
+    transition: all var(--transition-fast);
 }
 
 .volume-slider::-webkit-slider-thumb {
     -webkit-appearance: none;
-    width: 20px;
-    height: 20px;
+    width: 24px;
+    height: 24px;
     border-radius: 50%;
-    background: var(--primary);
+    background: white;
     cursor: pointer;
-    box-shadow: 0 0 10px var(--primary-glow);
+    box-shadow: 0 0 15px rgba(0, 0, 0, 0.3), 0 0 8px var(--primary-glow);
+    border: 3px solid var(--primary);
+}
+
+.volume-slider:hover::-webkit-slider-thumb {
+    transform: scale(1.1);
+}
+
+.signal-meter {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0 0.75rem;
+    height: 32px;
+    border-right: 1px solid rgba(255, 255, 255, 0.1);
+    margin-right: 0.5rem;
+}
+
+.signal-bar {
+    width: 4px;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: height 0.1s ease-out;
+    box-shadow: 0 0 8px var(--accent-glow);
+    margin-top: auto;
+}
+
+.signal-label {
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-weight: bold;
+}
+
+/* AI Subtitle & Badge Styles */
+.ai-active-badge {
+    animation: pulse-badge 2.5s ease-in-out infinite;
+}
+
+@keyframes pulse-badge {
+    0%, 100% {
+        box-shadow: 0 0 6px var(--primary-glow);
+    }
+    50% {
+        box-shadow: 0 0 18px var(--primary-glow), 0 0 32px var(--primary-glow);
+    }
+}
+
+.subtitle-panel {
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    transition: all 0.3s ease;
+}
+
+.subtitle-panel p {
+    transition: opacity 0.25s ease-in-out;
+}
+
+/* Live/AI badges on channel list */
+.channel-btn .badge-live,
+.channel-btn .badge-ai {
+    font-size: 0.7rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: var(--radius-full);
+    font-weight: bold;
+    letter-spacing: 0.5px;
 }

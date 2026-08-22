@@ -200,3 +200,28 @@
 .ai-active-badge {
     animation: pulse 2.5s infinite;
 }
+.mode-toggle {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    margin-bottom: 1.25rem;
+}
+
+.mode-toggle-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.8rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    color: var(--text-muted);
+    background: rgba(255, 255, 255, 0.03);
+    cursor: pointer;
+}
+
+.mode-toggle-btn.active {
+    color: white;
+    border-color: var(--primary);
+    background: var(--primary);
+}

@@ -1,381 +1,231 @@
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Save, Plus, Trash2, Edit2, QrCode, Monitor, Languages, X, Cpu } from 'lucide-react';
-import { useState, useEffect, useRef } from 'react';
+import { ArrowLeft, Cpu, Edit2, Languages, Mic, Monitor, Plus, QrCode, Save, ShieldAlert, Trash2, X } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
-import { settingsService } from '../lib/SettingsService';
-import type { Language, AppSettings } from '../lib/SettingsService';
+import { settingsService, type AiProvider, type AppSettings, type Language } from '../lib/SettingsService';
 import { useTranslation } from '../lib/i18n';
 import './Admin.css';
+
+interface HealthInfo {
+    ok: boolean;
+    localAddress: string;
+    addresses: { name: string; address: string }[];
+    sfu: string;
+    sfuError: string;
+    certificatePath: string;
+    publicHost: string;
+    certificate: { type: 'trusted' | 'self-signed'; hostname: string; expiresAt: string; error: string };
+    ports: { https: number; local: number; rtc: string };
+}
 
 export default function Admin() {
     const navigate = useNavigate();
     const { t, locale, setLocale } = useTranslation();
-    const [serverIp, setServerIp] = useState<string | null>(null);
     const [settings, setSettings] = useState<AppSettings | null>(null);
-
-    // UI State
+    const [health, setHealth] = useState<HealthInfo | null>(null);
     const [showQr, setShowQr] = useState(false);
+    const [interpreterLink, setInterpreterLink] = useState<{ url: string; code: string; channelName: string } | null>(null);
+    const [interpreterChannel, setInterpreterChannel] = useState('English');
+    const [duckDomain, setDuckDomain] = useState('');
+    const [duckToken, setDuckToken] = useState('');
+    const [certificateEmail, setCertificateEmail] = useState('');
     const [editingLang, setEditingLang] = useState<Language | null>(null);
-    const [newLangName, setNewLangName] = useState('');
-    const [newLangDesc, setNewLangDesc] = useState('');
+    const [languageName, setLanguageName] = useState('');
+    const [languageCode, setLanguageCode] = useState('');
+    const [languageDescription, setLanguageDescription] = useState('');
     const [pinDigits, setPinDigits] = useState(['', '', '', '']);
-    const isPinInitialized = useRef(false);
-
-    // AI State
+    const [openaiKey, setOpenaiKey] = useState('');
     const [geminiKey, setGeminiKey] = useState('');
     const [showKey, setShowKey] = useState(false);
-    const [testInput, setTestInput] = useState('Hello, how are you?');
-    const [testResult, setTestResult] = useState('');
-    const [testing, setTesting] = useState(false);
+    const [message, setMessage] = useState('');
+    const [busy, setBusy] = useState(false);
 
+    useEffect(() => settingsService.subscribe(setSettings), []);
     useEffect(() => {
-        fetch('/api/local-ip')
-            .then(res => res.json())
-            .then(data => setServerIp(data.ip))
-            .catch(err => {
-                console.log('Not running in Electron or no local IP found', err);
-                const currentHost = window.location.hostname;
-                if (currentHost && currentHost !== 'localhost' && currentHost !== '127.0.0.1') {
-                    setServerIp(currentHost);
-                } else {
-                    setServerIp('127.0.0.1');
-                }
-            });
-
-        // Subscribe to settings changes
-        const unsubscribe = settingsService.subscribe((s) => {
-            setSettings(s);
-            if (s.geminiApiKey !== undefined && !isPinInitialized.current) {
-                setGeminiKey(s.geminiApiKey || '');
-            }
-            // Initialize pin digits only once from settings
-            if (!isPinInitialized.current && s.adminPin) {
-                setPinDigits(s.adminPin.split('').slice(0, 4));
-                isPinInitialized.current = true;
-            }
-        });
-
-        return unsubscribe;
+        fetch('/api/health').then((response) => response.json()).then(setHealth).catch(() => setHealth(null));
     }, []);
 
-    const toggleMainQr = () => setShowQr(!showQr);
-
-    const handleAddLanguage = async () => {
-        if (!newLangName) return;
-        await settingsService.addLanguage(newLangName, newLangDesc);
-        setNewLangName('');
-        setNewLangDesc('');
+    const run = async (action: () => Promise<unknown>, success: string) => {
+        setBusy(true); setMessage('');
+        try { await action(); setMessage(success); }
+        catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
+        finally { setBusy(false); }
     };
 
-    const handleUpdateLanguage = async () => {
-        if (!editingLang || !newLangName) return;
-        await settingsService.updateLanguage(editingLang.id, newLangName, newLangDesc);
-        setEditingLang(null);
-        setNewLangName('');
-        setNewLangDesc('');
+    const resetLanguageForm = () => {
+        setEditingLang(null); setLanguageName(''); setLanguageCode(''); setLanguageDescription('');
     };
 
-    const handleDeleteLanguage = async (id: string) => {
-        if (confirm(t('delete') + '?')) {
-            // Optimistic update: remove from local list immediately
-            setSettings(prev => {
-                if (!prev) return null;
-                return {
-                    ...prev,
-                    languages: prev.languages.filter(l => l.id !== id)
-                };
+    const saveLanguage = async () => {
+        if (!languageName.trim() || !languageCode.trim()) return;
+        await run(async () => {
+            if (editingLang) await settingsService.updateLanguage(editingLang.id, languageName, languageDescription, languageCode);
+            else await settingsService.addLanguage(languageName, languageDescription, languageCode);
+            resetLanguageForm();
+        }, 'Language saved.');
+    };
+
+    const editLanguage = (language: Language) => {
+        setEditingLang(language); setLanguageName(language.name); setLanguageCode(language.code); setLanguageDescription(language.description);
+    };
+
+    const listenerUrl = health ? `https://${health.publicHost || health.localAddress}:${health.ports.https}/listener?channel=English` : '';
+    const createInterpreterLink = async () => {
+        await run(async () => {
+            const access = await settingsService.createInterpreterLink(interpreterChannel);
+            const host = health?.publicHost || health?.localAddress;
+            if (!host) throw new Error('Network address is not ready.');
+            setInterpreterLink({
+                url: `https://${host}:${health!.ports.https}/interpreter?code=${access.code}`,
+                code: access.code,
+                channelName: access.channelName,
             });
-            await settingsService.removeLanguage(id);
-        }
+        }, 'Interpreter link created. It is valid for eight hours and can be used once.');
     };
-
-    const startEditing = (lang: Language) => {
-        setEditingLang(lang);
-        setNewLangName(lang.name);
-        setNewLangDesc(lang.description);
-    };
-
-    const savePin = async () => {
-        const pin = pinDigits.join('');
-        if (pin.length < 4 || pinDigits.some(d => d === '')) {
-            alert(t('enter_pin'));
-            return;
-        }
-        await settingsService.setAdminPin(pin);
-        alert(t('save') + '!');
-    };
-
-    const handleSaveGeminiKey = async () => {
-        await settingsService.setGeminiApiKey(geminiKey);
-        alert(t('save') + '!');
-    };
-
-    const handleTestTranslation = async () => {
-        if (!testInput) return;
-        setTesting(true);
-        setTestResult('');
-        try {
-            const res = await fetch('/api/translate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    text: testInput,
-                    sourceLang: 'English',
-                    targetLang: 'Spanish'
-                })
-            });
-            if (res.ok) {
-                const data = await res.json();
-                setTestResult(data.translatedText || t('error'));
-            } else {
-                setTestResult(t('test_failed') + res.statusText);
-            }
-        } catch (err: any) {
-            setTestResult(t('test_failed') + (err.message || String(err)));
-        } finally {
-            setTesting(false);
-        }
-    };
-
-    const connectionUrl = serverIp ? `https://${serverIp}:4173` : '';
-
     if (!settings) return <div className="page-container admin-page">{t('loading')}</div>;
 
     return (
         <div className="page-container admin-page">
             <header className="page-header">
                 <div className="admin-header-left">
-                    <button className="btn-icon" onClick={() => navigate(-1)} title={t('back')}>
-                        <ArrowLeft size={24} />
-                    </button>
+                    <button className="btn-icon" onClick={() => navigate(-1)} title={t('back')}><ArrowLeft size={24} /></button>
                     <h2>{t('admin_title')}</h2>
                 </div>
-                <div className="admin-header-right" style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-                    <div className="language-toggle" style={{ position: 'static' }}>
-                        <button
-                            className={`lang-btn ${locale === 'en' ? 'active' : ''}`}
-                            onClick={() => setLocale('en')}
-                        >
-                            EN
-                        </button>
-                        <div className="divider"></div>
-                        <button
-                            className={`lang-btn ${locale === 'ru' ? 'active' : ''}`}
-                            onClick={() => setLocale('ru')}
-                        >
-                            RU
-                        </button>
-                    </div>
+                <div className="language-toggle" style={{ position: 'static' }}>
+                    <button className={`lang-btn ${locale === 'en' ? 'active' : ''}`} onClick={() => setLocale('en')}>EN</button>
+                    <div className="divider" />
+                    <button className={`lang-btn ${locale === 'ru' ? 'active' : ''}`} onClick={() => setLocale('ru')}>RU</button>
                 </div>
             </header>
 
-            {/* Global Access QR Overlay */}
-            {showQr && (
-                <div className="card fade-in highlight-card" style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 1000, boxShadow: '0 0 100px rgba(0,0,0,0.8)', width: '90%', maxWidth: 400 }}>
-                    <div className="card-header">
-                        <QrCode size={20} color="var(--primary)" />
-                        <h3>{t('active_session')}</h3>
-                        <button className="btn-icon-small" onClick={() => setShowQr(false)} style={{ marginLeft: 'auto' }}>
-                            <X size={18} />
-                        </button>
-                    </div>
-                    <div className="qr-container" style={{ marginTop: 0, paddingBottom: '2rem' }}>
-                        <div className="qr-box">
-                            <QRCodeSVG
-                                value={connectionUrl}
-                                size={250}
-                                level="H"
-                            />
-                        </div>
-                        <p className="text-muted" style={{ fontSize: '0.9rem', marginTop: '2rem', wordBreak: 'break-all', padding: '0 1rem', lineHeight: 1.4 }}>
-                            {connectionUrl}
-                        </p>
-                    </div>
+            {message && <div className="glass-panel" style={{ padding: '0.8rem 1rem', marginBottom: '1rem' }}>{message}</div>}
+
+            {showQr && listenerUrl && (
+                <div className="card fade-in highlight-card" style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 1000, width: '90%', maxWidth: 400 }}>
+                    <div className="card-header"><QrCode size={20} /><h3>English listener</h3><button className="btn-icon-small" onClick={() => setShowQr(false)} style={{ marginLeft: 'auto' }}><X size={18} /></button></div>
+                    <div className="qr-container"><div className="qr-box"><QRCodeSVG value={listenerUrl} size={250} level="H" /></div><p className="text-muted">{listenerUrl}</p></div>
                 </div>
             )}
 
-            {/* 1. Connection Section */}
-            <div className="card fade-in highlight-card">
-                <div className="card-header">
-                    <Monitor size={20} color="var(--primary)" />
-                    <h3>{t('status')}</h3>
+            {interpreterLink && (
+                <div className="card fade-in highlight-card" style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 1000, width: '90%', maxWidth: 420 }}>
+                    <div className="card-header"><Mic size={20} /><h3>{interpreterLink.channelName} interpreter</h3><button className="btn-icon-small" onClick={() => setInterpreterLink(null)} style={{ marginLeft: 'auto' }}><X size={18} /></button></div>
+                    <div className="qr-container"><div className="qr-box"><QRCodeSVG value={interpreterLink.url} size={250} level="H" /></div>
+                        <p><strong>Code: {interpreterLink.code}</strong></p><p className="text-muted">{interpreterLink.url}</p></div>
                 </div>
+            )}
 
+            <div className="card fade-in highlight-card">
+                <div className="card-header"><Monitor size={20} /><h3>System status</h3></div>
                 <div className="connection-info">
-                    <p className="text-muted">{t('welcome_subtitle')}</p>
-                    <div className="url-display">
-                        <code>{connectionUrl}</code>
-                        <button className="btn-icon-small" onClick={toggleMainQr} title="Show Connection QR">
-                            <QrCode size={18} />
-                        </button>
-                    </div>
+                    <p>SFU: <strong>{health?.sfu || 'checking'}</strong></p>
+                    {health?.sfuError && <p style={{ color: 'var(--danger)' }}>{health.sfuError}</p>}
+                    <p>Listener URL: <code>{listenerUrl || 'detecting network'}</code></p>
+                    <p>Certificate: <strong>{health?.certificate.type === 'trusted' ? 'trusted (no warning)' : 'local fallback (browser warning)'}</strong></p>
+                    {health?.certificate.expiresAt && <p className="text-muted">Expires: {new Date(health.certificate.expiresAt).toLocaleDateString()}</p>}
+                    {health?.certificate.error && <p style={{ color: 'var(--danger)' }}>{health.certificate.error}</p>}
+                    <p className="text-muted">Windows Firewall must allow TCP 4173 and UDP 10000–10100.</p>
+                    <button className="btn-primary" disabled={!listenerUrl} onClick={() => setShowQr(true)}><QrCode size={18} /> Show English QR</button>
                 </div>
             </div>
 
-            {/* 2. Language Management Section */}
             <div className="card fade-in">
-                <div className="card-header">
-                    <Languages size={20} color="var(--accent)" />
-                    <h3>{t('live_channels')}</h3>
-                </div>
+                <div className="card-header"><Mic size={20} /><h3>Phone interpreter</h3></div>
+                <p className="text-muted">Create a limited one-time link. The phone can broadcast only the selected language and cannot open admin settings.</p>
+                <select className="custom-select" value={interpreterChannel} onChange={(event) => setInterpreterChannel(event.target.value)}>
+                    {settings.languages.map((language) => <option key={language.id} value={language.name}>{language.name}</option>)}
+                </select>
+                <button className="btn-primary mt-4" disabled={busy || !health} onClick={() => void createInterpreterLink()}><QrCode size={18} /> Create interpreter QR</button>
+            </div>
 
-                <div className="lang-editor-form">
-                    <div className="input-row">
-                        <input
-                            type="text"
-                            placeholder={t('lang_name')}
-                            value={newLangName}
-                            onChange={(e) => setNewLangName(e.target.value)}
-                            className="custom-input"
-                        />
-                        <button className="btn-primary-small" onClick={editingLang ? handleUpdateLanguage : handleAddLanguage}>
-                            {editingLang ? <Save size={18} /> : <Plus size={18} />}
-                            <span>{editingLang ? t('save') : t('add_language')}</span>
-                        </button>
-                    </div>
-                    <textarea
-                        placeholder={t('lang_desc')}
-                        value={newLangDesc}
-                        onChange={(e) => setNewLangDesc(e.target.value)}
-                        className="custom-input mt-2"
-                        rows={2}
-                    />
-                    {editingLang && (
-                        <button className="btn-text mt-2" onClick={() => { setEditingLang(null); setNewLangName(''); setNewLangDesc(''); }}>
-                            {t('cancel')}
-                        </button>
-                    )}
-                </div>
+            <div className="card fade-in">
+                <div className="card-header"><ShieldAlert size={20} /><h3>Trusted phone certificate</h3></div>
+                <p className="text-muted">Free option: create a subdomain at DuckDNS, then enter its name and token here. Lingua Franca will obtain a Let’s Encrypt certificate, point the hostname to this computer on the LAN, and renew it automatically when the app starts.</p>
+                <label>DuckDNS subdomain</label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}><input className="custom-input" value={duckDomain} onChange={(event) => setDuckDomain(event.target.value.replace(/\.duckdns\.org$/i, ''))} placeholder="my-church" /><span>.duckdns.org</span></div>
+                <label className="mt-4">DuckDNS token</label>
+                <input className="custom-input" type="password" value={duckToken} onChange={(event) => setDuckToken(event.target.value)} placeholder="Token from duckdns.org" />
+                <label className="mt-4">Certificate contact email</label>
+                <input className="custom-input" type="email" value={certificateEmail} onChange={(event) => setCertificateEmail(event.target.value)} placeholder="admin@example.com" />
+                <button className="btn-primary mt-4" disabled={busy || !duckDomain || !duckToken || !certificateEmail} onClick={() => void run(async () => {
+                    await settingsService.configureCertificate(duckDomain, duckToken, certificateEmail);
+                    setDuckToken('');
+                    const response = await fetch('/api/health', { cache: 'no-store' });
+                    setHealth(await response.json());
+                }, 'Trusted certificate installed. New QR codes now use the warning-free hostname.')}><ShieldAlert size={18} /> Install / renew free certificate</button>
+            </div>
 
-                <div className="lang-list mt-4">
-                    {settings.languages.map((lang) => (
-                        <div key={lang.id} className="lang-item glass-panel">
-                            <div className="lang-info">
-                                <strong>{lang.name}</strong>
-                                <span className="text-muted">{lang.description}</span>
-                            </div>
-                            <div className="lang-actions">
-                                <button className="btn-icon-subtle" onClick={() => startEditing(lang)}>
-                                    <Edit2 size={16} />
-                                </button>
-                                <button className="btn-icon-subtle text-danger" onClick={() => handleDeleteLanguage(lang.id)}>
-                                    <Trash2 size={16} />
-                                </button>
+            <div className="card fade-in">
+                <div className="card-header"><Languages size={20} /><h3>{t('languages_title')}</h3></div>
+                <div className="add-language-form">
+                    <input value={languageName} onChange={(event) => setLanguageName(event.target.value)} placeholder={t('lang_name')} className="custom-input" />
+                    <input value={languageCode} onChange={(event) => setLanguageCode(event.target.value.toLowerCase().slice(0, 8))} placeholder="ISO code (en, ru)" className="custom-input" style={{ maxWidth: 160 }} />
+                    <button className="btn-primary-small" onClick={saveLanguage} disabled={busy}>{editingLang ? <Save size={18} /> : <Plus size={18} />}</button>
+                </div>
+                <input value={languageDescription} onChange={(event) => setLanguageDescription(event.target.value)} placeholder={t('lang_desc')} className="custom-input" />
+                {editingLang && <button className="btn-secondary mt-4" onClick={resetLanguageForm}>{t('cancel')}</button>}
+                <div className="language-list mt-4">
+                    {settings.languages.map((language) => (
+                        <div key={language.id} className="language-item">
+                            <div><strong>{language.name}</strong> <code>{language.code}</code><p className="text-muted">{language.description}</p></div>
+                            <div className="language-actions">
+                                <button className="btn-icon-small" onClick={() => editLanguage(language)}><Edit2 size={16} /></button>
+                                <button className="btn-icon-small danger" onClick={() => void run(() => settingsService.removeLanguage(language.id), 'Language removed.')}><Trash2 size={16} /></button>
                             </div>
                         </div>
                     ))}
-                    {settings.languages.length === 0 && (
-                        <p className="text-muted" style={{ textAlign: 'center', padding: '1rem' }}>{t('no_channels')}</p>
-                    )}
                 </div>
             </div>
 
-            {/* 3. Security Section */}
             <div className="card fade-in">
-                <div className="card-header">
-                    <Save size={20} color="var(--primary)" />
-                    <h3>{t('change_pin')}</h3>
+                <div className="card-header"><Cpu size={20} /><h3>AI translation</h3></div>
+                <label>Provider</label>
+                <select className="custom-select" value={settings.aiProvider} onChange={(event) => void run(() => settingsService.setAiProvider(event.target.value as AiProvider), 'Provider saved.')}>
+                    <option value="openai">OpenAI Realtime audio</option>
+                    <option value="gemini">Gemini text fallback</option>
+                    <option value="browser">Browser/MyMemory fallback</option>
+                </select>
+                <p className="text-muted">OpenAI configured: {settings.openaiConfigured ? 'yes' : 'no'} · Gemini configured: {settings.geminiConfigured ? 'yes' : 'no'}</p>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <input type={showKey ? 'text' : 'password'} value={openaiKey} onChange={(event) => setOpenaiKey(event.target.value)} placeholder="OpenAI API key" className="custom-input" />
+                    <button className="btn-secondary" onClick={() => setShowKey(!showKey)}>{showKey ? 'Hide' : 'Show'}</button>
                 </div>
-                <div style={{ padding: '0.5rem' }}>
-                    <p className="text-muted mb-4">{t('enter_new_pin')}</p>
-                    <div className="pin-digit-container" style={{ margin: '1rem 0' }}>
-                        {pinDigits.map((digit, idx) => (
-                            <input
-                                key={idx}
-                                id={`setting-pin-${idx}`}
-                                type="text"
-                                inputMode="numeric"
-                                value={digit}
-                                onFocus={(e) => e.target.select()}
-                                onChange={(e) => {
-                                    const val = e.target.value.replace(/\D/g, '');
-                                    const newDigits = [...pinDigits];
-                                    // Take the last digit entered (supports overwrite)
-                                    newDigits[idx] = val.slice(-1);
-                                    setPinDigits(newDigits);
+                <button className="btn-primary mt-4" disabled={!openaiKey || busy} onClick={() => void run(async () => { await settingsService.setOpenAiApiKey(openaiKey); setOpenaiKey(''); }, 'OpenAI key encrypted and saved.')}>Save OpenAI key</button>
+                {settings.openaiConfigured && <button className="btn-secondary mt-4" disabled={busy} onClick={() => void run(async () => { await settingsService.createRealtimeSession('ru', 'en'); }, 'OpenAI Realtime credential test passed.')}>Test OpenAI</button>}
 
-                                    if (val && idx < 3) {
-                                        document.getElementById(`setting-pin-${idx + 1}`)?.focus();
-                                    }
-                                }}
-                                onKeyDown={(e) => {
-                                    if (e.key === 'Backspace' && !pinDigits[idx] && idx > 0) {
-                                        document.getElementById(`setting-pin-${idx - 1}`)?.focus();
-                                    }
-                                }}
-                                className="pin-digit-input"
-                                style={{ width: 50, height: 60, fontSize: '1.5rem' }}
-                                autoComplete="off"
-                            />
-                        ))}
-                    </div>
-                    <button className="btn-primary mt-4" onClick={savePin} style={{ maxWidth: 250, margin: '2rem auto 0' }}>
-                        {t('save')}
-                    </button>
-                </div>
+                <input type="password" value={geminiKey} onChange={(event) => setGeminiKey(event.target.value)} placeholder="Optional Gemini API key" className="custom-input mt-4" />
+                <button className="btn-secondary mt-4" disabled={!geminiKey || busy} onClick={() => void run(async () => { await settingsService.setGeminiApiKey(geminiKey); setGeminiKey(''); }, 'Gemini key encrypted and saved.')}>Save Gemini key</button>
+
+                <label className="mt-4">Church terminology and names</label>
+                <textarea className="custom-input" rows={4} value={settings.glossary} onChange={(event) => setSettings({ ...settings, glossary: event.target.value })} />
+                <button className="btn-secondary mt-4" disabled={busy} onClick={() => void run(() => settingsService.setGlossary(settings.glossary), 'Glossary saved.')}>Save glossary</button>
+                <label className="mt-4" style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <input type="checkbox" checked={settings.recordingEnabled} onChange={(event) => void run(() => settingsService.setRecordingEnabled(event.target.checked), 'Recording preference saved.')} />
+                    Download original and translated recordings when a session stops
+                </label>
             </div>
 
-            {/* 4. AI Settings Section */}
             <div className="card fade-in">
-                <div className="card-header">
-                    <Cpu size={20} color="var(--primary)" />
-                    <h3>{t('ai_mode')} Settings</h3>
+                <div className="card-header"><Monitor size={20} /><h3>Network adapter</h3></div>
+                <select className="custom-select" value={settings.preferredAddress} onChange={(event) => void run(() => settingsService.setPreferredAddress(event.target.value), 'Network saved. Restart the app to apply it.')}>
+                    <option value="">Automatic</option>
+                    {health?.addresses.map((entry) => <option key={`${entry.name}-${entry.address}`} value={entry.address}>{entry.name}: {entry.address}</option>)}
+                </select>
+            </div>
+
+            <div className="card fade-in">
+                <div className="card-header"><Save size={20} /><h3>Security</h3></div>
+                <p className="text-muted">Enter a new four-digit administrator PIN. The current PIN is never sent to browsers.</p>
+                <div className="pin-digit-container">
+                    {pinDigits.map((digit, index) => (
+                        <input key={index} type="password" inputMode="numeric" maxLength={1} value={digit} className="pin-digit-input"
+                            onChange={(event) => {
+                                if (!/^\d?$/.test(event.target.value)) return;
+                                const next = [...pinDigits]; next[index] = event.target.value; setPinDigits(next);
+                            }} />
+                    ))}
                 </div>
-                <div style={{ padding: '0.5rem' }}>
-                    <p className="text-muted mb-4">{t('no_key_warning')}</p>
-                    
-                    <div style={{ display: 'flex', gap: '1rem', flexDirection: 'column', width: '100%' }}>
-                        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                            <input
-                                type={showKey ? 'text' : 'password'}
-                                placeholder={t('gemini_api_key')}
-                                value={geminiKey}
-                                onChange={(e) => setGeminiKey(e.target.value)}
-                                className="custom-input"
-                                style={{ flex: 1 }}
-                            />
-                            <button
-                                className="btn-secondary"
-                                style={{ width: 'auto', padding: '0.75rem 1rem', height: '42px', fontSize: '0.9rem' }}
-                                onClick={() => setShowKey(!showKey)}
-                            >
-                                {showKey ? 'Hide' : 'Show'}
-                            </button>
-                        </div>
-
-                        <button className="btn-primary" onClick={handleSaveGeminiKey} style={{ maxWidth: 250, margin: '1rem 0 0' }}>
-                            {t('save')} Key
-                        </button>
-
-                        <div className="glass-panel" style={{ marginTop: '2rem', padding: '1.5rem' }}>
-                            <h4 style={{ marginBottom: '1rem', fontSize: '1.1rem' }}>{t('test_translation')} (EN → ES)</h4>
-                            <input
-                                type="text"
-                                value={testInput}
-                                onChange={(e) => setTestInput(e.target.value)}
-                                className="custom-input"
-                                style={{ marginBottom: '1rem' }}
-                            />
-                            <button
-                                className="btn-secondary"
-                                style={{ padding: '0.75rem 1.5rem', width: 'auto' }}
-                                onClick={handleTestTranslation}
-                                disabled={testing}
-                            >
-                                {testing ? t('loading') : t('test_translation')}
-                            </button>
-
-                            {testResult && (
-                                <div style={{ marginTop: '1.5rem', background: 'rgba(255,255,255,0.05)', padding: '1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
-                                    <strong style={{ fontSize: '0.85rem', color: 'var(--primary)', textTransform: 'uppercase', display: 'block', marginBottom: '0.25rem' }}>
-                                        Result
-                                    </strong>
-                                    <p style={{ fontSize: '1rem', wordBreak: 'break-all' }}>{testResult}</p>
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                </div>
+                <button className="btn-primary mt-4" disabled={pinDigits.some((digit) => !digit) || busy} onClick={() => void run(async () => { await settingsService.setAdminPin(pinDigits.join('')); setPinDigits(['', '', '', '']); }, 'PIN changed.')}>{t('save')}</button>
             </div>
         </div>
     );

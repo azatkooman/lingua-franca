@@ -1,579 +1,241 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Mic, Cpu } from 'lucide-react';
-import { useState, useEffect, useRef } from 'react';
-import { voiceService } from '../lib/VoiceService';
-import { settingsService, type Language } from '../lib/SettingsService';
+import { ArrowLeft, Cpu, Mic, Radio, RefreshCw, ShieldAlert, Square } from 'lucide-react';
+import { SYSTEM_AUDIO_DEVICE_ID, voiceService } from '../lib/VoiceService';
+import { settingsService, type AppSettings, type Language } from '../lib/SettingsService';
+import { realtimeTranslationService, type TranslationUpdate } from '../lib/RealtimeTranslationService';
 import { useTranslation } from '../lib/i18n';
 import './Interpreter.css';
 import './Listener.css';
 
+interface TranscriptItem { id: number; original: string; translations: Record<string, string>; latencyMs?: number; }
+
 export default function Interpreter() {
     const navigate = useNavigate();
     const { t } = useTranslation();
+    const [settings, setSettings] = useState<AppSettings>(settingsService.getSettings());
+    const isAdmin = settingsService.isAdminAuthenticated();
+    const authorizedChannel = settingsService.getInterpreterChannel();
+    const isDesktopApp = voiceService.isDesktopApp();
+    const [mode, setMode] = useState<'human' | 'ai'>('human');
     const [isLive, setIsLive] = useState(false);
-    const [languages, setLanguages] = useState<Language[]>([]);
-    const [language, setLanguage] = useState('');
     const [status, setStatus] = useState(t('offline'));
-    const [listenersCount, setListenersCount] = useState(0);
-    const [isMuted, setIsMuted] = useState(false);
+    const [humanLanguage, setHumanLanguage] = useState(authorizedChannel || 'English');
+    const [sourceLanguage, setSourceLanguage] = useState('Русский');
+    const [targets, setTargets] = useState<Set<string>>(new Set(['English']));
     const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([]);
     const [selectedMic, setSelectedMic] = useState('');
+    const [isMuted, setIsMuted] = useState(false);
     const [signalLevel, setSignalLevel] = useState(0);
-
-    // AI Translation States
-    const [mode, setMode] = useState<'human' | 'ai'>('human');
-    const [sourceLang, setSourceLang] = useState('English');
-    const [selectedTargets, setSelectedTargets] = useState<Set<string>>(new Set());
-    const [transcript, setTranscript] = useState<{ original: string; translations: Record<string, string>; id: number }[]>([]);
-    const [interimText, setInterimText] = useState('');
-
+    const [listeners, setListeners] = useState(0);
+    const [microphoneAccess, setMicrophoneAccess] = useState('checking');
+    const [transcript, setTranscript] = useState<TranscriptItem[]>([]);
+    const recognitionRef = useRef<{ stop: () => void; start: () => void; onend: (() => void) | null } | null>(null);
     const meterCleanup = useRef<(() => void) | null>(null);
-    const recognitionRef = useRef<any>(null);
+    const liveRef = useRef(false);
 
-    // Refs for AI callbacks to avoid stale state closures
-    const isLiveRef = useRef(false);
-    const modeRef = useRef<'human' | 'ai'>('human');
-    const sourceLangRef = useRef('English');
-    const selectedTargetsRef = useRef<Set<string>>(new Set());
-
+    useEffect(() => settingsService.subscribe(setSettings), []);
     useEffect(() => {
-        isLiveRef.current = isLive;
-    }, [isLive]);
-
-    useEffect(() => {
-        modeRef.current = mode;
-    }, [mode]);
-
-    useEffect(() => {
-        sourceLangRef.current = sourceLang;
-    }, [sourceLang]);
-
-    useEffect(() => {
-        selectedTargetsRef.current = selectedTargets;
-    }, [selectedTargets]);
-
-    useEffect(() => {
-        const unsubscribe = settingsService.subscribe(s => {
-            setLanguages(s.languages);
-            
-            // Set default language selections
-            if (s.languages.length > 0) {
-                if (!language) {
-                    setLanguage(s.languages[0].name);
-                }
-                if (!sourceLang) {
-                    setSourceLang(s.languages[0].name);
-                }
-            }
-        });
-
-        // Fetch microphones
-        voiceService.getMicrophones().then(mics => {
-            setMicrophones(mics);
-            if (mics.length > 0) setSelectedMic(mics[0].deviceId);
-        });
-
-        return unsubscribe;
-    }, [language, sourceLang]);
-
-    // Cleanup on unmount
-    useEffect(() => {
-        return () => {
-            if (modeRef.current === 'ai') {
-                stopAiBroadcast();
-            } else {
-                voiceService.stopBroadcast();
-            }
-            if (meterCleanup.current) {
-                meterCleanup.current();
-                meterCleanup.current = null;
-            }
-        };
+        if (!isDesktopApp) return;
+        void fetch('/api/health', { cache: 'no-store' }).then((response) => response.json())
+            .then((health: { microphoneAccess?: string }) => setMicrophoneAccess(health.microphoneAccess || 'unknown'))
+            .catch(() => setMicrophoneAccess('unknown'));
+    }, [isDesktopApp]);
+    useEffect(() => { liveRef.current = isLive; }, [isLive]);
+    const refreshMicrophones = useCallback(async (requestPermission = false) => {
+        try {
+            const devices = await voiceService.getMicrophones(requestPermission);
+            setMicrophones(devices);
+            const remembered = localStorage.getItem('lingua_franca_microphone') || '';
+            setSelectedMic((current) => {
+                const preferred = current || remembered;
+                return devices.some((device) => device.deviceId === preferred) ? preferred : '';
+            });
+            if (!devices.length) setStatus('No microphone or audio input was detected.');
+        } catch (error) {
+            setMicrophones([]);
+            setStatus(`Microphone: ${error instanceof Error ? error.message : String(error)}`);
+        }
     }, []);
 
-    const handleFinalPhrase = async (text: string) => {
-        if (!text || selectedTargetsRef.current.size === 0) return;
+    useEffect(() => {
+        const refreshTimer = window.setTimeout(() => void refreshMicrophones(isDesktopApp), 0);
+        const mediaDevices = navigator.mediaDevices;
+        const handleDeviceChange = () => void refreshMicrophones(false);
+        mediaDevices?.addEventListener('devicechange', handleDeviceChange);
+        return () => { window.clearTimeout(refreshTimer); mediaDevices?.removeEventListener('devicechange', handleDeviceChange); };
+    }, [refreshMicrophones, isDesktopApp]);
 
-        const phraseId = Date.now();
-        const currentTargets = Array.from(selectedTargetsRef.current);
-        const currentSource = sourceLangRef.current;
+    const stopBroadcast = useCallback(async () => {
+        liveRef.current = false;
+        setIsLive(false); setIsMuted(false); setStatus(t('offline')); setSignalLevel(0); setListeners(0);
+        recognitionRef.current?.stop(); recognitionRef.current = null;
+        meterCleanup.current?.(); meterCleanup.current = null;
+        if (mode === 'ai') {
+            await realtimeTranslationService.stop();
+            await Promise.all([...targets].map((target) => voiceService.setTextChannel(target, false).catch(() => undefined)));
+        } else voiceService.stopBroadcast();
+    }, [mode, targets, t]);
 
-        // Optimistically insert transcript container
-        const newEntry = { original: text, translations: {} as Record<string, string>, id: phraseId };
-        setTranscript(prev => [newEntry, ...prev].slice(0, 50));
+    useEffect(() => () => { void realtimeTranslationService.stop(false); voiceService.stopBroadcast(); }, []);
 
-        // Call the translate endpoint in parallel for each target
-        currentTargets.forEach(async (target) => {
-            try {
-                const res = await fetch('/api/translate', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        text,
-                        sourceLang: currentSource,
-                        targetLang: target
-                    })
-                });
-
-                if (res.ok) {
-                    const data = await res.json();
-                    const translatedText = data.translatedText;
-
-                    // Emit translation via Socket.io
-                    voiceService.sendTranslationText(target, translatedText, text);
-
-                    // Update UI transcript list
-                    setTranscript(prev => prev.map(item => {
-                        if (item.id === phraseId) {
-                            return {
-                                ...item,
-                                translations: {
-                                    ...item.translations,
-                                    [target]: translatedText
-                                }
-                            };
-                        }
-                        return item;
-                    }));
-                }
-            } catch (err) {
-                console.error(`AI translation failed for ${target}:`, err);
+    const updateTranscript = (update: TranslationUpdate) => {
+        setTranscript((previous) => {
+            const first = previous[0];
+            if (first && first.original === update.originalText) {
+                return [{ ...first, translations: { ...first.translations, [update.targetName]: update.translatedText }, latencyMs: update.latencyMs }, ...previous.slice(1)];
             }
+            return [{ id: Date.now(), original: update.originalText, translations: { [update.targetName]: update.translatedText }, latencyMs: update.latencyMs }, ...previous].slice(0, 50);
         });
     };
 
-    const startAiBroadcast = async () => {
-        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-        if (!SpeechRecognition) {
-            alert("Speech recognition is not supported in this browser. Please use Chrome or Safari.");
-            setStatus(t('offline'));
-            return;
-        }
+    const startBrowserFallback = async (source: Language, targetLanguages: Language[]) => {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) throw new Error('Browser speech recognition is unavailable. Use OpenAI Realtime or current Chrome/Edge.');
+        await voiceService.getInputStream(selectedMic);
+        await Promise.all(targetLanguages.map((target) => voiceService.setTextChannel(target.name, true)));
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true; recognition.interimResults = true; recognition.lang = source.code;
+        recognition.onresult = (event: SpeechRecognitionEvent) => {
+            for (let index = event.resultIndex; index < event.results.length; index += 1) {
+                if (!event.results[index].isFinal) continue;
+                const original = event.results[index][0].transcript.trim();
+                if (!original) continue;
+                void Promise.all(targetLanguages.map(async (target) => {
+                    const result = await settingsService.translateText(original, source.name, target.name);
+                    voiceService.sendTranslationText(target.name, result.translatedText, original);
+                    updateTranscript({ targetName: target.name, translatedText: result.translatedText, originalText: original });
+                })).catch((error) => setStatus(error instanceof Error ? error.message : String(error)));
+            }
+        };
+        recognition.onerror = (event: SpeechRecognitionErrorEvent) => setStatus(`Recognition: ${event.error}`);
+        recognition.onend = () => { if (liveRef.current) recognition.start(); };
+        recognitionRef.current = recognition;
+        recognition.start();
+    };
 
-        if (selectedTargets.size === 0) {
-            alert("Please select at least one Target Language to translate into.");
-            setStatus(t('offline'));
-            return;
-        }
-
+    const startBroadcast = async () => {
         setStatus(t('starting'));
         try {
-            // 1. Mark target channels as live in AI mode
-            for (const target of selectedTargets) {
-                await settingsService.updateLanguagePeerId(target, 'ai-active');
-            }
-
-            // 2. Connect signaling socket
-            await voiceService.startBroadcast(
-                'ai-session', 
-                () => {},
-                () => {},
-                selectedMic
-            ).catch(err => {
-                console.warn('WebRTC audio transport failed, but continuing in text-only signaling mode: ', err);
-            });
-
-            // 3. Initialize Speech Recognition
-            const rec = new SpeechRecognition();
-            rec.continuous = true;
-            rec.interimResults = true;
-
-            const langMap: Record<string, string> = {
-                'english': 'en-US',
-                'spanish': 'es-ES',
-                'español': 'es-ES',
-                'french': 'fr-FR',
-                'français': 'fr-FR',
-                'german': 'de-DE',
-                'deutsch': 'de-DE',
-                'russian': 'ru-RU',
-                'русский': 'ru-RU'
-            };
-
-            const locale = langMap[sourceLang.toLowerCase()] || 'en-US';
-            rec.lang = locale;
-
-            let finalTranscript = '';
-
-            rec.onresult = (event: any) => {
-                let interim = '';
-                for (let i = event.resultIndex; i < event.results.length; ++i) {
-                    if (event.results[i].isFinal) {
-                        finalTranscript = event.results[i][0].transcript.trim();
-                        if (finalTranscript) {
-                            handleFinalPhrase(finalTranscript);
-                            finalTranscript = '';
-                        }
-                    } else {
-                        interim += event.results[i][0].transcript;
-                    }
-                }
-                setInterimText(interim);
-            };
-
-            rec.onerror = (event: any) => {
-                console.error("Speech Recognition Error:", event.error);
-                if (isLiveRef.current) {
-                    setStatus(`Error: ${event.error}`);
-                }
-            };
-
-            rec.onend = () => {
-                // Auto restart if still live
-                if (isLiveRef.current && modeRef.current === 'ai') {
-                    try {
-                        recognitionRef.current.start();
-                    } catch (e) {
-                        console.error("Failed to auto-restart recognition:", e);
-                    }
-                }
-            };
-
-            recognitionRef.current = rec;
-            rec.start();
-
-            setIsLive(true);
-            setIsMuted(false);
-            setStatus(t('on_air'));
-        } catch (err: any) {
-            console.error("AI Broadcast start failed:", err);
-            setIsLive(false);
-            setStatus(err.message || "Failed to start AI");
-        }
-    };
-
-    const stopAiBroadcast = async () => {
-        setIsLive(false);
-        setStatus(t('offline'));
-        setSignalLevel(0);
-        setInterimText('');
-
-        if (recognitionRef.current) {
-            recognitionRef.current.onend = null;
-            try {
-                recognitionRef.current.stop();
-            } catch (e) {}
-            recognitionRef.current = null;
-        }
-
-        voiceService.stopBroadcast();
-
-        // Mark target channels as offline
-        const targets = Array.from(selectedTargetsRef.current);
-        for (const target of targets) {
-            await settingsService.updateLanguagePeerId(target, undefined);
-        }
-    };
-
-    const toggleBroadcast = async () => {
-        if (mode === 'ai') {
-            if (isLive) {
-                await stopAiBroadcast();
-            } else {
-                await startAiBroadcast();
-            }
-            return;
-        }
-
-        // Traditional Human Mode
-        if (isLive) {
-            voiceService.stopBroadcast();
-            setIsLive(false);
-            setStatus(t('offline'));
-            setListenersCount(0);
-            setSignalLevel(0);
-            if (meterCleanup.current) {
-                meterCleanup.current();
-                meterCleanup.current = null;
-            }
-        } else {
-            setStatus(t('starting'));
-            try {
-                await voiceService.startBroadcast(
-                    language,
-                    (newStatus) => setStatus(newStatus),
-                    (count) => setListenersCount(count),
-                    selectedMic
-                );
-                setIsLive(true);
-                setIsMuted(false);
-
-                // Start level meter
+            if (mode === 'human') {
+                await voiceService.startBroadcast(humanLanguage, setStatus, setListeners, selectedMic);
+                localStorage.setItem('lingua_franca_microphone', selectedMic);
+                void refreshMicrophones(false);
                 const stream = voiceService.getBroadcastStream();
-                if (stream) {
-                    if (meterCleanup.current) meterCleanup.current();
-                    meterCleanup.current = voiceService.createLevelMeter(stream, (level) => {
-                        setSignalLevel(level);
-                    });
-                }
-            } catch (err: any) {
-                console.error("Broadcast start failed:", err);
-                setIsLive(false);
-                setStatus(err.message || t('mic_denied'));
+                if (stream) meterCleanup.current = voiceService.createLevelMeter(stream, setSignalLevel);
+            } else {
+                const source = settings.languages.find((language) => language.name === sourceLanguage);
+                const targetLanguages = settings.languages.filter((language) => targets.has(language.name) && language.name !== sourceLanguage);
+                if (!source || !targetLanguages.length) throw new Error('Choose a source and at least one different target language.');
+                if (settings.aiProvider === 'openai') {
+                    await realtimeTranslationService.start(source, targetLanguages, selectedMic, setStatus, updateTranscript, setListeners);
+                } else await startBrowserFallback(source, targetLanguages);
+                const stream = voiceService.getBroadcastStream();
+                if (stream) meterCleanup.current = voiceService.createLevelMeter(stream, setSignalLevel);
+                setStatus(settings.aiProvider === 'openai' ? 'OpenAI translating live' : 'Text fallback translating live');
             }
+            liveRef.current = true; setIsLive(true);
+        } catch (error) {
+            liveRef.current = false; setIsLive(false);
+            setStatus(error instanceof Error ? error.message : String(error));
+            await realtimeTranslationService.stop(false);
+            voiceService.stopBroadcast();
         }
     };
 
     const toggleMute = () => {
-        const newMuteState = !isMuted;
-        setIsMuted(newMuteState);
-        voiceService.setMuted(newMuteState);
-        setStatus(newMuteState ? t('interpreter_muted') : t('on_air'));
+        const next = !isMuted; setIsMuted(next);
+        if (mode === 'ai') realtimeTranslationService.setMuted(next); else voiceService.setMuted(next);
     };
 
     return (
         <div className="page-container">
             <header className="page-header">
-                <button className="btn-icon" onClick={() => navigate(-1)} title={t('back')}>
-                    <ArrowLeft size={24} />
-                </button>
-                <h2>{t('interpreter_studio')}</h2>
-                <div style={{ width: 24 }}></div>
+                <button className="btn-icon" onClick={() => navigate(-1)} title={t('back')}><ArrowLeft size={24} /></button>
+                <h2>{t('be_interpreter')}</h2><div style={{ width: 24 }} />
             </header>
 
-            <div className="card interpreter-card fade-in">
-                {/* 1. Mode Tabs */}
-                <div className="mode-toggle-tabs" style={{ display: 'flex', background: 'rgba(255, 255, 255, 0.05)', borderRadius: 'var(--radius-md)', padding: '0.25rem', marginBottom: '2rem' }}>
-                    <button
-                        className={`tab-btn ${mode === 'human' ? 'active' : ''}`}
-                        style={{ flex: 1, padding: '0.75rem', textAlign: 'center', borderRadius: 'var(--radius-sm)', fontWeight: 600, background: mode === 'human' ? 'var(--primary)' : 'transparent', color: '#fff' }}
-                        onClick={() => !isLive && setMode('human')}
-                        disabled={isLive}
-                    >
-                        {t('human_mode')}
-                    </button>
-                    <button
-                        className={`tab-btn ${mode === 'ai' ? 'active' : ''}`}
-                        style={{ flex: 1, padding: '0.75rem', textAlign: 'center', borderRadius: 'var(--radius-sm)', fontWeight: 600, background: mode === 'ai' ? 'var(--primary)' : 'transparent', color: '#fff' }}
-                        onClick={() => !isLive && setMode('ai')}
-                        disabled={isLive}
-                    >
-                        {t('ai_mode')}
-                    </button>
-                </div>
+            <div className="card fade-in">
+                {isAdmin && <div className="mode-toggle">
+                    <button className={`mode-toggle-btn ${mode === 'human' ? 'active' : ''}`} disabled={isLive} onClick={() => setMode('human')}><Mic size={18} /> Human</button>
+                    <button className={`mode-toggle-btn ${mode === 'ai' ? 'active' : ''}`} disabled={isLive} onClick={() => setMode('ai')}><Cpu size={18} /> AI</button>
+                </div>}
 
-                <div className="status-indicator">
-                    <span style={{ minWidth: 100, textAlign: 'center' }}>
-                        {isLive ? t('on_air') : status}
-                    </span>
+                <label>{t('select_mic')}</label>
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <select className="custom-select" value={selectedMic} disabled={isLive} onChange={(event) => { setSelectedMic(event.target.value); localStorage.setItem('lingua_franca_microphone', event.target.value); }}>
+                        <option value="">System default audio input</option>
+                        {isDesktopApp && <option value={SYSTEM_AUDIO_DEVICE_ID}>System output / loopback (what this computer is playing)</option>}
+                        {microphones.map((microphone, index) => <option key={microphone.deviceId || `input-${index}`} value={microphone.deviceId}>{microphone.label || `Audio input ${index + 1}`}</option>)}
+                    </select>
+                    <button className="btn-secondary" disabled={isLive} onClick={() => void refreshMicrophones(true)} title="Allow microphone access and refresh inputs"><RefreshCw size={18} /></button>
                 </div>
+                <p className="text-muted">{microphones.length} recording input{microphones.length === 1 ? '' : 's'} detected. Choose a microphone/USB interface, or use system output to capture audio playing through Windows. Use refresh after connecting a new device.</p>
+                {isDesktopApp && <p className="text-muted">Windows microphone privacy status: <strong>{microphoneAccess}</strong></p>}
 
-                {/* 2. Language Selection Fields */}
                 {mode === 'human' ? (
-                    <div className="language-selector">
-                        <label>{t('translating_into')}</label>
-                        <select
-                            value={language}
-                            onChange={(e) => setLanguage(e.target.value)}
-                            className="custom-select"
-                            disabled={isLive}
-                        >
-                            {languages.map(lang => (
-                                <option key={lang.id} value={lang.name}>{lang.name}</option>
-                            ))}
-                        </select>
-                    </div>
+                    <><label>{t('target_langs')}</label><select className="custom-select" value={humanLanguage} disabled={isLive || Boolean(authorizedChannel)} onChange={(event) => setHumanLanguage(event.target.value)}>{settings.languages.map((language) => <option key={language.id}>{language.name}</option>)}</select></>
                 ) : (
                     <>
-                        <div className="language-selector">
-                            <label>{t('source_lang')}</label>
-                            <select
-                                value={sourceLang}
-                                onChange={(e) => setSourceLang(e.target.value)}
-                                className="custom-select"
-                                disabled={isLive}
-                            >
-                                {languages.map(lang => (
-                                    <option key={lang.id} value={lang.name}>{lang.name}</option>
-                                ))}
-                            </select>
+                        <div className="glass-panel" style={{ padding: '1rem', margin: '1rem 0' }}>
+                            <strong>Provider: {settings.aiProvider}</strong>
+                            {settings.aiProvider === 'openai' && !settings.openaiConfigured && <p style={{ color: 'var(--danger)' }}><ShieldAlert size={16} /> Add an OpenAI API key in Admin settings.</p>}
+                            <p className="text-muted">OpenAI mode broadcasts one centralized translated voice. Browser/Gemini mode is a text-and-device-voice fallback.</p>
                         </div>
-
-                        <div style={{ margin: '1.5rem 0' }}>
-                            <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500, color: 'var(--text-muted)' }}>
-                                {t('target_langs')}
-                            </label>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', maxHeight: 150, overflowY: 'auto', background: 'rgba(255,255,255,0.02)', padding: '1rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
-                                {languages.map(lang => {
-                                    if (lang.name === sourceLang) return null;
-                                    const isChecked = selectedTargets.has(lang.name);
-                                    return (
-                                        <label key={lang.id} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', cursor: isLive ? 'default' : 'pointer' }}>
-                                            <input
-                                                type="checkbox"
-                                                checked={isChecked}
-                                                disabled={isLive}
-                                                onChange={() => {
-                                                    const newTargets = new Set(selectedTargets);
-                                                    if (isChecked) {
-                                                        newTargets.delete(lang.name);
-                                                    } else {
-                                                        newTargets.add(lang.name);
-                                                    }
-                                                    setSelectedTargets(newTargets);
-                                                }}
-                                                style={{ accentColor: 'var(--primary)', width: 18, height: 18 }}
-                                            />
-                                            <span>{lang.name}</span>
-                                        </label>
-                                    );
-                                })}
-                            </div>
+                        <label>Source language</label>
+                        <select className="custom-select" value={sourceLanguage} disabled={isLive} onChange={(event) => setSourceLanguage(event.target.value)}>{settings.languages.map((language) => <option key={language.id}>{language.name}</option>)}</select>
+                        <label>Target channels</label>
+                        <div className="channel-list">
+                            {settings.languages.filter((language) => language.name !== sourceLanguage).map((language) => (
+                                <button key={language.id} disabled={isLive} className={`channel-btn ${targets.has(language.name) ? 'selected' : ''}`} onClick={() => setTargets((previous) => {
+                                    const next = new Set(previous); if (next.has(language.name)) next.delete(language.name); else next.add(language.name); return next;
+                                })}>{language.name}</button>
+                            ))}
                         </div>
                     </>
                 )}
 
-                {/* 3. Microphone Input Selector */}
-                <div className="language-selector">
-                    <label>{t('select_mic')}</label>
-                    <select
-                        value={selectedMic}
-                        onChange={(e) => setSelectedMic(e.target.value)}
-                        className="custom-select"
-                        disabled={isLive}
-                    >
-                        {microphones.length === 0 ? (
-                            <option value="">No microphones found</option>
-                        ) : (
-                            microphones.map(mic => (
-                                <option key={mic.deviceId} value={mic.deviceId}>
-                                    {mic.label || `Microphone ${mic.deviceId.substring(0, 5)}`}
-                                </option>
-                            ))
-                        )}
-                    </select>
+                <div className="broadcast-visual mt-4">
+                    <div className={`mic-circle ${isLive ? 'live' : ''}`}><Radio size={38} /></div>
+                    <div className="signal-meter" style={{ height: 60 }}><div className="signal-bar" style={{ height: `${signalLevel}%` }} /></div>
+                    <p className={isLive ? 'text-accent' : 'text-muted'}>{status}</p>
+                    {isLive && <p className="text-muted">{listeners} connected listener{listeners === 1 ? '' : 's'}</p>}
                 </div>
 
-                {/* 4. Controls section */}
-                <div className="mic-controls-main" style={{ marginTop: '2rem' }}>
-                    {!isLive ? (
-                        <button
-                            className="btn-primary"
-                            style={{
-                                width: '100%',
-                                height: '80px',
-                                fontSize: '1.5rem',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                gap: '1rem',
-                                background: mode === 'ai' ? 'var(--primary)' : 'var(--accent)'
-                            }}
-                            onClick={toggleBroadcast}
-                        >
-                            {mode === 'ai' ? <Cpu size={32} /> : <Mic size={32} />}
-                            {mode === 'ai' ? t('start_ai') : t('go_live')}
-                        </button>
-                    ) : (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', width: '100%' }}>
-                            {mode === 'human' ? (
-                                <div style={{ display: 'flex', gap: '1rem' }}>
-                                    <button
-                                        className={`btn-primary ${isMuted ? 'muted' : ''}`}
-                                        style={{
-                                            flex: 1,
-                                            height: '80px',
-                                            fontSize: '1.25rem',
-                                            background: isMuted ? 'var(--dark)' : 'var(--accent)',
-                                            border: isMuted ? '2px solid var(--accent)' : 'none'
-                                        }}
-                                        onClick={toggleMute}
-                                    >
-                                        {isMuted ? t('unmute_mic') : t('mute_mic')}
-                                    </button>
-
-                                    <button
-                                        className="btn-primary"
-                                        style={{
-                                            flex: 1,
-                                            height: '80px',
-                                            fontSize: '1.25rem',
-                                            background: 'var(--danger)'
-                                        }}
-                                        onClick={toggleBroadcast}
-                                    >
-                                        {t('stop_broadcast')}
-                                    </button>
-                                </div>
-                            ) : (
-                                <button
-                                    className="btn-primary"
-                                    style={{
-                                        width: '100%',
-                                        height: '80px',
-                                        fontSize: '1.5rem',
-                                        background: 'var(--danger)'
-                                    }}
-                                    onClick={toggleBroadcast}
-                                >
-                                    {t('stop_ai')}
-                                </button>
-                            )}
-
-                            {isMuted && mode === 'human' && (
-                                <div className="mute-warning fade-in" style={{ textAlign: 'center', color: 'var(--danger)', fontWeight: 'bold' }}>
-                                    {t('mute_warning')}
-                                </div>
-                            )}
-                        </div>
-                    )}
+                <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
+                    <button className={isLive ? 'btn-danger' : 'btn-primary'} onClick={() => void (isLive ? stopBroadcast() : startBroadcast())}>{isLive ? <><Square size={18} /> Stop / kill audio</> : <><Radio size={18} /> Start broadcast</>}</button>
+                    {isLive && <button className="btn-secondary" onClick={toggleMute}>{isMuted ? 'Unmute source' : 'Mute source'}</button>}
                 </div>
-
-                {/* 5. Live Transcript / Signal Level Panel */}
-                {mode === 'human' ? (
-                    <div className="stats-panel glass-panel" style={{ opacity: isLive ? 1 : 0.5, marginTop: '2rem' }}>
-                        <div className="stat">
-                            <span className="stat-value">{listenersCount}</span>
-                            <span className="stat-label">{t('listeners')}</span>
-                        </div>
-                        <div className="stat">
-                            <div className="signal-meter" style={{ height: 40, width: 40, padding: 0 }}>
-                                <div className="signal-bar" style={{ height: `${signalLevel}%`, width: 6 }}></div>
-                            </div>
-                            <span className="stat-label">Signal</span>
-                        </div>
-                        <div className="stat">
-                            <span className="stat-value text-accent" style={{ fontSize: '1rem', marginTop: 10 }}>
-                                {status}
-                            </span>
-                            <span className="stat-label">{t('status')}</span>
-                        </div>
-                    </div>
-                ) : (
-                    isLive && (
-                        <div className="glass-panel" style={{ marginTop: '2rem', padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-                            <div>
-                                <h4 style={{ color: 'var(--primary)', marginBottom: '0.5rem', fontSize: '1rem' }}>{t('live_transcript')} ({sourceLang})</h4>
-                                <div style={{ background: 'rgba(0,0,0,0.2)', padding: '1rem', borderRadius: 'var(--radius-sm)', minHeight: 60, border: '1px solid var(--border)' }}>
-                                    <p style={{ fontStyle: 'italic', color: interimText ? 'var(--text-main)' : 'var(--text-muted)' }}>
-                                        {interimText || 'Speak into your microphone...'}
-                                    </p>
-                                </div>
-                            </div>
-
-                            {transcript.length > 0 && (
-                                <div>
-                                    <h4 style={{ color: 'var(--accent)', marginBottom: '0.5rem', fontSize: '1rem' }}>{t('ai_translating_into')}</h4>
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', maxHeight: 200, overflowY: 'auto', paddingRight: '0.5rem' }}>
-                                        {transcript.map((item) => (
-                                            <div key={item.id} style={{ borderBottom: '1px solid var(--border)', paddingBottom: '0.75rem' }}>
-                                                <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', marginBottom: '0.25rem' }}>
-                                                    {item.original}
-                                                </p>
-                                                {Object.entries(item.translations).map(([lang, trans]) => (
-                                                    <p key={lang} style={{ fontSize: '0.95rem', paddingLeft: '0.5rem', borderLeft: '2px solid var(--accent)' }}>
-                                                        <strong>{lang}:</strong> {trans}
-                                                    </p>
-                                                ))}
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    )
-                )}
             </div>
+
+            {mode === 'ai' && transcript.length > 0 && (
+                <div className="card fade-in"><h3>{t('live_transcript')}</h3>
+                    {transcript.map((item) => <div key={item.id} className="glass-panel" style={{ padding: '1rem', marginTop: '0.75rem' }}>
+                        <p className="text-muted">{item.original || 'Listening…'}</p>
+                        {Object.entries(item.translations).map(([language, text]) => <p key={language}><strong>{language}:</strong> {text}</p>)}
+                        {item.latencyMs && <small>First audio latency: {(item.latencyMs / 1000).toFixed(1)} s</small>}
+                    </div>)}
+                </div>
+            )}
         </div>
     );
+}
+
+declare global {
+    interface Window {
+        SpeechRecognition?: new () => SpeechRecognition;
+        webkitSpeechRecognition?: new () => SpeechRecognition;
+    }
+    interface SpeechRecognition {
+        continuous: boolean;
+        interimResults: boolean;
+        lang: string;
+        onresult: ((event: SpeechRecognitionEvent) => void) | null;
+        onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+        onend: (() => void) | null;
+        start(): void;
+        stop(): void;
+    }
+    interface SpeechRecognitionEvent extends Event { resultIndex: number; results: SpeechRecognitionResultList; }
+    interface SpeechRecognitionErrorEvent extends Event { error: string; }
 }

@@ -12,9 +12,10 @@ interface AdminGuardProps {
 export default function AdminGuard({ children }: AdminGuardProps) {
     const navigate = useNavigate();
     const { t, locale, setLocale } = useTranslation();
-    const [isAuthorized, setIsAuthorized] = useState(false);
+    const [isAuthorized, setIsAuthorized] = useState(settingsService.isAdminAuthenticated());
     const [pinDigits, setPinDigits] = useState(['', '', '', '']);
     const [error, setError] = useState(false);
+    const [isChecking, setIsChecking] = useState(false);
 
     const handleDigitChange = (index: number, value: string) => {
         if (!/^\d*$/.test(value)) return;
@@ -42,16 +43,19 @@ export default function AdminGuard({ children }: AdminGuardProps) {
         }
     };
 
-    const verifyPin = (submittedPin: string) => {
-        const correctPin = settingsService.getAdminPin();
-        if (submittedPin === correctPin) {
+    const verifyPin = async (submittedPin: string) => {
+        setIsChecking(true);
+        try {
+            await settingsService.login(submittedPin);
             setIsAuthorized(true);
             setError(false);
-        } else {
+        } catch {
             setError(true);
             setPinDigits(['', '', '', '']);
             const firstInput = document.getElementById('pin-0');
             firstInput?.focus();
+        } finally {
+            setIsChecking(false);
         }
     };
 
@@ -116,8 +120,9 @@ export default function AdminGuard({ children }: AdminGuardProps) {
                             onChange={(e) => handleDigitChange(idx, e.target.value)}
                             onKeyDown={(e) => handleKeyDown(idx, e)}
                             className={`pin-digit-input ${error ? 'error' : ''}`}
-                            autoComplete="off"
+                            autoComplete="one-time-code"
                             autoFocus={idx === 0}
+                            disabled={isChecking}
                         />
                     ))}
                 </div>
@@ -128,11 +133,6 @@ export default function AdminGuard({ children }: AdminGuardProps) {
                     </p>
                 )}
 
-                <div style={{ marginTop: '3rem', textAlign: 'center' }}>
-                    <p className="text-muted" style={{ fontSize: '0.85rem' }}>
-                        {t('default_pin')}: <span style={{ color: 'var(--primary)', fontWeight: 600 }}>1234</span>
-                    </p>
-                </div>
             </div>
         </div>
     );

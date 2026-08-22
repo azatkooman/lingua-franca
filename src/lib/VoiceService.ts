@@ -1,411 +1,313 @@
-import { io, Socket } from 'socket.io-client';
+import { io, type Socket } from 'socket.io-client';
 import * as mediasoupClient from 'mediasoup-client';
+import { settingsService } from './SettingsService';
 
-export interface VoiceConfig {
-    host?: string;
-    port?: number;
-    path?: string;
-    secure?: boolean;
+export interface VoiceConfig { host?: string; port?: number; secure?: boolean; }
+export const SYSTEM_AUDIO_DEVICE_ID = '__lingua_franca_system_audio__';
+type StatusCallback = (status: string) => void;
+
+interface TransportResponse {
+    id: string;
+    iceParameters: mediasoupClient.types.IceParameters;
+    iceCandidates: mediasoupClient.types.IceCandidate[];
+    dtlsParameters: mediasoupClient.types.DtlsParameters;
+    error?: string;
+}
+
+interface ConsumeResponse {
+    id: string;
+    producerId: string;
+    kind: mediasoupClient.types.MediaKind;
+    rtpParameters: mediasoupClient.types.RtpParameters;
+    error?: string;
 }
 
 export class VoiceService {
     private socket: Socket | null = null;
+    private socketAuthToken = '';
     private device: mediasoupClient.Device | null = null;
-    private stream: MediaStream | null = null;
-    private sendTransport: mediasoupClient.types.Transport | null = null;
+    private sourceStream: MediaStream | null = null;
+    private sendTransports = new Map<string, mediasoupClient.types.Transport>();
+    private producers = new Map<string, mediasoupClient.types.Producer>();
     private recvTransport: mediasoupClient.types.Transport | null = null;
-    private producer: mediasoupClient.types.Producer | null = null;
     private consumer: mediasoupClient.types.Consumer | null = null;
-
-    private currentLanguageName: string | null = null;
-    private onStatusChange?: (status: string) => void;
-    private onPeerConnected?: (count: number) => void;
-
-    // Listener state
     private currentListenerChannel: string | null = null;
-    private onListenerStatus?: (status: string) => void;
+    private onListenerStatus?: StatusCallback;
     private onListenerStreamReceived?: (stream: MediaStream) => void;
     private onTranslationTextReceived?: (text: string, originalText: string) => void;
-
+    private onConnectionsChange?: (count: number) => void;
     private config: VoiceConfig = {};
 
-    setConfig(config: VoiceConfig) {
-        this.config = config;
-    }
+    setConfig(config: VoiceConfig) { this.config = config; }
+    getBroadcastStream() { return this.sourceStream; }
+    isDesktopApp() { return /\bElectron\//i.test(navigator.userAgent); }
 
-    getBroadcastStream(): MediaStream | null {
-        return this.stream;
-    }
-
-    async getMicrophones(): Promise<MediaDeviceInfo[]> {
-        try {
-            const devices = await navigator.mediaDevices.enumerateDevices();
-            return devices.filter(device => device.kind === 'audioinput');
-        } catch (err) {
-            console.error("Error enumerating devices", err);
-            return [];
+    private mediaError(error: unknown) {
+        const name = error instanceof DOMException ? error.name : '';
+        const detail = error instanceof Error ? error.message : String(error);
+        if (name === 'NotAllowedError' || name === 'SecurityError') {
+            return new Error('Microphone permission was denied. In Windows Settings, enable Privacy & security → Microphone → Microphone access and “Let desktop apps access your microphone,” then restart Lingua Franca.');
         }
+        if (name === 'NotFoundError') return new Error('Windows reported no recording device. Connect or enable an input in Settings → System → Sound → Input.');
+        if (name === 'NotReadableError' || name === 'AbortError') return new Error('Windows could not open the input. Close other audio applications or disable exclusive mode for this recording device, then refresh.');
+        if (name === 'OverconstrainedError') return new Error('The selected audio device is no longer available. Refresh the input list and choose it again.');
+        return new Error(`${name ? `${name}: ` : ''}${detail || 'Unknown audio-device error.'}`);
     }
 
-    private getSocketUrl(): string {
+    async getMicrophones(requestPermission = false) {
+        try {
+            if (!navigator.mediaDevices?.enumerateDevices) throw new Error('This browser does not expose audio-device enumeration.');
+            if (requestPermission) {
+                const permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                permissionStream.getTracks().forEach((track) => track.stop());
+                await new Promise((resolve) => window.setTimeout(resolve, 150));
+            }
+            // Windows/Chromium can update endpoint labels and IDs asynchronously after permission is granted.
+            const firstPass = await navigator.mediaDevices.enumerateDevices();
+            await new Promise((resolve) => window.setTimeout(resolve, 100));
+            const secondPass = await navigator.mediaDevices.enumerateDevices();
+            const byId = new Map<string, MediaDeviceInfo>();
+            for (const device of [...firstPass, ...secondPass]) {
+                if (device.kind === 'audioinput' && device.deviceId) byId.set(device.deviceId, device);
+            }
+            const devices = [...byId.values()].sort((left, right) => (left.label || '').localeCompare(right.label || ''));
+            if (!devices.length) throw new Error('Chromium returned zero recording devices. Check Windows microphone privacy and confirm the device is enabled under System → Sound → Input.');
+            return devices;
+        }
+        catch (error) { console.error('Error enumerating devices:', error); throw this.mediaError(error); }
+    }
+
+    async getInputStream(deviceId?: string) {
+        if (!navigator.mediaDevices?.getUserMedia) throw new Error('Microphone access requires HTTPS or localhost.');
+        this.sourceStream?.getTracks().forEach((track) => track.stop());
+        if (deviceId === SYSTEM_AUDIO_DEVICE_ID) {
+            if (!this.isDesktopApp() || !navigator.mediaDevices.getDisplayMedia) {
+                throw new Error('System-output capture is available only in the desktop app.');
+            }
+            let displayStream: MediaStream;
+            try { displayStream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true }); }
+            catch (error) { throw this.mediaError(error); }
+            displayStream.getVideoTracks().forEach((track) => { track.stop(); displayStream.removeTrack(track); });
+            if (!displayStream.getAudioTracks().length) throw new Error('Windows did not provide a system-audio track.');
+            this.sourceStream = displayStream;
+            return displayStream;
+        }
+        const audio: MediaTrackConstraints = {
+                deviceId: deviceId ? { exact: deviceId } : undefined,
+                echoCancellation: false,
+                noiseSuppression: true,
+                autoGainControl: false,
+                channelCount: 1,
+                sampleRate: 48000,
+        };
+        try {
+            this.sourceStream = await navigator.mediaDevices.getUserMedia({ audio });
+        } catch (error) {
+            if (!deviceId || !(error instanceof DOMException) || !['NotFoundError', 'OverconstrainedError'].includes(error.name)) throw this.mediaError(error);
+            try { this.sourceStream = await navigator.mediaDevices.getUserMedia({ audio: { ...audio, deviceId: undefined } }); }
+            catch (fallbackError) { throw this.mediaError(fallbackError); }
+        }
+        return this.sourceStream;
+    }
+
+    private socketUrl() {
         if (this.config.host) {
             const protocol = this.config.secure ? 'https' : 'http';
             return `${protocol}://${this.config.host}:${this.config.port || (this.config.secure ? 4173 : 4174)}`;
         }
-
-        const defaultHost = window.location.hostname;
-        let defaultPort = parseInt(window.location.port) || (window.location.protocol === 'https:' ? 4173 : 4174);
-
-        if (window.location.port === '5173') {
-            defaultPort = 4173; // Always target HTTPS port for signaling if in dev
-        }
-
-        const protocol = window.location.protocol === 'https:' ? 'https' : 'http';
-        return `${protocol}://${defaultHost}:${defaultPort}`;
+        const host = window.location.hostname;
+        const port = window.location.port === '5173' ? 4173 : (Number(window.location.port) || (window.location.protocol === 'https:' ? 4173 : 4174));
+        return `${window.location.protocol === 'https:' ? 'https' : 'http'}://${host}:${port}`;
     }
 
-    private async connectSocket(): Promise<Socket> {
-        if (this.socket?.connected) return this.socket;
-
-        return new Promise((resolve, reject) => {
-            const url = this.getSocketUrl();
-            console.log("Connecting to SFU Signaling:", url);
-
-            // In Electron/Local env we often use self-signed certs
-            this.socket = io(url, {
-                rejectUnauthorized: false,
-                transports: ['websocket']
+    private async connectSocket() {
+        const authToken = settingsService.getPublisherToken();
+        if (this.socket?.connected && this.socketAuthToken === authToken) return this.socket;
+        if (this.socket) { this.socket.disconnect(); this.socket = null; this.device = null; }
+        return new Promise<Socket>((resolve, reject) => {
+            const socket = io(this.socketUrl(), {
+                transports: ['websocket'],
+                auth: { token: authToken },
+                reconnection: true,
+                reconnectionDelay: 500,
+                reconnectionDelayMax: 5000,
             });
-
-            this.socket.on('connect', () => {
-                console.log('Socket connected');
-                resolve(this.socket!);
-            });
-
-            this.socket.on('connect_error', (err) => {
-                console.error('Socket connection error:', err);
-                reject(err);
-            });
-
-            // Listen for producer availability (for listeners)
-            this.socket.on('producerAvailable', ({ channelName }) => {
-                console.log(`Producer available for channel: ${channelName}`);
-                if (this.currentListenerChannel === channelName && !this.consumer) {
-                    console.log(`Auto-reconnecting to ${channelName}...`);
-                    this.listenToChannel('', channelName, this.onListenerStatus!, this.onListenerStreamReceived!);
+            this.socket = socket;
+            this.socketAuthToken = authToken;
+            socket.once('connect', () => resolve(socket));
+            socket.once('connect_error', reject);
+            socket.on('producerAvailable', ({ channelName }: { channelName: string }) => {
+                if (this.currentListenerChannel === channelName && !this.consumer && this.onListenerStatus && this.onListenerStreamReceived) {
+                    void this.listenToChannel('', channelName, this.onListenerStatus, this.onListenerStreamReceived, undefined, this.onTranslationTextReceived);
                 }
             });
-
-            this.socket.on('producerClosed', ({ channelName }) => {
-                console.log(`Producer closed for channel: ${channelName}`);
-                if (this.currentListenerChannel === channelName) {
-                    this.handleStreamLoss();
-                }
+            socket.on('producerClosed', ({ channelName }: { channelName: string }) => {
+                if (this.currentListenerChannel === channelName) this.handleStreamLoss();
             });
-
-            this.socket.on('translationText', ({ channelName, text, originalText }) => {
-                if (this.currentListenerChannel === channelName) {
-                    this.onTranslationTextReceived?.(text, originalText);
-                }
+            socket.on('translationText', ({ channelName, text, originalText }: { channelName: string; text: string; originalText: string }) => {
+                if (this.currentListenerChannel === channelName) this.onTranslationTextReceived?.(text, originalText);
+            });
+            socket.on('listenerCount', ({ channelName, count }: { channelName: string; count: number }) => {
+                if (this.producers.has(channelName)) this.onConnectionsChange?.(count);
             });
         });
     }
 
-    private async loadDevice(routerRtpCapabilities: any) {
-        try {
+    private async loadDevice() {
+        const socket = await this.connectSocket();
+        const capabilities = await new Promise<mediasoupClient.types.RtpCapabilities & { error?: string }>((resolve) =>
+            socket.emit('getRouterRtpCapabilities', resolve));
+        if (capabilities.error) throw new Error(capabilities.error);
+        if (!this.device?.loaded) {
             this.device = new mediasoupClient.Device();
-            await this.device.load({ routerRtpCapabilities });
-        } catch (error: any) {
-            if (error.name === 'UnsupportedError') {
-                console.error('Browser not supported');
-            }
+            await this.device.load({ routerRtpCapabilities: capabilities });
+        }
+        return socket;
+    }
+
+    async publishTrack(
+        channelName: string,
+        track: MediaStreamTrack,
+        mode: 'human' | 'ai',
+        onStatus: StatusCallback = () => undefined,
+        onConnectionsChange: (count: number) => void = () => undefined,
+    ) {
+        const socket = await this.loadDevice();
+        this.onConnectionsChange = onConnectionsChange;
+        onStatus(`Connecting ${channelName}...`);
+        const transportInfo = await new Promise<TransportResponse>((resolve) =>
+            socket.emit('createWebRtcTransport', { type: 'producer' }, resolve));
+        if (transportInfo.error) throw new Error(transportInfo.error);
+        const transport = this.device!.createSendTransport(transportInfo);
+        this.sendTransports.set(channelName, transport);
+        transport.on('connect', ({ dtlsParameters }, callback, errback) => {
+            socket.emit('connectTransport', { transportId: transport.id, dtlsParameters }, (result?: { error?: string }) =>
+                result?.error ? errback(new Error(result.error)) : callback());
+        });
+        transport.on('produce', ({ kind, rtpParameters }, callback, errback) => {
+            socket.emit('produce', {
+                transportId: transport.id, kind, rtpParameters, appData: { channelName, mode },
+            }, (result: { id?: string; error?: string }) =>
+                result.error || !result.id ? errback(new Error(result.error || 'No producer ID returned.')) : callback({ id: result.id }));
+        });
+        const producer = await transport.produce({ track });
+        this.producers.set(channelName, producer);
+        producer.on('trackended', () => this.stopChannel(channelName));
+        onStatus(`Broadcasting ${channelName}`);
+    }
+
+    async startBroadcast(channelName: string, onStatus: StatusCallback, onConnectionsChange: (count: number) => void, deviceId?: string) {
+        try {
+            const stream = await this.getInputStream(deviceId);
+            await this.publishTrack(channelName, stream.getAudioTracks()[0], 'human', onStatus, onConnectionsChange);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            onStatus(`Error: ${message}`);
             throw error;
         }
     }
 
     setMuted(muted: boolean) {
-        if (this.producer) {
-            if (muted) {
-                this.producer.pause();
-            } else {
-                this.producer.resume();
-            }
+        for (const producer of this.producers.values()) {
+            if (muted) producer.pause(); else producer.resume();
         }
-        // Signaling server can also broadcast this if needed, 
-        // but Mediasoup pause/resume handles it at media level.
+        for (const track of this.sourceStream?.getAudioTracks() || []) track.enabled = !muted;
     }
 
     sendTranslationText(channelName: string, text: string, originalText: string) {
-        if (this.socket?.connected) {
-            this.socket.emit('sendTranslationText', { channelName, text, originalText });
-        }
+        this.socket?.emit('sendTranslationText', { channelName, text, originalText });
     }
 
-    // INTERPRETER: Start broadcasting
-    async startBroadcast(channelName: string,
-        onStatus: (status: string) => void,
-        onConnectionsChange: (count: number) => void,
-        deviceId?: string
-    ) {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            console.error("Secure context or mediaDevices not available");
-            onStatus("Error: Secure context required for microphone access");
-            throw new Error("Microphone access is only available over HTTPS or localhost (Secure Context)");
-        }
-        this.onStatusChange = onStatus;
-        this.onPeerConnected = onConnectionsChange;
-        this.currentLanguageName = channelName;
+    async setTextChannel(channelName: string, active: boolean) {
+        const socket = await this.connectSocket();
+        const result = await new Promise<{ ok?: boolean; error?: string }>((resolve) =>
+            socket.emit('setTextChannel', { channelName, active }, resolve));
+        if (result.error) throw new Error(result.error);
+    }
 
-        try {
-            onStatus("Initializing SFU...");
-            const socket = await this.connectSocket();
-
-            // 1. Get Router Capabilities & Load Device
-            const response: any = await new Promise(resolve =>
-                socket.emit('getRouterRtpCapabilities', resolve)
-            );
-            if (response.error) throw new Error(response.error);
-            await this.loadDevice(response);
-
-            // 2. Get Audio Stream
-            try {
-                this.stream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        deviceId: deviceId ? { exact: deviceId } : undefined,
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
-                        channelCount: 1,
-                        sampleRate: 48000
-                    }
-                });
-            } catch (mediaError: any) {
-                console.error("getUserMedia failed:", mediaError);
-                onStatus(`Error: ${mediaError.name || 'Microphone Error'}`);
-                // Re-throw with more detail
-                const errorToThrow = new Error(`${mediaError.name}: ${mediaError.message}`);
-                (errorToThrow as any).originalError = mediaError;
-                throw errorToThrow;
-            }
-
-            // 3. Create Send Transport on Server
-            const transportInfo: any = await new Promise(resolve =>
-                socket.emit('createWebRtcTransport', { type: 'producer' }, resolve)
-            );
-            if (transportInfo.error) throw new Error(transportInfo.error);
-
-            // 4. Create Send Transport on Client
-            this.sendTransport = this.device!.createSendTransport(transportInfo);
-
-            this.sendTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
-                socket.emit('connectTransport', {
-                    transportId: this.sendTransport!.id,
-                    dtlsParameters
-                }, (err: any) => err ? errback(err) : callback());
-            });
-
-            this.sendTransport.on('produce', ({ kind, rtpParameters, appData }, callback, errback) => {
-                socket.emit('produce', {
-                    transportId: this.sendTransport!.id,
-                    kind,
-                    rtpParameters,
-                    appData: { ...appData, channelName }
-                }, ({ id, error }: any) => error ? errback(error) : callback({ id }));
-            });
-
-            // 5. Produce Audio
-            const track = this.stream.getAudioTracks()[0];
-            this.producer = await this.sendTransport.produce({ track });
-
-            onStatus(`Broadcasting on ${channelName} (SFU)`);
-            onConnectionsChange(1);
-
-            // 6. Update SettingsService to signal "Live" status
-            import('./SettingsService').then(({ settingsService }) => {
-                settingsService.updateLanguagePeerId(channelName, 'sfu-active');
-            });
-
-        } catch (err: any) {
-            console.error("SFU Broadcast Failed", err);
-            onStatus(`Error: ${err.message || 'Check connection'}`);
-            throw err;
-        }
+    stopChannel(channelName: string) {
+        this.producers.get(channelName)?.close();
+        this.sendTransports.get(channelName)?.close();
+        this.producers.delete(channelName);
+        this.sendTransports.delete(channelName);
     }
 
     stopBroadcast() {
-        if (this.currentLanguageName) {
-            const langName = this.currentLanguageName;
-            import('./SettingsService').then(({ settingsService }) => {
-                settingsService.updateLanguagePeerId(langName, undefined);
-            });
-        }
-        this.currentLanguageName = null;
-
-        this.producer?.close();
-        this.sendTransport?.close();
-        this.socket?.disconnect();
-
-        if (this.stream) {
-            this.stream.getTracks().forEach(track => track.stop());
-            this.stream = null;
-        }
-
-        this.producer = null;
-        this.sendTransport = null;
-        this.socket = null;
-        this.onStatusChange?.('Offline');
-        this.onPeerConnected?.(0);
+        for (const channelName of [...this.producers.keys()]) this.stopChannel(channelName);
+        this.sourceStream?.getTracks().forEach((track) => track.stop());
+        this.sourceStream = null;
+        if (!this.currentListenerChannel) { this.socket?.disconnect(); this.socket = null; this.device = null; }
+        this.onConnectionsChange?.(0);
     }
 
-    async listenToChannel(targetPeerId: string,
+    async listenToChannel(
+        _targetPeerId: string,
         channelName: string,
-        onStatus: (status: string) => void,
+        onStatus: StatusCallback,
         onStreamReceived: (stream: MediaStream) => void,
         _onMuteStatusChange?: (muted: boolean) => void,
-        onTranslationTextReceived?: (text: string, originalText: string) => void
+        onTranslationTextReceived?: (text: string, originalText: string) => void,
     ) {
         this.currentListenerChannel = channelName;
         this.onListenerStatus = onStatus;
         this.onListenerStreamReceived = onStreamReceived;
         this.onTranslationTextReceived = onTranslationTextReceived;
-
         try {
-            // Only stop if we are changing channels or forcing a reset
-            // If we are just retrying/reconnecting, we might want to keep the socket.
-            // But for simplicity, let's ensure a clean slate if we aren't already connected to this channel.
-            if (this.consumer && this.currentListenerChannel !== channelName) {
-                this.stopListening();
-            }
-
-            onStatus("Connecting to SFU...");
-            const socket = await this.connectSocket();
-
-            if (targetPeerId === 'ai-active') {
-                onStatus("Connected & Receiving (AI)");
-                return;
-            }
-
-            // 1. Get Router Capabilities & Load Device
-            const response: any = await new Promise(resolve =>
-                socket.emit('getRouterRtpCapabilities', resolve)
-            );
-            if (response.error) throw new Error(response.error);
-            await this.loadDevice(response);
-
-            // 2. Create Recv Transport on Server
-            const transportInfo: any = await new Promise(resolve =>
-                socket.emit('createWebRtcTransport', { type: 'consumer' }, resolve)
-            );
+            this.consumer?.close(); this.recvTransport?.close(); this.consumer = null;
+            onStatus('Connecting...');
+            const socket = await this.loadDevice();
+            const transportInfo = await new Promise<TransportResponse>((resolve) =>
+                socket.emit('createWebRtcTransport', { type: 'consumer' }, resolve));
             if (transportInfo.error) throw new Error(transportInfo.error);
-
-            // 3. Create Recv Transport on Client
             this.recvTransport = this.device!.createRecvTransport(transportInfo);
-
             this.recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
-                socket.emit('connectTransport', {
-                    transportId: this.recvTransport!.id,
-                    dtlsParameters
-                }, (err: any) => err ? errback(err) : callback());
+                socket.emit('connectTransport', { transportId: this.recvTransport!.id, dtlsParameters }, (result?: { error?: string }) =>
+                    result?.error ? errback(new Error(result.error)) : callback());
             });
-
-            // 4. Consume
-            const consumeInfo: any = await new Promise(resolve =>
-                socket.emit('consume', {
-                    transportId: this.recvTransport!.id,
-                    rtpCapabilities: this.device!.rtpCapabilities,
-                    channelName
-                }, resolve)
-            );
-
-            if (consumeInfo.error) {
-                console.log(`Waiting for producer on ${channelName}...`);
-                onStatus(`Waiting for ${channelName}...`);
-                // No need for setTimeout retry anymore, the producerAvailable event will handle it
-                return;
-            }
-
+            const consumeInfo = await new Promise<ConsumeResponse>((resolve) => socket.emit('consume', {
+                transportId: this.recvTransport!.id, rtpCapabilities: this.device!.rtpCapabilities, channelName,
+            }, resolve));
+            if (consumeInfo.error) { onStatus(`Waiting for ${channelName}...`); return; }
             this.consumer = await this.recvTransport.consume(consumeInfo);
-
-            this.consumer.on('transportclose', () => {
-                console.log('Consumer transport closed');
-                this.handleStreamLoss();
-            });
-
-            this.consumer.on('trackended', () => {
-                console.log('Track ended');
-                this.handleStreamLoss();
-            });
-
-            const { track } = this.consumer;
-            onStatus("Connected & Receiving (SFU)");
-            onStreamReceived(new MediaStream([track]));
-
-        } catch (err: any) {
-            console.error("SFU Listen Failed", err);
-            onStatus("Connection error. Waiting...");
-            // The socket connect_error or retry logic will eventually trigger via producerAvailable if it's intermittent
+            this.consumer.on('transportclose', () => this.handleStreamLoss());
+            this.consumer.on('trackended', () => this.handleStreamLoss());
+            onStatus('Connected & receiving');
+            onStreamReceived(new MediaStream([this.consumer.track]));
+        } catch (error) {
+            console.error('Listen failed:', error);
+            onStatus(error instanceof Error && /waiting/i.test(error.message) ? error.message : 'Connection error. Waiting...');
         }
     }
 
     private handleStreamLoss() {
-        this.consumer?.close();
-        this.consumer = null;
-        if (this.onListenerStatus && this.currentListenerChannel) {
-            this.onListenerStatus(`Waiting for ${this.currentListenerChannel}...`);
-        }
+        this.consumer?.close(); this.consumer = null;
+        if (this.currentListenerChannel) this.onListenerStatus?.(`Waiting for ${this.currentListenerChannel}...`);
     }
 
     stopListening() {
         this.currentListenerChannel = null;
-        this.onListenerStatus = undefined;
-        this.onListenerStreamReceived = undefined;
-        this.onTranslationTextReceived = undefined;
-
-        this.consumer?.close();
-        this.recvTransport?.close();
-        this.socket?.disconnect();
-
-        this.consumer = null;
-        this.recvTransport = null;
-        this.socket = null;
+        this.consumer?.close(); this.recvTransport?.close();
+        this.consumer = null; this.recvTransport = null;
+        if (!this.producers.size) { this.socket?.disconnect(); this.socket = null; this.device = null; }
     }
 
-    createLevelMeter(stream: MediaStream, onLevel: (level: number) => void): () => void {
+    createLevelMeter(stream: MediaStream, onLevel: (level: number) => void) {
         try {
-            const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext);
-            const audioContext = new AudioContextClass();
+            const audioContext = new AudioContext();
             const source = audioContext.createMediaStreamSource(stream);
             const analyser = audioContext.createAnalyser();
-            analyser.fftSize = 256;
-            analyser.smoothingTimeConstant = 0.5;
-            source.connect(analyser);
-
-            const dataArray = new Uint8Array(analyser.frequencyBinCount);
-            let animationFrame: number;
-
-            const updateLevel = () => {
-                analyser.getByteFrequencyData(dataArray);
-                let sum = 0;
-                for (let i = 0; i < dataArray.length; i++) {
-                    sum += dataArray[i];
-                }
-                const average = sum / dataArray.length;
-                // Scale level to satisfy user: more linear/logarithmic and capped at reasonably high signal
-                // Average around 2-3 is background noise. 32-64 is speech.
-                const level = Math.max(0, Math.min(100, (average - 3) * 1.2));
-                onLevel(level);
-                animationFrame = requestAnimationFrame(updateLevel);
+            analyser.fftSize = 256; analyser.smoothingTimeConstant = 0.5; source.connect(analyser);
+            const data = new Uint8Array(analyser.frequencyBinCount);
+            let frame = 0;
+            const update = () => {
+                analyser.getByteFrequencyData(data);
+                const average = data.reduce((sum, value) => sum + value, 0) / data.length;
+                onLevel(Math.max(0, Math.min(100, (average - 3) * 1.2)));
+                frame = requestAnimationFrame(update);
             };
-            updateLevel();
-
-            return () => {
-                if (animationFrame) cancelAnimationFrame(animationFrame);
-                if (audioContext.state !== 'closed') audioContext.close();
-            };
-        } catch (e) {
-            console.error('Failed to create audio level meter:', e);
-            return () => { };
-        }
+            update();
+            return () => { cancelAnimationFrame(frame); void audioContext.close(); };
+        } catch (error) { console.error('Level meter failed:', error); return () => undefined; }
     }
 }
 

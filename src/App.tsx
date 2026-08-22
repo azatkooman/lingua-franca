@@ -4,6 +4,7 @@ import Admin from './pages/Admin';
 import Interpreter from './pages/Interpreter';
 import Listener from './pages/Listener';
 import AdminGuard from './components/AdminGuard';
+import InterpreterGuard from './components/InterpreterGuard';
 import './App.css';
 
 function App() {
@@ -21,7 +22,7 @@ function App() {
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/admin" element={<AdminGuard><Admin /></AdminGuard>} />
-            <Route path="/interpreter" element={<Interpreter />} />
+            <Route path="/interpreter" element={<InterpreterGuard><Interpreter /></InterpreterGuard>} />
             <Route path="/listener" element={<Listener />} />
           </Routes>
         </main>

@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Headphones, Volume2, VolumeX, Cpu } from 'lucide-react';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, type CSSProperties } from 'react';
 import { voiceService } from '../lib/VoiceService';
 import { settingsService, type Language } from '../lib/SettingsService';
 import { useTranslation } from '../lib/i18n';
@@ -12,7 +12,7 @@ export default function Listener() {
     const { t } = useTranslation();
     const [isConnected, setIsConnected] = useState(false);
     const [languages, setLanguages] = useState<Language[]>([]);
-    const [channel, setChannel] = useState('');
+    const [channel, setChannel] = useState(() => new URLSearchParams(window.location.search).get('channel') || '');
     const [volume, setVolume] = useState(80);
     const [isMuted, setIsMuted] = useState(false);
     const [status, setStatus] = useState(t('loading'));
@@ -26,35 +26,12 @@ export default function Listener() {
 
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const meterCleanup = useRef<(() => void) | null>(null);
+    const activeLanguage = languages.find((language) => language.name === channel) || selectedLanguage;
 
     // Subscribe to settings
     useEffect(() => {
         return settingsService.subscribe(s => setLanguages(s.languages));
     }, []);
-
-    useEffect(() => {
-        // Handle deep-linking via query params
-        const params = new URLSearchParams(window.location.search);
-        const urlChannel = params.get('channel');
-        if (urlChannel && languages.length > 0) {
-            const matchedLang = languages.find(l => l.name.toLowerCase() === urlChannel.toLowerCase());
-            if (matchedLang) {
-                setChannel(matchedLang.name);
-                setSelectedLanguage(matchedLang);
-            }
-        }
-    }, [languages]);
-
-    // Re-connect if the activePeerId changes for our selected channel
-    useEffect(() => {
-        if (isConnected && selectedLanguage && channel) {
-            const currentLang = languages.find(l => l.name === channel);
-            if (currentLang && currentLang.activePeerId !== selectedLanguage.activePeerId) {
-                setSelectedLanguage(currentLang);
-                connectToChannel(currentLang);
-            }
-        }
-    }, [languages, isConnected, channel]);
 
     useEffect(() => {
         // Create audio element for playback
@@ -91,9 +68,6 @@ export default function Listener() {
     const speakText = (text: string, languageName: string) => {
         if (!window.speechSynthesis) return;
 
-        // Cancel current speak
-        window.speechSynthesis.cancel();
-
         const utterance = new SpeechSynthesisUtterance(text);
         
         const langMap: Record<string, string> = {
@@ -123,7 +97,7 @@ export default function Listener() {
     };
 
     const connectToChannel = (langOverride?: Language) => {
-        const lang = langOverride || selectedLanguage;
+        const lang = langOverride || languages.find((language) => language.name.toLowerCase() === channel.toLowerCase()) || selectedLanguage;
         if (!lang) return;
 
         setIsConnected(true);
@@ -131,35 +105,10 @@ export default function Listener() {
 
         if (!lang.activePeerId) {
             setStatus(t('waiting_interpreter'));
-            return;
         }
 
-        if (lang.activePeerId === 'ai-active') {
-            setStatus(t('connected_receiving'));
-            setIsInterpreterMuted(false);
-
-            voiceService.listenToChannel(
-                'ai-active',
-                lang.name,
-                (newStatus) => setStatus(newStatus),
-                () => {}, // Empty stream
-                () => {}, // Empty mute
-                (text, originalText) => {
-                    setSubtitleText(text);
-                    setOriginalSubtitleText(originalText);
-                    speakText(text, lang.name);
-
-                    // Signal animation trigger
-                    setSignalLevel(60);
-                    setTimeout(() => setSignalLevel(0), 1200);
-                }
-            );
-            return;
-        }
-
-        // Traditional Human WebRTC stream
         voiceService.listenToChannel(
-            lang.activePeerId,
+            lang.activePeerId || '',
             lang.name,
             (newStatus) => setStatus(newStatus),
             (stream) => {
@@ -182,7 +131,13 @@ export default function Listener() {
             },
             (muted) => {
                 setIsInterpreterMuted(muted);
-            }
+            },
+            (text, originalText) => {
+                setSubtitleText(text);
+                setOriginalSubtitleText(originalText);
+                // Text fallback has no centralized media producer, so the device speaks it.
+                if (!audioRef.current?.srcObject) speakText(text, lang.name);
+            },
         );
     };
 
@@ -277,7 +232,7 @@ export default function Listener() {
             ) : (
                 <div className="card active-listener fade-in">
                     {/* AI Mode Active Badge */}
-                    {selectedLanguage?.activePeerId === 'ai-active' && (
+                    {activeLanguage?.activePeerId === 'ai-active' && (
                         <div style={{ textAlign: 'center' }}>
                             <div className="ai-active-badge" style={{ background: 'var(--primary-glow)', border: '1px solid var(--primary)', padding: '0.25rem 0.75rem', borderRadius: 'var(--radius-full)', fontSize: '0.85rem', fontWeight: 600, color: 'var(--primary)', marginBottom: '1.5rem', display: 'inline-block' }}>
                                 {t('ai_active')}
@@ -289,8 +244,8 @@ export default function Listener() {
                         <div className="ring ring-1"></div>
                         <div className="ring ring-2"></div>
                         <div className="ring ring-3"></div>
-                        <div className="center-orb bg-primary" style={{ background: selectedLanguage?.activePeerId === 'ai-active' ? 'var(--primary)' : 'var(--accent)' }}>
-                            {selectedLanguage?.activePeerId === 'ai-active' ? <Cpu size={40} color="white" /> : <Headphones size={40} color="white" />}
+                        <div className="center-orb bg-primary" style={{ background: activeLanguage?.activePeerId === 'ai-active' ? 'var(--primary)' : 'var(--accent)' }}>
+                            {activeLanguage?.activePeerId === 'ai-active' ? <Cpu size={40} color="white" /> : <Headphones size={40} color="white" />}
                         </div>
                     </div>
 
@@ -300,7 +255,7 @@ export default function Listener() {
                     </p>
 
                     {/* Subtitles Area for AI Mode */}
-                    {selectedLanguage?.activePeerId === 'ai-active' && (
+                    {activeLanguage?.activePeerId === 'ai-active' && (
                         <div className="glass-panel" style={{ width: '100%', minHeight: '120px', margin: '2rem 0', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', textAlign: 'center', padding: '1.5rem', background: 'rgba(255,255,255,0.03)' }}>
                             <p style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-main)', lineHeight: 1.4, marginBottom: originalSubtitleText ? '0.5rem' : 0 }}>
                                 {subtitleText || 'Waiting for speech...'}
@@ -325,7 +280,7 @@ export default function Listener() {
                             min="0"
                             max="100"
                             value={isMuted ? 0 : volume}
-                            style={{ '--volume-percent': `${isMuted ? 0 : volume}%` } as any}
+                            style={{ '--volume-percent': `${isMuted ? 0 : volume}%` } as CSSProperties}
                             onChange={(e) => {
                                 setVolume(parseInt(e.target.value));
                                 if (isMuted) setIsMuted(false);

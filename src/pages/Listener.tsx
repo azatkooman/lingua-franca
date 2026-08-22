@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Headphones, Volume2, VolumeX, Cpu } from 'lucide-react';
+import { ArrowLeft, Headphones, Volume2, VolumeX, Cpu, Ear } from 'lucide-react';
 import { useState, useEffect, useRef, type CSSProperties } from 'react';
 import { voiceService } from '../lib/VoiceService';
 import { settingsService, type Language } from '../lib/SettingsService';
@@ -15,6 +15,8 @@ export default function Listener() {
     const [channel, setChannel] = useState(() => new URLSearchParams(window.location.search).get('channel') || '');
     const [volume, setVolume] = useState(80);
     const [isMuted, setIsMuted] = useState(false);
+    const [playbackMode, setPlaybackMode] = useState<'speaker' | 'earpiece'>('speaker');
+    const [playbackHint, setPlaybackHint] = useState('');
     const [status, setStatus] = useState(t('loading'));
     const [isInterpreterMuted, setIsInterpreterMuted] = useState(false);
     const [selectedLanguage, setSelectedLanguage] = useState<Language | null>(null);
@@ -25,8 +27,63 @@ export default function Listener() {
     const [originalSubtitleText, setOriginalSubtitleText] = useState('');
 
     const audioRef = useRef<HTMLAudioElement | null>(null);
+    const playbackModeRef = useRef<'speaker' | 'earpiece'>('speaker');
     const meterCleanup = useRef<(() => void) | null>(null);
     const activeLanguage = languages.find((language) => language.name === channel) || selectedLanguage;
+
+    type AudioSessionNavigator = Navigator & {
+        audioSession?: { type: 'auto' | 'playback' | 'play-and-record' };
+        mediaDevices: MediaDevices & {
+            selectAudioOutput?: () => Promise<MediaDeviceInfo>;
+        };
+    };
+
+    type SinkAudioElement = HTMLAudioElement & {
+        setSinkId?: (sinkId: string) => Promise<void>;
+    };
+
+    const applyPlaybackMode = async (mode: 'speaker' | 'earpiece') => {
+        const audio = audioRef.current as SinkAudioElement | null;
+        if (!audio) return;
+
+        const phoneNavigator = navigator as AudioSessionNavigator;
+        let routedToNamedDevice = false;
+        let audioSessionApplied = false;
+        setPlaybackHint(mode === 'speaker' ? t('speaker_active') : t('earpiece_requested'));
+
+        try {
+            if (phoneNavigator.audioSession) {
+                phoneNavigator.audioSession.type = mode === 'speaker' ? 'playback' : 'play-and-record';
+                audioSessionApplied = true;
+            }
+
+            if (audio.setSinkId && navigator.mediaDevices?.enumerateDevices) {
+                const outputs = (await navigator.mediaDevices.enumerateDevices())
+                    .filter((device) => device.kind === 'audiooutput');
+                const pattern = mode === 'speaker'
+                    ? /speaker|speakerphone|loudspeaker|громк/i
+                    : /earpiece|receiver|handset|телефон|динамик вызова/i;
+                const matchingOutput = outputs.find((device) => pattern.test(device.label));
+
+                if (matchingOutput) {
+                    await audio.setSinkId(matchingOutput.deviceId);
+                    routedToNamedDevice = true;
+                } else if (mode === 'speaker') {
+                    // Empty sink ID restores the normal media/speaker output.
+                    await audio.setSinkId('');
+                }
+            }
+
+            if (mode === 'earpiece' && !routedToNamedDevice && !audioSessionApplied) {
+                setPlaybackHint(t('earpiece_fallback'));
+            } else {
+                setPlaybackHint(mode === 'speaker' ? t('speaker_active') : t('earpiece_active'));
+            }
+        } catch (error) {
+            console.warn('Audio output routing is controlled by the phone:', error);
+            setPlaybackHint(mode === 'speaker' ? t('speaker_active') : t('earpiece_fallback'));
+        }
+    };
 
     // Subscribe to settings
     useEffect(() => {
@@ -37,6 +94,7 @@ export default function Listener() {
         // Create audio element for playback
         const audio = new Audio();
         audio.autoplay = true;
+        audio.setAttribute('playsinline', '');
         audioRef.current = audio;
 
         // Proactively load SpeechSynthesis voices
@@ -61,7 +119,11 @@ export default function Listener() {
 
     useEffect(() => {
         if (audioRef.current) {
-            audioRef.current.volume = isMuted ? 0 : volume / 100;
+            audioRef.current.muted = isMuted;
+            audioRef.current.volume = volume / 100;
+        }
+        if (isMuted && window.speechSynthesis) {
+            window.speechSynthesis.cancel();
         }
     }, [volume, isMuted]);
 
@@ -84,7 +146,8 @@ export default function Listener() {
 
         const locale = langMap[languageName.toLowerCase()] || 'en-US';
         utterance.lang = locale;
-        utterance.volume = isMuted ? 0 : volume / 100;
+        // Read from the audio element so delayed translation callbacks respect the latest controls.
+        utterance.volume = audioRef.current?.muted ? 0 : (audioRef.current?.volume ?? volume / 100);
 
         // Find match voice
         const voices = window.speechSynthesis.getVoices();
@@ -114,9 +177,8 @@ export default function Listener() {
             (stream) => {
                 if (audioRef.current) {
                     audioRef.current.srcObject = stream;
-                    audioRef.current.muted = false;
-                    audioRef.current.volume = volume / 100;
                     audioRef.current.play().then(() => {
+                        void applyPlaybackMode(playbackModeRef.current);
                     }).catch(err => {
                         console.error('Audio playback failed:', err);
                         setStatus(t('no_sound_hint'));
@@ -148,6 +210,7 @@ export default function Listener() {
         setSignalLevel(0);
         setSubtitleText('');
         setOriginalSubtitleText('');
+        setPlaybackHint('');
         if (window.speechSynthesis) {
             window.speechSynthesis.cancel();
         }
@@ -268,11 +331,50 @@ export default function Listener() {
                         </div>
                     )}
 
+                    <div className="playback-controls glass-panel" role="group" aria-label={t('audio_output')}>
+                        <button
+                            type="button"
+                            className={`playback-mode-btn ${playbackMode === 'earpiece' ? 'active' : ''}`}
+                            aria-pressed={playbackMode === 'earpiece'}
+                            onClick={() => {
+                                playbackModeRef.current = 'earpiece';
+                                setPlaybackMode('earpiece');
+                                void applyPlaybackMode('earpiece');
+                            }}
+                        >
+                            <Ear size={22} />
+                            <span>{t('earpiece')}</span>
+                        </button>
+                        <button
+                            type="button"
+                            className={`playback-mode-btn ${playbackMode === 'speaker' ? 'active' : ''}`}
+                            aria-pressed={playbackMode === 'speaker'}
+                            onClick={() => {
+                                playbackModeRef.current = 'speaker';
+                                setPlaybackMode('speaker');
+                                void applyPlaybackMode('speaker');
+                            }}
+                        >
+                            <Volume2 size={22} />
+                            <span>{t('speaker')}</span>
+                        </button>
+                        <button
+                            type="button"
+                            className={`playback-mode-btn mute-btn ${isMuted ? 'active muted' : ''}`}
+                            aria-pressed={isMuted}
+                            onClick={() => setIsMuted((muted) => !muted)}
+                        >
+                            <VolumeX size={22} />
+                            <span>{isMuted ? t('unmute_audio') : t('mute_audio')}</span>
+                        </button>
+                    </div>
+                    {playbackHint && <p className="playback-hint">{playbackHint}</p>}
+
                     <div className="volume-control glass-panel">
                         <div className="signal-meter">
                             <div className="signal-bar" style={{ height: `${signalLevel}%` }}></div>
                         </div>
-                        <button className="btn-icon" onClick={() => setIsMuted(!isMuted)}>
+                        <button className="btn-icon" onClick={() => setIsMuted(!isMuted)} aria-label={isMuted ? t('unmute_audio') : t('mute_audio')}>
                             {isMuted || volume === 0 ? <VolumeX size={20} /> : <Volume2 size={20} />}
                         </button>
                         <input

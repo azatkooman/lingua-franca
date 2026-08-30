@@ -16,7 +16,8 @@
     "electron:build:win": "npm run build && node scripts/preflight-windows.cjs && electron-builder --win --x64",
     "test:load": "node scripts/load-test.cjs",
     "test": "node --test 'lib/*.test.cjs'",
-    "test:server": "node scripts/server-smoke.cjs"
+    "test:server": "node scripts/server-smoke.cjs",
+    "electron:build:mac": "bash scripts/build-mac.sh"
   },
   "build": {
     "appId": "com.linguafranca.app",

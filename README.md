@@ -30,6 +30,30 @@ npm run electron:dev
 
 The Vite dev server proxies `/api` and `/socket.io` to the Electron process, so the app behaves the same as a packaged build.
 
+## macOS build
+
+Windows is the deployment target; macOS builds are useful for development and demos.
+
+```bash
+npm run electron:build:mac
+```
+
+This packages the app, signs it, and only then wraps it in a DMG — in that order deliberately.
+electron-builder skips signing when no Developer ID is installed, and an unsigned arm64 bundle
+will not launch at all, so building the DMG in a single pass seals an app that cannot run.
+
+If a **Developer ID Application** identity is in the keychain the script uses it. Otherwise it
+falls back to an ad-hoc signature, which runs fine locally but is neither trusted by Gatekeeper
+nor notarised. An ad-hoc build that is emailed, AirDropped or downloaded picks up a quarantine
+flag and macOS will refuse to open it; the recipient must clear it:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Lingua Franca.app"
+```
+
+Copying the DMG onto a machine by hand (USB, local file share) does not set that flag. For
+anything wider, a paid Apple Developer account for signing and notarisation is the real fix.
+
 ## Capacity
 
 Every WebRTC transport needs an ICE port. Lingua Franca puts all transports on a single shared port (10000), so listener capacity is bounded by CPU and Wi-Fi rather than by a port range. If that port cannot be bound at startup, the app falls back to allocating a port per transport, which limits the room to roughly 45 phones — Admin shows a warning when this happens, and restarting usually clears it.

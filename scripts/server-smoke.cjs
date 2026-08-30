@@ -121,11 +121,14 @@ async function run() {
         return `keys=[${Object.keys(body).join(',')}]`;
     });
 
-    await check('the API stays up when the media engine cannot start', async () => {
+    // Passes either way on purpose: with LINGUA_FRANCA_WORKER_BIN set this confirms the SFU
+    // really starts, and without it that the API stays up when the media engine cannot.
+    await check('the API serves health whatever state the media engine is in', async () => {
         const { status, body } = await json('/api/health');
         assert.equal(status, 200);
-        assert.equal(body.sfu, 'unavailable');
-        return 'health served with sfu=unavailable';
+        assert.ok(['ready', 'unavailable'].includes(body.sfu), `unexpected sfu state: ${body.sfu}`);
+        assert.equal(body.ok, body.sfu === 'ready');
+        return `sfu=${body.sfu}`;
     });
 
     await check('operator health requires a session', async () => {

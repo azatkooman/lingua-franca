@@ -1,41 +1,55 @@
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Headphones, Volume2, VolumeX, Cpu, Ear } from 'lucide-react';
-import { useState, useEffect, useRef, type CSSProperties } from 'react';
+import { useState, useEffect, useMemo, useRef, type CSSProperties } from 'react';
 import { voiceService } from '../lib/VoiceService';
 import { settingsService, type Language } from '../lib/SettingsService';
 import { useTranslation } from '../lib/i18n';
 import './Interpreter.css';
 import './Listener.css';
 
+// Older printed QR codes carry the channel display name; current ones carry the stable id.
+// Accept either so previously distributed codes keep working after a rename.
+function resolveChannel(languages: Language[], requested: string): Language | null {
+    if (!requested) return null;
+    const wanted = requested.toLowerCase();
+    return languages.find((language) => language.id.toLowerCase() === wanted)
+        || languages.find((language) => language.name.toLowerCase() === wanted)
+        || null;
+}
+
 export default function Listener() {
     const navigate = useNavigate();
     const { t } = useTranslation();
     const [isConnected, setIsConnected] = useState(false);
     const [languages, setLanguages] = useState<Language[]>([]);
-    const [channel, setChannel] = useState(() => new URLSearchParams(window.location.search).get('channel') || '');
+    const [requestedChannel] = useState(() => new URLSearchParams(window.location.search).get('channel') || '');
+    const [selectedId, setSelectedId] = useState('');
     const [volume, setVolume] = useState(80);
     const [isMuted, setIsMuted] = useState(false);
     const [playbackMode, setPlaybackMode] = useState<'speaker' | 'earpiece'>('speaker');
     const [playbackHint, setPlaybackHint] = useState('');
     const [status, setStatus] = useState(t('loading'));
+    const [notice, setNotice] = useState('');
     const [isInterpreterMuted, setIsInterpreterMuted] = useState(false);
-    const [selectedLanguage, setSelectedLanguage] = useState<Language | null>(null);
     const [signalLevel, setSignalLevel] = useState(0);
 
-    // AI Translation States
     const [subtitleText, setSubtitleText] = useState('');
     const [originalSubtitleText, setOriginalSubtitleText] = useState('');
 
     const audioRef = useRef<HTMLAudioElement | null>(null);
+    const audioContextRef = useRef<AudioContext | null>(null);
     const playbackModeRef = useRef<'speaker' | 'earpiece'>('speaker');
     const meterCleanup = useRef<(() => void) | null>(null);
-    const activeLanguage = languages.find((language) => language.name === channel) || selectedLanguage;
+    // The channel from the QR link is derived, not stored: it resolves as soon as the channel
+    // list loads, and an explicit tap simply overrides it.
+    const linkedLanguage = useMemo(() => resolveChannel(languages, requestedChannel), [languages, requestedChannel]);
+    const channelId = selectedId || linkedLanguage?.id || '';
+    const linkedChannelMissing = Boolean(requestedChannel) && languages.length > 0 && !linkedLanguage;
+    const activeLanguage = languages.find((language) => language.id === channelId) || null;
+    const isAiChannel = activeLanguage?.activePeerId === 'ai-active';
 
     type AudioSessionNavigator = Navigator & {
         audioSession?: { type: 'auto' | 'playback' | 'play-and-record' };
-        mediaDevices: MediaDevices & {
-            selectAudioOutput?: () => Promise<MediaDeviceInfo>;
-        };
     };
 
     type SinkAudioElement = HTMLAudioElement & {
@@ -85,22 +99,15 @@ export default function Listener() {
         }
     };
 
-    // Subscribe to settings
-    useEffect(() => {
-        return settingsService.subscribe(s => setLanguages(s.languages));
-    }, []);
+    useEffect(() => settingsService.subscribe((settings) => setLanguages(settings.languages)), []);
 
     useEffect(() => {
-        // Create audio element for playback
         const audio = new Audio();
         audio.autoplay = true;
         audio.setAttribute('playsinline', '');
         audioRef.current = audio;
 
-        // Proactively load SpeechSynthesis voices
-        if (window.speechSynthesis) {
-            window.speechSynthesis.getVoices();
-        }
+        if (window.speechSynthesis) window.speechSynthesis.getVoices();
 
         return () => {
             voiceService.stopListening();
@@ -108,12 +115,10 @@ export default function Listener() {
                 audioRef.current.pause();
                 audioRef.current.srcObject = null;
             }
-            if (meterCleanup.current) {
-                meterCleanup.current();
-            }
-            if (window.speechSynthesis) {
-                window.speechSynthesis.cancel();
-            }
+            meterCleanup.current?.();
+            void audioContextRef.current?.close();
+            audioContextRef.current = null;
+            if (window.speechSynthesis) window.speechSynthesis.cancel();
         };
     }, []);
 
@@ -122,83 +127,77 @@ export default function Listener() {
             audioRef.current.muted = isMuted;
             audioRef.current.volume = volume / 100;
         }
-        if (isMuted && window.speechSynthesis) {
-            window.speechSynthesis.cancel();
-        }
+        if (isMuted && window.speechSynthesis) window.speechSynthesis.cancel();
     }, [volume, isMuted]);
 
-    const speakText = (text: string, languageName: string) => {
+    /**
+     * iOS only grants playback while a user gesture is still on the stack. The SFU handshake
+     * takes several awaits, so calling play() once the stream arrives is far too late and the
+     * listener silently hears nothing. Start a silent stream during the tap instead: the
+     * element is then already playing when the real track is swapped in.
+     */
+    const unlockPlayback = () => {
+        const audio = audioRef.current;
+        if (!audio) return;
+        try {
+            const context = audioContextRef.current ?? new AudioContext();
+            audioContextRef.current = context;
+            void context.resume();
+            if (!audio.srcObject) audio.srcObject = context.createMediaStreamDestination().stream;
+            audio.muted = isMuted;
+            audio.volume = volume / 100;
+            void audio.play().catch(() => undefined);
+        } catch (error) {
+            console.warn('Could not pre-authorise audio playback:', error);
+        }
+    };
+
+    const speakText = (text: string, language: Language) => {
         if (!window.speechSynthesis) return;
-
         const utterance = new SpeechSynthesisUtterance(text);
-        
-        const langMap: Record<string, string> = {
-            'english': 'en-US',
-            'spanish': 'es-ES',
-            'español': 'es-ES',
-            'french': 'fr-FR',
-            'français': 'fr-FR',
-            'german': 'de-DE',
-            'deutsch': 'de-DE',
-            'russian': 'ru-RU',
-            'русский': 'ru-RU'
-        };
-
-        const locale = langMap[languageName.toLowerCase()] || 'en-US';
-        utterance.lang = locale;
+        const voices = window.speechSynthesis.getVoices();
+        const code = (language.code || 'en').toLowerCase();
+        const voice = voices.find((candidate) => candidate.lang.toLowerCase().startsWith(code));
+        utterance.lang = voice?.lang || code;
+        if (voice) utterance.voice = voice;
         // Read from the audio element so delayed translation callbacks respect the latest controls.
         utterance.volume = audioRef.current?.muted ? 0 : (audioRef.current?.volume ?? volume / 100);
-
-        // Find match voice
-        const voices = window.speechSynthesis.getVoices();
-        const voice = voices.find(v => v.lang.startsWith(locale) || v.lang === locale);
-        if (voice) {
-            utterance.voice = voice;
-        }
-
         window.speechSynthesis.speak(utterance);
     };
 
-    const connectToChannel = (langOverride?: Language) => {
-        const lang = langOverride || languages.find((language) => language.name.toLowerCase() === channel.toLowerCase()) || selectedLanguage;
-        if (!lang) return;
-
-        setIsConnected(true);
-        setStatus(t('connecting'));
-
-        if (!lang.activePeerId) {
-            setStatus(t('waiting_interpreter'));
+    const connectToChannel = () => {
+        const language = languages.find((entry) => entry.id === channelId);
+        if (!language) {
+            setNotice(t('channel_not_found'));
+            return;
         }
+        setNotice('');
+        unlockPlayback();
+        setIsConnected(true);
+        setStatus(language.activePeerId ? t('connecting') : t('waiting_interpreter'));
 
-        voiceService.listenToChannel(
-            lang.activePeerId || '',
-            lang.name,
+        void voiceService.listenToChannel(
+            language.id,
             (newStatus) => setStatus(newStatus),
             (stream) => {
-                if (audioRef.current) {
-                    audioRef.current.srcObject = stream;
-                    audioRef.current.play().then(() => {
-                        void applyPlaybackMode(playbackModeRef.current);
-                    }).catch(err => {
-                        console.error('Audio playback failed:', err);
-                        setStatus(t('no_sound_hint'));
-                    });
-
-                    // Start level meter
-                    if (meterCleanup.current) meterCleanup.current();
-                    meterCleanup.current = voiceService.createLevelMeter(stream, (level) => {
-                        setSignalLevel(level);
-                    });
-                }
+                const audio = audioRef.current;
+                if (!audio) return;
+                audio.srcObject = stream;
+                audio.play().then(() => {
+                    void applyPlaybackMode(playbackModeRef.current);
+                }).catch((error) => {
+                    console.error('Audio playback failed:', error);
+                    setStatus(t('no_sound_hint'));
+                });
+                meterCleanup.current?.();
+                meterCleanup.current = voiceService.createLevelMeter(stream, setSignalLevel);
             },
-            (muted) => {
-                setIsInterpreterMuted(muted);
-            },
+            (muted) => setIsInterpreterMuted(muted),
             (text, originalText) => {
                 setSubtitleText(text);
                 setOriginalSubtitleText(originalText);
                 // Text fallback has no centralized media producer, so the device speaks it.
-                if (!audioRef.current?.srcObject) speakText(text, lang.name);
+                if (!audioRef.current?.srcObject) speakText(text, language);
             },
         );
     };
@@ -211,13 +210,10 @@ export default function Listener() {
         setSubtitleText('');
         setOriginalSubtitleText('');
         setPlaybackHint('');
-        if (window.speechSynthesis) {
-            window.speechSynthesis.cancel();
-        }
-        if (meterCleanup.current) {
-            meterCleanup.current();
-            meterCleanup.current = null;
-        }
+        setIsInterpreterMuted(false);
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        meterCleanup.current?.();
+        meterCleanup.current = null;
         if (audioRef.current) {
             audioRef.current.pause();
             audioRef.current.srcObject = null;
@@ -243,37 +239,38 @@ export default function Listener() {
                         <h3>{t('select_channel')}</h3>
                     </div>
 
+                    {(notice || linkedChannelMissing) && (
+                        <p className="text-danger" style={{ textAlign: 'center' }}>{notice || t('channel_not_found')}</p>
+                    )}
+
                     <div className="channel-list">
-                        {languages.map((lang) => {
-                            const isLiveChannel = !!lang.activePeerId;
-                            const isAiChannel = lang.activePeerId === 'ai-active';
+                        {languages.map((language) => {
+                            const isLive = Boolean(language.activePeerId);
+                            const isAi = language.activePeerId === 'ai-active';
                             return (
                                 <button
-                                    key={lang.id}
-                                    className={`channel-btn ${channel === lang.name ? 'selected' : ''}`}
-                                    onClick={() => {
-                                        setChannel(lang.name);
-                                        setSelectedLanguage(lang);
-                                    }}
+                                    key={language.id}
+                                    className={`channel-btn ${channelId === language.id ? 'selected' : ''}`}
+                                    onClick={() => { setSelectedId(language.id); setNotice(''); }}
                                     style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', textAlign: 'left', padding: '1rem', position: 'relative' }}
                                 >
-                                    <span style={{ fontWeight: 'bold' }}>{lang.name}</span>
-                                    <span style={{ fontSize: '0.8rem', opacity: 0.7 }}>{lang.description}</span>
-                                    
-                                    {isLiveChannel && (
+                                    <span style={{ fontWeight: 'bold' }}>{language.name}</span>
+                                    <span style={{ fontSize: '0.8rem', opacity: 0.7 }}>{language.description}</span>
+
+                                    {isLive && (
                                         <span style={{
                                             position: 'absolute',
                                             top: '1rem',
                                             right: '1rem',
-                                            background: isAiChannel ? 'var(--primary-glow)' : 'rgba(16, 185, 129, 0.15)',
-                                            color: isAiChannel ? 'var(--primary)' : 'var(--accent)',
-                                            border: `1px solid ${isAiChannel ? 'var(--primary)' : 'var(--accent)'}`,
+                                            background: isAi ? 'var(--primary-glow)' : 'rgba(16, 185, 129, 0.15)',
+                                            color: isAi ? 'var(--primary)' : 'var(--accent)',
+                                            border: `1px solid ${isAi ? 'var(--primary)' : 'var(--accent)'}`,
                                             padding: '0.15rem 0.5rem',
                                             borderRadius: 'var(--radius-full)',
                                             fontSize: '0.7rem',
                                             fontWeight: 'bold'
                                         }}>
-                                            {isAiChannel ? 'AI' : 'LIVE'}
+                                            {isAi ? 'AI' : 'LIVE'}
                                         </span>
                                     )}
                                 </button>
@@ -286,16 +283,15 @@ export default function Listener() {
 
                     <button
                         className="btn-primary mt-4"
-                        disabled={!channel}
-                        onClick={() => connectToChannel()}
+                        disabled={!channelId}
+                        onClick={connectToChannel}
                     >
-                        {t('connect')} {channel || ''}
+                        {t('connect')} {activeLanguage?.name || ''}
                     </button>
                 </div>
             ) : (
                 <div className="card active-listener fade-in">
-                    {/* AI Mode Active Badge */}
-                    {activeLanguage?.activePeerId === 'ai-active' && (
+                    {isAiChannel && (
                         <div style={{ textAlign: 'center' }}>
                             <div className="ai-active-badge" style={{ background: 'var(--primary-glow)', border: '1px solid var(--primary)', padding: '0.25rem 0.75rem', borderRadius: 'var(--radius-full)', fontSize: '0.85rem', fontWeight: 600, color: 'var(--primary)', marginBottom: '1.5rem', display: 'inline-block' }}>
                                 {t('ai_active')}
@@ -307,21 +303,20 @@ export default function Listener() {
                         <div className="ring ring-1"></div>
                         <div className="ring ring-2"></div>
                         <div className="ring ring-3"></div>
-                        <div className="center-orb bg-primary" style={{ background: activeLanguage?.activePeerId === 'ai-active' ? 'var(--primary)' : 'var(--accent)' }}>
-                            {activeLanguage?.activePeerId === 'ai-active' ? <Cpu size={40} color="white" /> : <Headphones size={40} color="white" />}
+                        <div className="center-orb bg-primary" style={{ background: isAiChannel ? 'var(--primary)' : 'var(--accent)' }}>
+                            {isAiChannel ? <Cpu size={40} color="white" /> : <Headphones size={40} color="white" />}
                         </div>
                     </div>
 
-                    <h3 className="listening-title">{t('listener_mode')}: {channel}</h3>
+                    <h3 className="listening-title">{t('listener_mode')}: {activeLanguage?.name}</h3>
                     <p className={`status-text ${isInterpreterMuted ? 'text-danger pulse' : 'text-accent'}`}>
                         {isInterpreterMuted ? t('interpreter_muted') : status}
                     </p>
 
-                    {/* Subtitles Area for AI Mode */}
-                    {activeLanguage?.activePeerId === 'ai-active' && (
+                    {isAiChannel && (
                         <div className="glass-panel" style={{ width: '100%', minHeight: '120px', margin: '2rem 0', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', textAlign: 'center', padding: '1.5rem', background: 'rgba(255,255,255,0.03)' }}>
                             <p style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-main)', lineHeight: 1.4, marginBottom: originalSubtitleText ? '0.5rem' : 0 }}>
-                                {subtitleText || 'Waiting for speech...'}
+                                {subtitleText || t('waiting_for_speech')}
                             </p>
                             {originalSubtitleText && (
                                 <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>

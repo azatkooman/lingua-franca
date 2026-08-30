@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+    <title>Lingua Franca</title>
+    <style>
+      :root { --bg: #0d0f17; --surface: #1a1d2d; --primary: #8b5cf6; --danger: #ef4444; --text: #e6e8f0; --muted: #8b90a8; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+        background: var(--bg); color: var(--text); padding: 2rem;
+        font-family: -apple-system, "Segoe UI", Roboto, system-ui, sans-serif;
+      }
+      .panel { max-width: 34rem; width: 100%; text-align: center; }
+      .logo { font-size: 2rem; font-weight: 700; margin: 0 0 .5rem; }
+      .logo span { color: var(--primary); }
+      .muted { color: var(--muted); line-height: 1.6; }
+      .spinner {
+        width: 2.5rem; height: 2.5rem; margin: 2rem auto 0; border-radius: 50%;
+        border: 3px solid rgba(139, 92, 246, .25); border-top-color: var(--primary);
+        animation: spin 900ms linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+      .error {
+        display: none; margin-top: 1.75rem; padding: 1.25rem 1.5rem; text-align: left;
+        background: var(--surface); border: 1px solid var(--danger);
+        border-radius: .75rem;
+      }
+      .error h2 { margin: 0 0 .5rem; font-size: 1.05rem; color: var(--danger); }
+      .error p { margin: 0 0 1rem; word-break: break-word; }
+      .error ul { margin: 0; padding-left: 1.25rem; }
+      .error li { margin-bottom: .4rem; }
+      body.failed .spinner, body.failed .starting { display: none; }
+      body.failed .error { display: block; }
+    </style>
+  </head>
+  <body>
+    <div class="panel">
+      <h1 class="logo">Lingua<span>Franca</span></h1>
+      <p class="muted starting">Starting the local server and media engine…</p>
+      <div class="spinner"></div>
+      <div class="error">
+        <h2>Lingua Franca could not start</h2>
+        <p id="detail"></p>
+        <ul class="muted">
+          <li>Check whether another copy of Lingua Franca is already running.</li>
+          <li>Confirm nothing else is using TCP port 4173 or 4174.</li>
+          <li>Restart the computer if the media engine will not load.</li>
+        </ul>
+      </div>
+    </div>
+    <script>
+      var detail = new URLSearchParams(location.search).get('error');
+      if (detail) {
+        document.getElementById('detail').textContent = detail;
+        document.body.classList.add('failed');
+      }
+    </script>
+  </body>
+</html>

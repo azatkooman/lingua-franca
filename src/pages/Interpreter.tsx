@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Cpu, Mic, Radio, RefreshCw, ShieldAlert, Square } from 'lucide-react';
 import { SYSTEM_AUDIO_DEVICE_ID, voiceService } from '../lib/VoiceService';
-import { settingsService, type AppSettings, type Language } from '../lib/SettingsService';
+import { settingsService, type AdminSettings, type AppSettings, type Language } from '../lib/SettingsService';
 import { realtimeTranslationService, type TranslationUpdate } from '../lib/RealtimeTranslationService';
 import { useTranslation } from '../lib/i18n';
 import './Interpreter.css';
@@ -14,15 +14,16 @@ export default function Interpreter() {
     const navigate = useNavigate();
     const { t } = useTranslation();
     const [settings, setSettings] = useState<AppSettings>(settingsService.getSettings());
+    const [admin, setAdmin] = useState<AdminSettings | null>(settingsService.getAdminSettings());
     const isAdmin = settingsService.isAdminAuthenticated();
-    const authorizedChannel = settingsService.getInterpreterChannel();
+    const authorizedChannelId = settingsService.getInterpreterChannelId();
     const isDesktopApp = voiceService.isDesktopApp();
     const [mode, setMode] = useState<'human' | 'ai'>('human');
     const [isLive, setIsLive] = useState(false);
     const [status, setStatus] = useState(t('offline'));
-    const [humanLanguage, setHumanLanguage] = useState(authorizedChannel || 'English');
-    const [sourceLanguage, setSourceLanguage] = useState('Русский');
-    const [targets, setTargets] = useState<Set<string>>(new Set(['English']));
+    const [humanChannelId, setHumanChannelId] = useState(authorizedChannelId);
+    const [sourceChannelId, setSourceChannelId] = useState('');
+    const [targetIds, setTargetIds] = useState<Set<string>>(new Set());
     const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([]);
     const [selectedMic, setSelectedMic] = useState('');
     const [isMuted, setIsMuted] = useState(false);
@@ -33,15 +34,49 @@ export default function Interpreter() {
     const recognitionRef = useRef<{ stop: () => void; start: () => void; onend: (() => void) | null } | null>(null);
     const meterCleanup = useRef<(() => void) | null>(null);
     const liveRef = useRef(false);
+    const transcriptId = useRef(0);
+
+    const languages = settings.languages;
+    const languageName = useCallback(
+        (id: string) => languages.find((language) => language.id === id)?.name || id,
+        [languages],
+    );
 
     useEffect(() => settingsService.subscribe(setSettings), []);
+    useEffect(() => settingsService.subscribeAdmin(setAdmin), []);
+
+    // Seed the channel pickers once the configured list arrives, rather than assuming a
+    // channel literally named "English" or "Русский" exists.
+    useEffect(() => {
+        if (!languages.length) return;
+        setHumanChannelId((current) => current || authorizedChannelId || languages[0].id);
+        setSourceChannelId((current) => current || languages[0].id);
+    }, [languages, authorizedChannelId]);
+
+    const targetCandidates = useMemo(
+        () => languages.filter((language) => language.id !== sourceChannelId),
+        [languages, sourceChannelId],
+    );
+
+    // Drop targets that no longer exist or that became the source.
+    useEffect(() => {
+        setTargetIds((previous) => {
+            const allowed = new Set(targetCandidates.map((language) => language.id));
+            const next = new Set([...previous].filter((id) => allowed.has(id)));
+            return next.size === previous.size ? previous : next;
+        });
+    }, [targetCandidates]);
+
     useEffect(() => {
         if (!isDesktopApp) return;
-        void fetch('/api/health', { cache: 'no-store' }).then((response) => response.json())
-            .then((health: { microphoneAccess?: string }) => setMicrophoneAccess(health.microphoneAccess || 'unknown'))
+        void fetch('/api/diagnostics', { cache: 'no-store' })
+            .then((response) => response.ok ? response.json() : Promise.reject(new Error('unavailable')))
+            .then((diagnostics: { microphoneAccess?: string }) => setMicrophoneAccess(diagnostics.microphoneAccess || 'unknown'))
             .catch(() => setMicrophoneAccess('unknown'));
     }, [isDesktopApp]);
+
     useEffect(() => { liveRef.current = isLive; }, [isLive]);
+
     const refreshMicrophones = useCallback(async (requestPermission = false) => {
         try {
             const devices = await voiceService.getMicrophones(requestPermission);
@@ -72,20 +107,33 @@ export default function Interpreter() {
         recognitionRef.current?.stop(); recognitionRef.current = null;
         meterCleanup.current?.(); meterCleanup.current = null;
         if (mode === 'ai') {
+            await Promise.all([...targetIds].map((id) => voiceService.setTextChannel(id, false).catch(() => undefined)));
             await realtimeTranslationService.stop();
-            await Promise.all([...targets].map((target) => voiceService.setTextChannel(target, false).catch(() => undefined)));
-        } else voiceService.stopBroadcast();
-    }, [mode, targets, t]);
+        }
+        // Always release the capture device and the send transports, including in AI mode --
+        // skipping this left the microphone open and the server still holding the producer.
+        voiceService.stopBroadcast();
+    }, [mode, targetIds, t]);
 
-    useEffect(() => () => { void realtimeTranslationService.stop(false); voiceService.stopBroadcast(); }, []);
+    useEffect(() => () => {
+        void realtimeTranslationService.stop(false);
+        voiceService.stopBroadcast();
+    }, []);
 
     const updateTranscript = (update: TranslationUpdate) => {
         setTranscript((previous) => {
             const first = previous[0];
             if (first && first.original === update.originalText) {
-                return [{ ...first, translations: { ...first.translations, [update.targetName]: update.translatedText }, latencyMs: update.latencyMs }, ...previous.slice(1)];
+                return [
+                    { ...first, translations: { ...first.translations, [update.targetName]: update.translatedText }, latencyMs: update.latencyMs },
+                    ...previous.slice(1),
+                ];
             }
-            return [{ id: Date.now(), original: update.originalText, translations: { [update.targetName]: update.translatedText }, latencyMs: update.latencyMs }, ...previous].slice(0, 50);
+            transcriptId.current += 1;
+            return [
+                { id: transcriptId.current, original: update.originalText, translations: { [update.targetName]: update.translatedText }, latencyMs: update.latencyMs },
+                ...previous,
+            ].slice(0, 50);
         });
     };
 
@@ -93,7 +141,7 @@ export default function Interpreter() {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (!SpeechRecognition) throw new Error('Browser speech recognition is unavailable. Use OpenAI Realtime or current Chrome/Edge.');
         await voiceService.getInputStream(selectedMic);
-        await Promise.all(targetLanguages.map((target) => voiceService.setTextChannel(target.name, true)));
+        await Promise.all(targetLanguages.map((target) => voiceService.setTextChannel(target.id, true)));
         const recognition = new SpeechRecognition();
         recognition.continuous = true; recognition.interimResults = true; recognition.lang = source.code;
         recognition.onresult = (event: SpeechRecognitionEvent) => {
@@ -103,8 +151,8 @@ export default function Interpreter() {
                 if (!original) continue;
                 void Promise.all(targetLanguages.map(async (target) => {
                     const result = await settingsService.translateText(original, source.name, target.name);
-                    voiceService.sendTranslationText(target.name, result.translatedText, original);
-                    updateTranscript({ targetName: target.name, translatedText: result.translatedText, originalText: original });
+                    voiceService.sendTranslationText(target.id, result.translatedText, original);
+                    updateTranscript({ targetId: target.id, targetName: target.name, translatedText: result.translatedText, originalText: original });
                 })).catch((error) => setStatus(error instanceof Error ? error.message : String(error)));
             }
         };
@@ -118,21 +166,23 @@ export default function Interpreter() {
         setStatus(t('starting'));
         try {
             if (mode === 'human') {
-                await voiceService.startBroadcast(humanLanguage, setStatus, setListeners, selectedMic);
+                if (!humanChannelId) throw new Error('Choose a language channel first.');
+                await voiceService.startBroadcast(humanChannelId, setStatus, setListeners, selectedMic);
                 localStorage.setItem('lingua_franca_microphone', selectedMic);
                 void refreshMicrophones(false);
                 const stream = voiceService.getBroadcastStream();
                 if (stream) meterCleanup.current = voiceService.createLevelMeter(stream, setSignalLevel);
+                setStatus(`${t('on_air')}: ${languageName(humanChannelId)}`);
             } else {
-                const source = settings.languages.find((language) => language.name === sourceLanguage);
-                const targetLanguages = settings.languages.filter((language) => targets.has(language.name) && language.name !== sourceLanguage);
+                const source = languages.find((language) => language.id === sourceChannelId);
+                const targetLanguages = languages.filter((language) => targetIds.has(language.id) && language.id !== sourceChannelId);
                 if (!source || !targetLanguages.length) throw new Error('Choose a source and at least one different target language.');
-                if (settings.aiProvider === 'openai') {
+                if (admin?.aiProvider === 'openai') {
                     await realtimeTranslationService.start(source, targetLanguages, selectedMic, setStatus, updateTranscript, setListeners);
                 } else await startBrowserFallback(source, targetLanguages);
                 const stream = voiceService.getBroadcastStream();
                 if (stream) meterCleanup.current = voiceService.createLevelMeter(stream, setSignalLevel);
-                setStatus(settings.aiProvider === 'openai' ? 'OpenAI translating live' : 'Text fallback translating live');
+                setStatus(admin?.aiProvider === 'openai' ? 'OpenAI translating live' : 'Text fallback translating live');
             }
             liveRef.current = true; setIsLive(true);
         } catch (error) {
@@ -174,21 +224,38 @@ export default function Interpreter() {
                 {isDesktopApp && <p className="text-muted">Windows microphone privacy status: <strong>{microphoneAccess}</strong></p>}
 
                 {mode === 'human' ? (
-                    <><label>{t('target_langs')}</label><select className="custom-select" value={humanLanguage} disabled={isLive || Boolean(authorizedChannel)} onChange={(event) => setHumanLanguage(event.target.value)}>{settings.languages.map((language) => <option key={language.id}>{language.name}</option>)}</select></>
+                    <>
+                        <label>{t('target_langs')}</label>
+                        <select
+                            className="custom-select"
+                            value={humanChannelId}
+                            disabled={isLive || Boolean(authorizedChannelId)}
+                            onChange={(event) => setHumanChannelId(event.target.value)}
+                        >
+                            {languages.map((language) => <option key={language.id} value={language.id}>{language.name}</option>)}
+                        </select>
+                        {authorizedChannelId && (
+                            <p className="text-muted">This interpreter link is authorised for {settingsService.getInterpreterChannelName()} only.</p>
+                        )}
+                    </>
                 ) : (
                     <>
                         <div className="glass-panel" style={{ padding: '1rem', margin: '1rem 0' }}>
-                            <strong>Provider: {settings.aiProvider}</strong>
-                            {settings.aiProvider === 'openai' && !settings.openaiConfigured && <p style={{ color: 'var(--danger)' }}><ShieldAlert size={16} /> Add an OpenAI API key in Admin settings.</p>}
+                            <strong>Provider: {admin?.aiProvider || 'unknown'}</strong>
+                            {admin?.aiProvider === 'openai' && !admin?.openaiConfigured && <p style={{ color: 'var(--danger)' }}><ShieldAlert size={16} /> Add an OpenAI API key in Admin settings.</p>}
                             <p className="text-muted">OpenAI mode broadcasts one centralized translated voice. Browser/Gemini mode is a text-and-device-voice fallback.</p>
                         </div>
                         <label>Source language</label>
-                        <select className="custom-select" value={sourceLanguage} disabled={isLive} onChange={(event) => setSourceLanguage(event.target.value)}>{settings.languages.map((language) => <option key={language.id}>{language.name}</option>)}</select>
+                        <select className="custom-select" value={sourceChannelId} disabled={isLive} onChange={(event) => setSourceChannelId(event.target.value)}>
+                            {languages.map((language) => <option key={language.id} value={language.id}>{language.name}</option>)}
+                        </select>
                         <label>Target channels</label>
                         <div className="channel-list">
-                            {settings.languages.filter((language) => language.name !== sourceLanguage).map((language) => (
-                                <button key={language.id} disabled={isLive} className={`channel-btn ${targets.has(language.name) ? 'selected' : ''}`} onClick={() => setTargets((previous) => {
-                                    const next = new Set(previous); if (next.has(language.name)) next.delete(language.name); else next.add(language.name); return next;
+                            {targetCandidates.map((language) => (
+                                <button key={language.id} disabled={isLive} className={`channel-btn ${targetIds.has(language.id) ? 'selected' : ''}`} onClick={() => setTargetIds((previous) => {
+                                    const next = new Set(previous);
+                                    if (next.has(language.id)) next.delete(language.id); else next.add(language.id);
+                                    return next;
                                 })}>{language.name}</button>
                             ))}
                         </div>
@@ -200,6 +267,7 @@ export default function Interpreter() {
                     <div className="signal-meter" style={{ height: 60 }}><div className="signal-bar" style={{ height: `${signalLevel}%` }} /></div>
                     <p className={isLive ? 'text-accent' : 'text-muted'}>{status}</p>
                     {isLive && <p className="text-muted">{listeners} connected listener{listeners === 1 ? '' : 's'}</p>}
+                    {isLive && isMuted && <p className="text-danger">{t('mute_warning')}</p>}
                 </div>
 
                 <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
@@ -213,7 +281,7 @@ export default function Interpreter() {
                     {transcript.map((item) => <div key={item.id} className="glass-panel" style={{ padding: '1rem', marginTop: '0.75rem' }}>
                         <p className="text-muted">{item.original || 'Listening…'}</p>
                         {Object.entries(item.translations).map(([language, text]) => <p key={language}><strong>{language}:</strong> {text}</p>)}
-                        {item.latencyMs && <small>First audio latency: {(item.latencyMs / 1000).toFixed(1)} s</small>}
+                        {item.latencyMs !== undefined && <small>First audio latency: {(item.latencyMs / 1000).toFixed(1)} s</small>}
                     </div>)}
                 </div>
             )}

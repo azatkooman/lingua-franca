@@ -14,7 +14,10 @@
     "electron:dev": "concurrently \"npm run dev\" \"wait-on https://localhost:5173 && cross-env NODE_ENV=development electron .\"",
     "electron:build": "npm run build && electron-builder",
     "electron:build:win": "npm run build && node scripts/preflight-windows.cjs && electron-builder --win --x64",
-    "test:load": "node scripts/load-test.cjs"
+    "test:load": "node scripts/load-test.cjs",
+    "test": "node --test 'lib/*.test.cjs'",
+    "test:server": "node scripts/server-smoke.cjs",
+    "electron:build:mac": "bash scripts/build-mac.sh"
   },
   "build": {
     "appId": "com.linguafranca.app",
@@ -24,6 +27,9 @@
     },
     "files": [
       "dist/**/*",
+      "lib/**/*.cjs",
+      "!lib/**/*.test.cjs",
+      "desktop/startup.html",
       "main.cjs",
       "package.json",
       "!**/._*",

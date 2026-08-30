@@ -40,6 +40,7 @@ const REFRESH_INTERVAL_MS = 60_000;
 class SettingsService {
     private settings: AppSettings = EMPTY_SETTINGS;
     private admin: AdminSettings | null = null;
+    private adminFetch: Promise<AdminSettings> | null = null;
     private listeners = new Set<Listener<AppSettings>>();
     private adminListeners = new Set<Listener<AdminSettings | null>>();
     private initialized = false;
@@ -94,6 +95,14 @@ class SettingsService {
     }
 
     private async fetchAdminSettings() {
+        // Share one in-flight request: several components subscribe at mount and would
+        // otherwise each issue their own.
+        if (this.adminFetch) return this.adminFetch;
+        this.adminFetch = this.loadAdminSettings().finally(() => { this.adminFetch = null; });
+        return this.adminFetch;
+    }
+
+    private async loadAdminSettings() {
         const response = await this.adminRequest('/api/admin/settings');
         this.admin = await response.json() as AdminSettings;
         this.settings = { languages: this.admin.languages, interfaceLanguage: this.admin.interfaceLanguage };
@@ -170,6 +179,7 @@ class SettingsService {
     clearAdminSession() {
         this.adminToken = '';
         this.admin = null;
+        this.adminFetch = null;
         sessionStorage.removeItem('lingua_franca_admin_token');
         realtimeSocket.setAuthToken(this.getPublisherToken());
         this.notifyAdmin();

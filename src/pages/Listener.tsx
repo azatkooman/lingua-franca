@@ -251,6 +251,7 @@ export default function Listener() {
                                 <button
                                     key={language.id}
                                     className={`channel-btn ${channelId === language.id ? 'selected' : ''}`}
+                                    aria-pressed={channelId === language.id}
                                     onClick={() => { setSelectedId(language.id); setNotice(''); }}
                                     style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', textAlign: 'left', padding: '1rem', position: 'relative' }}
                                 >

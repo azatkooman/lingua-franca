@@ -190,7 +190,9 @@ export class VoiceService {
     async startBroadcast(channelId: string, onStatus: StatusCallback, onConnectionsChange: (count: number) => void, deviceId?: string) {
         try {
             const stream = await this.getInputStream(deviceId);
-            await this.publishTrack(channelId, stream.getAudioTracks()[0], 'human', onStatus, onConnectionsChange);
+            const [track] = stream.getAudioTracks();
+            if (!track) throw new Error('That input opened but produced no audio track. Choose a different device and try again.');
+            await this.publishTrack(channelId, track, 'human', onStatus, onConnectionsChange);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             onStatus(`Error: ${message}`);

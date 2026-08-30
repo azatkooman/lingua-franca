@@ -64,8 +64,10 @@ class RealtimeTranslationService {
         onStatus(`Connecting OpenAI ${target.name}…`);
         const { value: clientSecret } = await settingsService.createRealtimeSession(sourceLanguage.code, target.code);
         if (!clientSecret) throw new Error(`OpenAI did not return a client secret for ${target.name}.`);
+        const [inputTrack] = this.sourceStream?.getAudioTracks() ?? [];
+        if (!inputTrack) throw new Error('The selected input produced no audio track.');
         const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-        const sourceTrack = this.sourceStream!.getAudioTracks()[0].clone();
+        const sourceTrack = inputTrack.clone();
         // A cloned track carries its own enabled flag, so a mute applied before this target
         // started has to be re-applied here or this leg would keep transmitting.
         sourceTrack.enabled = !this.muted;
@@ -116,15 +118,23 @@ class RealtimeTranslationService {
             } catch (error) { console.error('Invalid OpenAI realtime event:', error); }
         };
 
-        const offer = await peer.createOffer();
-        await peer.setLocalDescription(offer);
-        const answer = await fetch('https://api.openai.com/v1/realtime/translations/calls', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${clientSecret}`, 'Content-Type': 'application/sdp' },
-            body: offer.sdp,
-        });
-        if (!answer.ok) throw new Error(`OpenAI ${target.name} session failed: ${await answer.text()}`);
-        await peer.setRemoteDescription({ type: 'answer', sdp: await answer.text() });
+        try {
+            const offer = await peer.createOffer();
+            await peer.setLocalDescription(offer);
+            const answer = await fetch('https://api.openai.com/v1/realtime/translations/calls', {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${clientSecret}`, 'Content-Type': 'application/sdp' },
+                body: offer.sdp,
+            });
+            if (!answer.ok) throw new Error(`OpenAI ${target.name} session failed: ${await answer.text()}`);
+            await peer.setRemoteDescription({ type: 'answer', sdp: await answer.text() });
+        } catch (error) {
+            // Leave nothing half-negotiated behind if the exchange fails.
+            sourceTrack.stop();
+            peer.close();
+            this.sessions.delete(target.id);
+            throw error;
+        }
     }
 
     /**

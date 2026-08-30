@@ -125,6 +125,22 @@ function isAllowedOriginHeader(origin, settings) {
     catch { return false; }
 }
 
+// Every outbound call goes through here. Without a deadline a stalled DuckDNS, ACME,
+// OpenAI or MyMemory connection hangs its request forever: certificate setup never returns,
+// and the operator is left staring at a spinner minutes before a service starts.
+const OUTBOUND_TIMEOUT_MS = 15_000;
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = OUTBOUND_TIMEOUT_MS) {
+    try {
+        return await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (error) {
+        if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+            throw new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s contacting ${new URL(url).host}.`);
+        }
+        throw error;
+    }
+}
+
 /* ------------------------------------------------------------ certificate */
 
 function certificateDetails(certPem) {
@@ -175,7 +191,7 @@ function ensureSelfSignedCertificate(localAddress) {
 async function updateDuckDns(domain, token, parameters) {
     if (!domain || !token) throw new Error('DuckDNS subdomain and token are required.');
     const query = new URLSearchParams({ domains: domain, token, ...parameters });
-    const response = await fetch(`https://www.duckdns.org/update?${query}`);
+    const response = await fetchWithTimeout(`https://www.duckdns.org/update?${query}`);
     const body = (await response.text()).trim();
     if (!response.ok || !body.startsWith('OK')) throw new Error(`DuckDNS update failed (${body || response.status}).`);
 }
@@ -863,7 +879,7 @@ async function startServers(isDev) {
         const apiKey = revealSecret(settings.openaiApiKeyEncrypted);
         if (!apiKey) return response.status(409).json({ error: 'Add an OpenAI API key in Admin settings first.' });
         try {
-            const upstream = await fetch('https://api.openai.com/v1/realtime/translations/client_secrets', {
+            const upstream = await fetchWithTimeout('https://api.openai.com/v1/realtime/translations/client_secrets', {
                 method: 'POST',
                 headers: {
                     Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json',
@@ -884,7 +900,7 @@ async function startServers(isDev) {
         const geminiKey = revealSecret(settings.geminiApiKeyEncrypted);
         if (settings.aiProvider === 'gemini' && geminiKey) {
             try {
-                const upstream = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+                const upstream = await fetchWithTimeout('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': geminiKey },
                     body: JSON.stringify({ contents: [{ parts: [{ text: `Translate from ${sourceLang} to ${targetLang}. Return only the translation.\n${text}` }] }] }),
@@ -895,7 +911,7 @@ async function startServers(isDev) {
             } catch (error) { console.warn('Gemini translation failed:', error.message); }
         }
         try {
-            const upstream = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${inferLanguageCode(sourceLang)}|${inferLanguageCode(targetLang)}`);
+            const upstream = await fetchWithTimeout(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${inferLanguageCode(sourceLang)}|${inferLanguageCode(targetLang)}`);
             const data = await upstream.json();
             if (upstream.ok && data.responseData?.translatedText) {
                 return response.json({ translatedText: data.responseData.translatedText, provider: 'mymemory' });

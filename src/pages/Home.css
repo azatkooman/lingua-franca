@@ -173,22 +173,6 @@
     background: rgba(255, 255, 255, 0.05);
 }
 
-.fade-in {
-    animation: fadeIn 0.8s ease-out;
-}
-
-@keyframes fadeIn {
-    from {
-        opacity: 0;
-        transform: translateY(20px);
-    }
-
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
 @media (max-width: 640px) {
     .title {
         font-size: 2.5rem;

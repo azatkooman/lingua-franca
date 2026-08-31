@@ -21,6 +21,17 @@ interface HealthInfo {
     ports: { https: number; local: number; rtc: string };
 }
 
+// Operators paste whatever DuckDNS showed them, which may be a full URL. Reduce it to the
+// bare label the server expects rather than rejecting it.
+function normaliseDuckDomain(value: string) {
+    return value
+        .trim()
+        .replace(/^https?:\/\//i, '')
+        .replace(/\/.*$/, '')
+        .replace(/\.duckdns\.org$/i, '')
+        .toLowerCase();
+}
+
 export default function Admin() {
     const navigate = useNavigate();
     const { t, locale, setLocale } = useTranslation();
@@ -193,7 +204,7 @@ export default function Admin() {
                 <div className="card-header"><ShieldAlert size={20} /><h3>Trusted phone certificate</h3></div>
                 <p className="text-muted">Free option: create a subdomain at DuckDNS, then enter its name and token here. Lingua Franca will obtain a Let’s Encrypt certificate, point the hostname to this computer on the LAN, and renew it automatically.</p>
                 <label>DuckDNS subdomain</label>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}><input className="custom-input" value={duckDomain} onChange={(event) => setDuckDomain(event.target.value.replace(/\.duckdns\.org$/i, ''))} placeholder="my-church" /><span>.duckdns.org</span></div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}><input className="custom-input" value={duckDomain} onChange={(event) => setDuckDomain(normaliseDuckDomain(event.target.value))} placeholder="my-church" /><span>.duckdns.org</span></div>
                 <label className="mt-4">DuckDNS token {settings.duckDnsConfigured && <span className="text-muted">(saved — leave blank to keep)</span>}</label>
                 <input className="custom-input" type="password" value={duckToken} onChange={(event) => setDuckToken(event.target.value)} placeholder="Token from duckdns.org" />
                 <label className="mt-4">Certificate contact email</label>
@@ -203,6 +214,14 @@ export default function Admin() {
                     setDuckToken('');
                     await refreshHealth();
                 }, 'Trusted certificate ready. New QR codes now use the warning-free hostname.')}><ShieldAlert size={18} /> Install / renew free certificate</button>
+                {health?.certificate.type === 'trusted' && (
+                    <button className="btn-secondary mt-4" disabled={busy} onClick={() => void run(async () => {
+                        await settingsService.useSelfSignedCertificate();
+                        await refreshHealth();
+                    }, 'Reverted to the local certificate. Restart the app to apply it; phones will warn again.')}>
+                        Stop using the trusted certificate
+                    </button>
+                )}
             </div>
 
             <div className="card fade-in">

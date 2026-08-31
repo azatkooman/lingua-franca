@@ -357,14 +357,16 @@ async function createMedia(isDev, localAddress) {
     return { worker, router, webRtcServer, error: '', portMode };
 }
 
-function transportOptions(localAddress) {
+// announcedAddress is only consulted on the fallback path; a WebRtcServer already carries the
+// address it was created with. Named distinctly so it does not shadow the outer localAddress.
+function transportOptions(announcedAddress) {
     const shared = { enableUdp: true, enableTcp: true, preferUdp: true };
     if (media.webRtcServer) return { ...shared, webRtcServer: media.webRtcServer };
     return {
         ...shared,
         listenInfos: [
-            { protocol: 'udp', ip: '0.0.0.0', announcedAddress: localAddress },
-            { protocol: 'tcp', ip: '0.0.0.0', announcedAddress: localAddress },
+            { protocol: 'udp', ip: '0.0.0.0', announcedAddress },
+            { protocol: 'tcp', ip: '0.0.0.0', announcedAddress },
         ],
     };
 }
@@ -860,6 +862,9 @@ async function startServers(isDev) {
             setPin(settings, String(patch.adminPin));
         }
         if (['en', 'ru'].includes(patch.interfaceLanguage)) settings.interfaceLanguage = patch.interfaceLanguage;
+        // Lets an operator go back to the local certificate. The trusted key and cert are
+        // left on disk so re-enabling does not need a fresh issuance from the CA.
+        if (patch.certificateMode === 'self-signed') settings.certificateMode = 'self-signed';
         if (['openai', 'gemini', 'browser'].includes(patch.aiProvider)) settings.aiProvider = patch.aiProvider;
         if (typeof patch.glossary === 'string') settings.glossary = patch.glossary.slice(0, 8000);
         if (typeof patch.preferredAddress === 'string') settings.preferredAddress = patch.preferredAddress.slice(0, 64);

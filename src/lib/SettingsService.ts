@@ -43,6 +43,7 @@ class SettingsService {
     private adminFetch: Promise<AdminSettings> | null = null;
     private listeners = new Set<Listener<AppSettings>>();
     private adminListeners = new Set<Listener<AdminSettings | null>>();
+    private authListeners = new Set<(authenticated: boolean) => void>();
     private initialized = false;
     private adminToken = sessionStorage.getItem('lingua_franca_admin_token') || '';
     private interpreterToken = sessionStorage.getItem('lingua_franca_interpreter_token') || '';
@@ -65,8 +66,17 @@ class SettingsService {
         });
         void realtimeSocket.connect().catch(() => undefined);
         this.refreshTimer = window.setInterval(() => void this.fetchSettings(), REFRESH_INTERVAL_MS);
-        window.addEventListener('beforeunload', () => window.clearInterval(this.refreshTimer));
+        window.addEventListener('beforeunload', this.dispose);
+        // Vite re-executes this module on hot update, which would otherwise stack a new
+        // interval and a new listener on every reload.
+        import.meta.hot?.dispose(() => this.dispose());
     }
+
+    /** Releases the refresh interval and the unload listener. */
+    dispose = () => {
+        window.clearInterval(this.refreshTimer);
+        window.removeEventListener('beforeunload', this.dispose);
+    };
 
     private restoreCache() {
         const saved = localStorage.getItem(SETTINGS_CACHE_KEY);
@@ -113,6 +123,7 @@ class SettingsService {
 
     private notify() { this.listeners.forEach((listener) => listener(this.settings)); }
     private notifyAdmin() { this.adminListeners.forEach((listener) => listener(this.admin)); }
+    private notifyAuth() { this.authListeners.forEach((listener) => listener(this.isAdminAuthenticated())); }
 
     private async adminRequest(path: string, init: RequestInit = {}) {
         if (!this.adminToken) throw new Error('Administrator login required.');
@@ -146,6 +157,13 @@ class SettingsService {
         return () => { this.listeners.delete(listener); };
     }
 
+    /** Fires when the operator session is established or lost, so guards can re-gate. */
+    subscribeAuth(listener: (authenticated: boolean) => void) {
+        this.authListeners.add(listener);
+        listener(this.isAdminAuthenticated());
+        return () => { this.authListeners.delete(listener); };
+    }
+
     subscribeAdmin(listener: Listener<AdminSettings | null>) {
         this.adminListeners.add(listener);
         listener(this.admin);
@@ -173,6 +191,7 @@ class SettingsService {
         this.adminToken = data.token;
         sessionStorage.setItem('lingua_franca_admin_token', data.token);
         realtimeSocket.setAuthToken(this.getPublisherToken());
+        this.notifyAuth();
         await this.fetchAdminSettings();
     }
 
@@ -183,6 +202,7 @@ class SettingsService {
         sessionStorage.removeItem('lingua_franca_admin_token');
         realtimeSocket.setAuthToken(this.getPublisherToken());
         this.notifyAdmin();
+        this.notifyAuth();
     }
 
     async loginInterpreter(code: string) {
@@ -248,6 +268,8 @@ class SettingsService {
     async setGlossary(glossary: string) { await this.patchAdminSettings({ glossary }); }
     async setPreferredAddress(preferredAddress: string) { await this.patchAdminSettings({ preferredAddress }); }
     async setRecordingEnabled(recordingEnabled: boolean) { await this.patchAdminSettings({ recordingEnabled }); }
+    /** Reverts to the local self-signed certificate after the next restart. */
+    async useSelfSignedCertificate() { await this.patchAdminSettings({ certificateMode: 'self-signed' }); }
 
     async createInterpreterLink(channelId: string) {
         const response = await this.adminRequest('/api/admin/interpreter-link', {

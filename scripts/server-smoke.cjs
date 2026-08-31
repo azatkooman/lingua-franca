@@ -246,6 +246,16 @@ async function run() {
         return 'locked out';
     });
 
+    await check('certificate mode can be reverted to self-signed', async () => {
+        const { body } = await json('/api/admin/settings', {
+            method: 'PATCH', headers: authed(token), body: JSON.stringify({ certificateMode: 'self-signed' }),
+        });
+        assert.ok(body, 'patch accepted');
+        const health = await json('/api/admin/health', { headers: authed(token) });
+        assert.equal(health.body.certificate.type, 'self-signed');
+        return 'reverted';
+    });
+
     await check('an unknown API route returns JSON, not the SPA shell', async () => {
         const { status, contentType } = await json('/api/does-not-exist');
         assert.equal(status, 404);

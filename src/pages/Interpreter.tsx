@@ -116,6 +116,13 @@ export default function Interpreter() {
     }, [mode, targetIds, t]);
 
     useEffect(() => () => {
+        // Clear liveRef first: recognition.onend restarts itself while it is true, so a
+        // component unmounted mid-broadcast would otherwise keep the recogniser alive.
+        liveRef.current = false;
+        recognitionRef.current?.stop();
+        recognitionRef.current = null;
+        meterCleanup.current?.();
+        meterCleanup.current = null;
         void realtimeTranslationService.stop(false);
         voiceService.stopBroadcast();
     }, []);

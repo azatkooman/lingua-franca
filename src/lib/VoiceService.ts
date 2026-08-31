@@ -34,7 +34,16 @@ export class VoiceService {
     private onTranslationTextReceived?: (text: string, originalText: string) => void;
     private onMuteStatusChange?: (muted: boolean) => void;
     private onConnectionsChange?: (count: number) => void;
+    private listenerCounts = new Map<string, number>();
     private handlersBound = false;
+
+    private totalListeners() {
+        let total = 0;
+        for (const [channelId, count] of this.listenerCounts) {
+            if (this.producers.has(channelId)) total += count;
+        }
+        return total;
+    }
 
     getBroadcastStream() { return this.sourceStream; }
     isDesktopApp() { return /\bElectron\//i.test(navigator.userAgent); }
@@ -125,7 +134,11 @@ export class VoiceService {
             if (this.currentListenerChannelId === channelId) this.onMuteStatusChange?.(muted);
         });
         realtimeSocket.on<{ channelId: string; count: number }>('listenerCount', ({ channelId, count }) => {
-            if (this.producers.has(channelId)) this.onConnectionsChange?.(count);
+            if (!this.producers.has(channelId)) return;
+            // AI mode publishes one channel per target language, so report the audience
+            // across all of them rather than whichever reported last.
+            this.listenerCounts.set(channelId, count);
+            this.onConnectionsChange?.(this.totalListeners());
         });
         // The router is rebuilt when the media worker is restarted, so the cached device
         // capabilities and every transport from the previous router are stale.
@@ -229,6 +242,7 @@ export class VoiceService {
         this.sendTransports.get(channelId)?.close();
         this.producers.delete(channelId);
         this.sendTransports.delete(channelId);
+        this.listenerCounts.delete(channelId);
         realtimeSocket.emit('closeProducer', { channelId });
     }
 
@@ -236,6 +250,7 @@ export class VoiceService {
         for (const channelId of [...this.producers.keys()]) this.stopChannel(channelId);
         this.sourceStream?.getTracks().forEach((track) => track.stop());
         this.sourceStream = null;
+        this.listenerCounts.clear();
         this.onConnectionsChange?.(0);
         if (!this.currentListenerChannelId) this.device = null;
     }

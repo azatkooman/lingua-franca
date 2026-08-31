@@ -14,6 +14,19 @@ export default defineConfig({
   // Absolute, not './': relative asset URLs resolve against the current route, so any nested
   // path under BrowserRouter would look for its bundle in the wrong directory.
   base: '/',
+  build: {
+    rollupOptions: {
+      output: {
+        // The media and QR libraries are large and change rarely; splitting them keeps the
+        // app chunk small enough to parse quickly on an older phone.
+        manualChunks: {
+          mediasoup: ['mediasoup-client'],
+          realtime: ['socket.io-client'],
+          qr: ['qrcode.react'],
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       '/api': { target: backend, changeOrigin: true },

@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Lock, ShieldAlert, ArrowLeft } from 'lucide-react';
 import { settingsService } from '../lib/SettingsService';
@@ -12,6 +12,14 @@ export default function AdminGuard({ children }: { children: ReactNode }) {
     const [pin, setPin] = useState('');
     const [error, setError] = useState('');
     const [isChecking, setIsChecking] = useState(false);
+
+    // A token can expire while the page is open. Without this the guard kept rendering the
+    // admin screen against a dead session, which showed a permanent loading state instead of
+    // asking for the PIN again.
+    useEffect(() => settingsService.subscribeAuth((authenticated) => {
+        setIsAuthorized(authenticated);
+        if (!authenticated) setError('');
+    }), []);
 
     const submit = async (event: FormEvent) => {
         event.preventDefault();

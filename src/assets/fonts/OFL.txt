@@ -1,0 +1,10 @@
+The Outfit typeface is licensed under the SIL Open Font License, Version 1.1.
+
+Copyright (c) 2021 The Outfit Project Authors (https://github.com/Outfitio/Outfit-Fonts)
+
+The files outfit-latin.woff2 and outfit-latin-ext.woff2 are the Latin and
+Latin-Extended subsets published by Google Fonts, vendored here so the app has
+no network dependency. Outfit does not publish a Cyrillic subset; Cyrillic text
+falls back to the system stack declared in src/index.css.
+
+Full licence text: https://openfontlicense.org

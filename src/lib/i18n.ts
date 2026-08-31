@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useSyncExternalStore } from 'react';
 import { settingsService } from './SettingsService';
 
 export type Locale = 'en' | 'ru';
@@ -186,20 +186,70 @@ export const translations = {
     }
 };
 
-export function useTranslation() {
-    const [locale, setLocale] = useState<Locale>('en');
+const LOCALE_KEY = 'lingua_franca_locale';
+const LOCALES: Locale[] = ['en', 'ru'];
 
-    useEffect(() => {
-        const unsubscribe = settingsService.subscribe(s => {
-            setLocale(s.interfaceLanguage || 'en');
-        });
-        return unsubscribe;
-    }, []);
+const readStoredLocale = (): Locale | null => {
+    try {
+        const saved = localStorage.getItem(LOCALE_KEY);
+        return LOCALES.includes(saved as Locale) ? saved as Locale : null;
+    } catch { return null; }
+};
+
+/**
+ * Interface language is a per-device preference.
+ *
+ * It used to call setInterfaceLanguage(), which PATCHes /api/admin/settings. That endpoint
+ * requires an operator session, so a listener tapping EN/RU on the home screen got a rejected
+ * request and no language change -- and had it succeeded it would have switched the interface
+ * for every device in the building, which is not what a listener is asking for.
+ *
+ * The server's interfaceLanguage remains the default for a device that has not chosen one.
+ */
+let currentLocale: Locale = readStoredLocale() ?? 'en';
+let serverDefault: Locale = 'en';
+let hasDeviceChoice = readStoredLocale() !== null;
+const localeListeners = new Set<() => void>();
+
+const applyLocale = (next: Locale) => {
+    if (next === currentLocale) return;
+    currentLocale = next;
+    localeListeners.forEach((listener) => listener());
+};
+
+settingsService.subscribe((settings) => {
+    serverDefault = settings.interfaceLanguage || 'en';
+    if (!hasDeviceChoice) applyLocale(serverDefault);
+});
+
+export function setDeviceLocale(next: Locale) {
+    hasDeviceChoice = true;
+    try { localStorage.setItem(LOCALE_KEY, next); }
+    catch { /* private browsing: the choice simply does not persist */ }
+    applyLocale(next);
+}
+
+/** Drops the device override so the operator's configured default applies again. */
+export function clearDeviceLocale() {
+    hasDeviceChoice = false;
+    try { localStorage.removeItem(LOCALE_KEY); } catch { /* nothing to clear */ }
+    applyLocale(serverDefault);
+}
+
+const subscribeLocale = (onChange: () => void) => {
+    localeListeners.add(onChange);
+    return () => { localeListeners.delete(onChange); };
+};
+
+export function useTranslation() {
+    // An external store rather than component state: the locale lives outside React and
+    // several components read it at once.
+    const locale = useSyncExternalStore(subscribeLocale, () => currentLocale, () => currentLocale);
 
     const t = (key: keyof typeof translations.en): string => {
         const group = translations[locale] as Record<string, string>;
         return group[key] || translations.en[key as keyof typeof translations.en] || key;
     };
 
-    return { t, locale, setLocale: (l: Locale) => settingsService.setInterfaceLanguage(l) };
+    return { t, locale, setLocale: setDeviceLocale };
 }

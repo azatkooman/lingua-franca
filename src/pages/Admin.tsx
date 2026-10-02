@@ -119,13 +119,20 @@ export default function Admin() {
         }, 'Interpreter link created. It is valid for eight hours and can be used once.');
     };
 
+    const revokeInterpreters = async () => {
+        await run(async () => {
+            await settingsService.revokeInterpreterSessions();
+            setInterpreterLink(null);
+        }, 'All interpreter access has ended. Any phone that was broadcasting has been disconnected, and unused codes no longer work.');
+    };
+
     const changePin = async () => {
         if (newPin !== confirmPin) { setMessage('The two PINs do not match.'); return; }
         if (!/^\d{4,12}$/.test(newPin)) { setMessage('The PIN must be 4 to 12 digits.'); return; }
         await run(async () => {
             await settingsService.setAdminPin(newPin);
             setNewPin(''); setConfirmPin('');
-        }, 'PIN changed.');
+        }, 'PIN changed. Every other operator session has been signed out.');
     };
 
     if (!settings) return <div className="page-container admin-page">{t('loading')}</div>;
@@ -193,11 +200,13 @@ export default function Admin() {
 
             <div className="card fade-in">
                 <div className="card-header"><Mic size={20} /><h3>Phone interpreter</h3></div>
-                <p className="text-muted">Create a limited one-time link. The phone can broadcast only the selected language and cannot open admin settings.</p>
+                <p className="text-muted">Create a limited one-time link. The phone can broadcast only the selected language and cannot open admin settings. A phone cannot interrupt a channel that is already live; only this operator screen can take a channel over.</p>
                 <select className="custom-select" value={interpreterChannelId} onChange={(event) => setInterpreterChannelId(event.target.value)}>
                     {settings.languages.map((language) => <option key={language.id} value={language.id}>{language.name}</option>)}
                 </select>
                 <button className="btn-primary mt-4" disabled={busy || !health || !interpreterChannelId} onClick={() => void createInterpreterLink()}><QrCode size={18} /> Create interpreter QR</button>
+                <p className="text-muted mt-4">Lost a phone, or shared a link too widely? This ends every interpreter session and unused code right away.</p>
+                <button className="btn-secondary" disabled={busy} onClick={() => void revokeInterpreters()}><X size={18} /> End all interpreter access</button>
             </div>
 
             <div className="card fade-in">
@@ -266,6 +275,7 @@ export default function Admin() {
                 <button className="btn-secondary mt-4" disabled={!geminiKey || busy} onClick={() => void run(async () => { await settingsService.setGeminiApiKey(geminiKey); setGeminiKey(''); }, 'Gemini key encrypted and saved.')}>Save Gemini key</button>
 
                 <label className="mt-4">Church terminology and names</label>
+                <p className="text-muted">Used by the Gemini text fallback. OpenAI Realtime translation does not accept custom terms yet, so check names there by ear before the service.</p>
                 <textarea className="custom-input" rows={4} value={glossaryValue} onChange={(event) => setGlossaryDraft(event.target.value)} />
                 <button className="btn-secondary mt-4" disabled={busy || glossaryDraft === null} onClick={() => void run(async () => {
                     await settingsService.setGlossary(glossaryValue);
@@ -287,7 +297,7 @@ export default function Admin() {
 
             <div className="card fade-in">
                 <div className="card-header"><Save size={20} /><h3>Security</h3></div>
-                <p className="text-muted">Set a new administrator PIN of 4 to 12 digits. A longer PIN is meaningfully harder to guess. The current PIN is never sent to browsers.</p>
+                <p className="text-muted">Set a new administrator PIN of 4 to 12 digits. A longer PIN is meaningfully harder to guess. The current PIN is never sent to browsers. Changing it signs out every other operator session.</p>
                 <label>New PIN</label>
                 <input className="custom-input" type="password" inputMode="numeric" autoComplete="new-password" maxLength={12}
                     value={newPin} onChange={(event) => setNewPin(event.target.value.replace(/\D/g, '').slice(0, 12))} />

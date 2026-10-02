@@ -44,6 +44,7 @@ class SettingsService {
     private listeners = new Set<Listener<AppSettings>>();
     private adminListeners = new Set<Listener<AdminSettings | null>>();
     private authListeners = new Set<(authenticated: boolean) => void>();
+    private interpreterAuthListeners = new Set<(authenticated: boolean) => void>();
     private initialized = false;
     private adminToken = sessionStorage.getItem('lingua_franca_admin_token') || '';
     private interpreterToken = sessionStorage.getItem('lingua_franca_interpreter_token') || '';
@@ -63,6 +64,13 @@ class SettingsService {
             // Channel state changes can coincide with configuration changes the operator
             // screen renders, so keep its payload in step.
             if (this.adminToken) void this.fetchAdminSettings().catch(() => undefined);
+        });
+        // The operator ended this session: a PIN change signs out other operator sessions, and
+        // "End all interpreter access" ends every phone's. The socket authenticated with the
+        // publisher token, so that is the one to drop; the guards then ask to sign in again.
+        realtimeSocket.on('sessionRevoked', () => {
+            if (this.adminToken) this.clearAdminSession();
+            else this.clearInterpreterSession();
         });
         void realtimeSocket.connect().catch(() => undefined);
         this.refreshTimer = window.setInterval(() => void this.fetchSettings(), REFRESH_INTERVAL_MS);
@@ -124,6 +132,9 @@ class SettingsService {
     private notify() { this.listeners.forEach((listener) => listener(this.settings)); }
     private notifyAdmin() { this.adminListeners.forEach((listener) => listener(this.admin)); }
     private notifyAuth() { this.authListeners.forEach((listener) => listener(this.isAdminAuthenticated())); }
+    private notifyInterpreterAuth() {
+        this.interpreterAuthListeners.forEach((listener) => listener(this.isInterpreterAuthenticated()));
+    }
 
     private async adminRequest(path: string, init: RequestInit = {}) {
         if (!this.adminToken) throw new Error('Administrator login required.');
@@ -162,6 +173,13 @@ class SettingsService {
         this.authListeners.add(listener);
         listener(this.isAdminAuthenticated());
         return () => { this.authListeners.delete(listener); };
+    }
+
+    /** The interpreter counterpart of subscribeAuth. */
+    subscribeInterpreterAuth(listener: (authenticated: boolean) => void) {
+        this.interpreterAuthListeners.add(listener);
+        listener(this.isInterpreterAuthenticated());
+        return () => { this.interpreterAuthListeners.delete(listener); };
     }
 
     subscribeAdmin(listener: Listener<AdminSettings | null>) {
@@ -219,6 +237,7 @@ class SettingsService {
         sessionStorage.setItem('lingua_franca_interpreter_channel_id', data.channelId);
         sessionStorage.setItem('lingua_franca_interpreter_channel_name', this.interpreterChannelName);
         realtimeSocket.setAuthToken(this.getPublisherToken());
+        this.notifyInterpreterAuth();
     }
 
     clearInterpreterSession() {
@@ -229,6 +248,7 @@ class SettingsService {
         sessionStorage.removeItem('lingua_franca_interpreter_channel_id');
         sessionStorage.removeItem('lingua_franca_interpreter_channel_name');
         realtimeSocket.setAuthToken(this.getPublisherToken());
+        this.notifyInterpreterAuth();
     }
 
     async logout() {
@@ -276,6 +296,12 @@ class SettingsService {
             method: 'POST', body: JSON.stringify({ channelId }),
         });
         return response.json() as Promise<{ code: string; channelId: string; channelName: string; expiresAt: number }>;
+    }
+
+    /** Ends every interpreter session and unused interpreter code. */
+    async revokeInterpreterSessions() {
+        const response = await this.adminRequest('/api/admin/interpreter-sessions/revoke', { method: 'POST' });
+        return response.json() as Promise<{ ok: boolean; sessions: number; codes: number }>;
     }
 
     async configureCertificate(domain: string, token: string, email: string) {

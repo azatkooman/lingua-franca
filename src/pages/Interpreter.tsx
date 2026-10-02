@@ -115,6 +115,14 @@ export default function Interpreter() {
         voiceService.stopBroadcast();
     }, [mode, targetIds, t]);
 
+    // The operator can take a live channel over from this device. Say so, and once nothing
+    // is left on air, stop properly instead of showing "live" for audio nobody receives.
+    useEffect(() => voiceService.onProducerReplaced((channelId) => {
+        const message = `The operator took over ${languageName(channelId)}.`;
+        if (voiceService.isPublishing()) { setStatus(message); return; }
+        void stopBroadcast().then(() => setStatus(`${message} Your broadcast has stopped.`));
+    }), [languageName, stopBroadcast]);
+
     useEffect(() => () => {
         // Clear liveRef first: recognition.onend restarts itself while it is true, so a
         // component unmounted mid-broadcast would otherwise keep the recogniser alive.

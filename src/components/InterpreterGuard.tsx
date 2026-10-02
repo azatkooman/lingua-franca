@@ -4,17 +4,35 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { settingsService } from '../lib/SettingsService';
 import '../pages/Admin.css';
 
+const isAuthorized = () => settingsService.isAdminAuthenticated() || settingsService.isInterpreterAuthenticated();
+
 export default function InterpreterGuard({ children }: { children: ReactNode }) {
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
     const automaticCode = searchParams.get('code')?.replace(/\D/g, '').slice(0, 6) || '';
-    const [authorized, setAuthorized] = useState(
-        settingsService.isAdminAuthenticated() || settingsService.isInterpreterAuthenticated());
+    const [authorized, setAuthorized] = useState(isAuthorized);
     const [code, setCode] = useState(automaticCode);
     const [error, setError] = useState('');
     const [checking, setChecking] = useState(!authorized && automaticCode.length === 6);
     // Codes are single use, so an automatic attempt must never be repeated by a re-render.
     const attempted = useRef(false);
+    const wasAuthorized = useRef(authorized);
+
+    // The operator can end a session while this page is open. Re-gate when that happens, so
+    // the broadcast screen unmounts (which stops the microphone) and the phone says why.
+    useEffect(() => {
+        const update = () => {
+            const next = isAuthorized();
+            if (wasAuthorized.current && !next) {
+                setError('This interpreter session has ended. Ask the operator for a new interpreter QR code.');
+            }
+            wasAuthorized.current = next;
+            setAuthorized(next);
+        };
+        const stopAdmin = settingsService.subscribeAuth(update);
+        const stopInterpreter = settingsService.subscribeInterpreterAuth(update);
+        return () => { stopAdmin(); stopInterpreter(); };
+    }, []);
 
     const login = async (accessCode: string) => {
         if (accessCode.length !== 6) return;

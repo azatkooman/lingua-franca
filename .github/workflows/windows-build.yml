@@ -1,0 +1,65 @@
+# Builds the Windows installer on a clean Windows machine, after lint, unit tests and the
+# server smoke test pass. The installer is attached to the run as an artifact named
+# "lingua-franca-windows-x64"; download it from the run's Summary page.
+name: Windows build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      # With the worker binary available, the smoke test also exercises the media engine:
+      # producer ownership, operator takeover, and recovery from a worker crash.
+      - name: Server smoke test
+        run: npm run test:server
+        env:
+          LINGUA_FRANCA_WORKER_BIN: ${{ github.workspace }}\node_modules\mediasoup\worker\out\Release\mediasoup-worker.exe
+
+      - name: Build renderer
+        run: npm run build
+
+      - name: Windows preflight
+        run: node scripts/preflight-windows.cjs
+
+      # No signing certificate is configured, so the installer is unsigned and Windows
+      # SmartScreen will warn on first run.
+      - name: Package installer
+        run: npx electron-builder --win --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lingua-franca-windows-x64
+          path: release/*.exe
+          if-no-files-found: error
+          retention-days: 30

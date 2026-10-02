@@ -8,7 +8,8 @@
  *   npm run test:server
  *
  * The mediasoup worker is not required; the SFU simply reports itself unavailable, which is
- * itself worth asserting -- the API must stay up when the media engine cannot start.
+ * itself worth asserting -- the API must stay up when the media engine cannot start. Point
+ * LINGUA_FRANCA_WORKER_BIN at the worker binary to also run the media checks (CI does).
  */
 
 const Module = require('module');
@@ -17,10 +18,17 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
+const mediasoup = require('mediasoup');
+const { io } = require('socket.io-client');
 
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'lingua-franca-smoke-'));
 let markReady;
 const ready = new Promise((resolve) => { markReady = resolve; });
+
+// main.cjs resolves the same mediasoup module, so its workers show up here and a test can
+// kill one to exercise the restart path.
+const workers = [];
+mediasoup.observer.on('newworker', (worker) => workers.push(worker));
 
 class FakeWindow {
     constructor() {
@@ -67,10 +75,12 @@ Module._resolveFilename = function (request, ...rest) {
     return resolveFilename.call(this, request, ...rest);
 };
 
-// Silence the expected "no mediasoup worker" restart noise; the SFU state is asserted below.
+// Silence the expected "no mediasoup worker" restart noise and the deliberate worker kill;
+// the SFU state is asserted below.
 const realError = console.error;
 console.error = (...args) => {
-    if (String(args[0] ?? '').includes('SFU initialization failed')) return;
+    const text = String(args[0] ?? '');
+    if (text.includes('SFU initialization failed') || text.includes('mediasoup worker died')) return;
     realError(...args);
 };
 
@@ -79,6 +89,7 @@ markReady();
 
 const BASE = 'http://127.0.0.1:4174';
 const results = [];
+const sockets = [];
 let failures = 0;
 
 const check = async (name, fn) => {
@@ -103,6 +114,41 @@ const json = async (requestPath, init) => {
     return { status: response.status, contentType: response.headers.get('content-type') || '', body: await response.json().catch(() => ({})) };
 };
 const authed = (token, extra = {}) => ({ 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...extra });
+const login = async (pin = '1234') => (await json('/api/admin/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin }),
+})).body.token;
+
+/* ------------------------------------------------------------- signalling */
+
+const connect = (token = '') => new Promise((resolve, reject) => {
+    const socket = io(BASE, { transports: ['websocket'], auth: { token }, reconnection: false });
+    sockets.push(socket);
+    socket.once('connect', () => resolve(socket));
+    socket.once('connect_error', reject);
+});
+const ask = (socket, event, payload) => new Promise((resolve) => {
+    socket.timeout(5000).emit(event, payload, (error, response) => resolve(error ? { error: error.message } : (response ?? {})));
+});
+const waitFor = (socket, event, timeoutMs = 10_000) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`no '${event}' within ${timeoutMs} ms`)), timeoutMs);
+    socket.once(event, (payload) => { clearTimeout(timer); resolve(payload); });
+});
+// Enough for the router to accept a producer without a real browser on the other end.
+const opusRtp = (ssrc) => ({
+    codecs: [{ mimeType: 'audio/opus', payloadType: 111, clockRate: 48000, channels: 2, parameters: {}, rtcpFeedback: [] }],
+    headerExtensions: [], encodings: [{ ssrc }], rtcp: { cname: `smoke-${ssrc}`, reducedSize: true },
+});
+const FAKE_DTLS = {
+    role: 'client',
+    fingerprints: [{ algorithm: 'sha-256', value: '82:5A:68:3D:36:C3:0A:DE:AF:E7:32:43:D2:88:83:57:AC:2D:65:E5:80:C4:B6:FB:AF:1A:A0:21:9F:6D:0C:AD' }],
+};
+const produce = async (socket, channelId, ssrc) => {
+    const transport = await ask(socket, 'createWebRtcTransport', { type: 'producer' });
+    if (transport.error) return transport;
+    return ask(socket, 'produce', { transportId: transport.id, kind: 'audio', rtpParameters: opusRtp(ssrc), appData: { channelId, mode: 'human' } });
+};
+const channelMode = async (channelId) =>
+    (await json('/api/settings')).body.languages.find((language) => language.id === channelId)?.activePeerId;
 
 async function run() {
     await check('listener settings carry channels but no operator data', async () => {
@@ -123,11 +169,13 @@ async function run() {
 
     // Passes either way on purpose: with LINGUA_FRANCA_WORKER_BIN set this confirms the SFU
     // really starts, and without it that the API stays up when the media engine cannot.
+    let sfuReady = false;
     await check('the API serves health whatever state the media engine is in', async () => {
         const { status, body } = await json('/api/health');
         assert.equal(status, 200);
         assert.ok(['ready', 'unavailable'].includes(body.sfu), `unexpected sfu state: ${body.sfu}`);
         assert.equal(body.ok, body.sfu === 'ready');
+        sfuReady = body.sfu === 'ready';
         return `sfu=${body.sfu}`;
     });
 
@@ -217,16 +265,20 @@ async function run() {
         return '400';
     });
 
+    let interpreterToken;
+    let channelId;
     await check('an interpreter link works once and only once', async () => {
         const { body: settings } = await json('/api/admin/settings', { headers: authed(token) });
+        channelId = settings.languages[0].id;
         const { body: link } = await json('/api/admin/interpreter-link', {
-            method: 'POST', headers: authed(token), body: JSON.stringify({ channelId: settings.languages[0].id }),
+            method: 'POST', headers: authed(token), body: JSON.stringify({ channelId }),
         });
         assert.match(link.code, /^\d{6}$/);
         const first = await json('/api/interpreter/login', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: link.code }),
         });
         assert.equal(first.status, 200);
+        interpreterToken = first.body.token;
         const replay = await json('/api/interpreter/login', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: link.code }),
         });
@@ -244,6 +296,76 @@ async function run() {
         }
         assert.ok(lockedOut, 'expected a 429 lockout');
         return 'locked out';
+    });
+
+    await check('an interpreter cannot cut off, mute or end a live broadcast it does not own', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const operator = await connect(token);
+        assert.ok((await produce(operator, channelId, 1111)).id, 'operator broadcast started');
+        const phone = await connect(interpreterToken);
+        const attempt = await produce(phone, channelId, 2222);
+        assert.match(attempt.error || '', /already being broadcast/);
+        assert.match((await ask(phone, 'setProducerPaused', { channelId, paused: true })).error || '', /Another broadcaster/);
+        assert.equal((await ask(phone, 'closeProducer', { channelId })).ignored, true);
+        assert.equal(await channelMode(channelId), 'sfu-active', 'the operator broadcast is still live');
+        return 'refused, refused, ignored';
+    });
+
+    await check('the operator can take a channel over, and the previous broadcaster is told', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const first = await connect(token);
+        assert.ok((await produce(first, channelId, 3333)).id);
+        const second = await connect(await login());
+        const replaced = waitFor(first, 'producerReplaced', 5000);
+        assert.ok((await produce(second, channelId, 4444)).id, 'takeover accepted');
+        assert.equal((await replaced).channelId, channelId);
+        // The replaced broadcaster pressing Stop must not end the new broadcast.
+        assert.equal((await ask(first, 'closeProducer', { channelId })).ignored, true);
+        assert.equal(await channelMode(channelId), 'sfu-active');
+        return 'producerReplaced received';
+    });
+
+    await check('a connected socket can still negotiate after the media worker restarts', async () => {
+        if (!sfuReady || !workers.length) return 'skipped (no media worker)';
+        const listener = await connect();
+        const restarted = waitFor(listener, 'sfuReady', 15_000);
+        process.kill(workers.at(-1).pid);
+        await restarted;
+        const transport = await ask(listener, 'createWebRtcTransport', { type: 'consumer' });
+        assert.ok(transport.id, transport.error || 'no transport');
+        const connected = await ask(listener, 'connectTransport', { transportId: transport.id, dtlsParameters: FAKE_DTLS });
+        assert.equal(connected.error, undefined, `connectTransport failed: ${connected.error}`);
+        return 'transport tracked after restart';
+    });
+
+    await check('ending interpreter access disconnects the phone and kills its session', async () => {
+        const phone = await connect(interpreterToken);
+        const notified = waitFor(phone, 'sessionRevoked', 5000);
+        const disconnected = waitFor(phone, 'disconnect', 5000);
+        const { status, body } = await json('/api/admin/interpreter-sessions/revoke', { method: 'POST', headers: authed(token) });
+        assert.equal(status, 200);
+        assert.ok(body.sessions >= 1, `revoked ${body.sessions}`);
+        await notified;
+        await disconnected;
+        assert.equal((await json('/api/diagnostics', { headers: authed(interpreterToken) })).status, 401);
+        return `${body.sessions} session(s) ended`;
+    });
+
+    await check('ending interpreter access requires an operator session', async () => {
+        assert.equal((await json('/api/admin/interpreter-sessions/revoke', { method: 'POST' })).status, 401);
+        return '401';
+    });
+
+    await check('changing the PIN signs out every other operator session', async () => {
+        const other = await login();
+        assert.ok(other);
+        const { status } = await json('/api/admin/settings', {
+            method: 'PATCH', headers: authed(token), body: JSON.stringify({ adminPin: '246810' }),
+        });
+        assert.equal(status, 200);
+        assert.equal((await json('/api/admin/settings', { headers: authed(other) })).status, 401, 'the other session ended');
+        assert.equal((await json('/api/admin/settings', { headers: authed(token) })).status, 200, 'the changing session stays');
+        return 'other 401, self 200';
     });
 
     await check('certificate mode can be reverted to self-signed', async () => {
@@ -265,6 +387,7 @@ async function run() {
 
     console.log(`\nServer smoke test (${results.length - failures}/${results.length} passed)\n`);
     console.log(results.join('\n'));
+    sockets.forEach((socket) => socket.close());
     fs.rmSync(userData, { recursive: true, force: true });
     process.exit(failures ? 1 : 0);
 }

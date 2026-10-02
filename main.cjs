@@ -9,8 +9,8 @@ const http = require('http');
 const forge = require('node-forge');
 
 const {
-    DEFAULT_SETTINGS, adminSettings, findLanguage, inferLanguageCode, isValidDuckDnsDomain,
-    isValidEmail, normalizeDuckDnsDomain, normalizeLanguages, publicSettings, selectLocalAddress,
+    DEFAULT_SETTINGS, adminSettings, buildTranslationPrompt, findLanguage, isValidDuckDnsDomain,
+    isValidEmail, languageCodeFor, normalizeDuckDnsDomain, normalizeLanguages, publicSettings, selectLocalAddress,
 } = require('./lib/settings.cjs');
 const { ExpiringMap, LoginThrottle, isValidPin, newAccessCode, newToken, setPin, verifyPin } = require('./lib/security.cjs');
 
@@ -473,6 +473,9 @@ async function startServers(isDev) {
     const transports = new Map();
     const producers = new Map();
     const listenerChannels = new Map();
+    // channelId -> { socketId, token } of whoever is publishing it, so one broadcaster cannot
+    // silently cut off, mute or end another's live channel.
+    const producerOwners = new Map();
 
     const adminSessions = new ExpiringMap();
     const interpreterSessions = new ExpiringMap();
@@ -509,10 +512,25 @@ async function startServers(isDev) {
         const producer = producers.get(channelId);
         if (!producer) return false;
         producers.delete(channelId);
+        producerOwners.delete(channelId);
         try { producer.close(); } catch { /* already closed */ }
         setChannelState(channelId);
         io.emit('producerClosed', { channelId });
         return true;
+    };
+
+    // Ends sessions server-side and drops every socket still using one, so a revoked phone
+    // stops broadcasting at once rather than whenever its socket next reconnects.
+    const revokeSessions = (store, keepToken = '') => {
+        const revoked = new Set(store.keys().filter((token) => token !== keepToken));
+        for (const token of revoked) store.delete(token);
+        for (const socket of io.of('/').sockets.values()) {
+            if (!revoked.has(socket.handshake.auth?.token)) continue;
+            socket.emit('sessionRevoked');
+            // A short pause lets the notice reach the client before the socket closes.
+            setTimeout(() => socket.disconnect(true), 200).unref?.();
+        }
+        return revoked.size;
     };
 
     const persist = (response) => {
@@ -535,7 +553,12 @@ async function startServers(isDev) {
             media.worker.on('died', () => {
                 console.error('The mediasoup worker died; restarting it.');
                 media = { worker: null, router: null, webRtcServer: null, error: 'The media worker stopped and is restarting.', portMode: media.portMode };
-                producers.clear(); liveChannels.clear(); transports.clear(); listenerChannels.clear();
+                producers.clear(); producerOwners.clear(); liveChannels.clear(); listenerChannels.clear();
+                // Empty each socket's transport list but keep the entry. Those sockets stay
+                // connected and renegotiate on 'sfuReady'; deleting the entries left every
+                // transport they created afterwards untracked, so connectTransport and consume
+                // failed with "Transport not found" until the page was reloaded.
+                for (const owned of transports.values()) owned.clear();
                 io.emit('sfuRestarting');
                 scheduleMediaRestart();
             });
@@ -561,6 +584,12 @@ async function startServers(isDev) {
         const socketToken = () => socket.handshake.auth?.token;
         const socketIsAdmin = () => isAdminToken(socketToken());
         const socketPublisher = () => publisherSession(socketToken());
+        // A reconnecting phone gets a new socket id but keeps its session token, so either one
+        // proves ownership. A channel with no live producer belongs to nobody.
+        const ownsChannel = (channelId) => {
+            const owner = producerOwners.get(channelId);
+            return !owner || owner.socketId === socket.id || (Boolean(owner.token) && owner.token === socketToken());
+        };
         const trackTransport = (transport) => {
             const owned = transports.get(socket.id);
             owned?.set(transport.id, transport);
@@ -608,9 +637,20 @@ async function startServers(isDev) {
                 if (publisher.role === 'interpreter' && publisher.channelId !== channelId) {
                     throw new Error('This interpreter link is authorized for a different channel.');
                 }
+                // Starting a second broadcast on a live channel used to cut the first one off
+                // without a word. Only the operator may take a channel over, and the broadcaster
+                // being replaced is told, instead of carrying on into a producer nobody hears.
+                const previousOwner = producerOwners.get(channelId);
+                if (producers.has(channelId) && !ownsChannel(channelId)) {
+                    if (publisher.role !== 'admin') {
+                        throw new Error(`${language.name} is already being broadcast. Ask the operator to stop it first.`);
+                    }
+                    io.to(previousOwner.socketId).emit('producerReplaced', { channelId });
+                }
                 closeProducerFor(channelId);
                 const producer = await transport.produce({ kind, rtpParameters, appData: { channelId } });
                 producers.set(channelId, producer);
+                producerOwners.set(channelId, { socketId: socket.id, token: socketToken() || '' });
                 setChannelState(channelId, appData?.mode === 'ai' ? 'ai-active' : 'sfu-active');
                 producer.on('transportclose', () => {
                     if (producers.get(channelId)?.id === producer.id) closeProducerFor(channelId);
@@ -630,6 +670,9 @@ async function startServers(isDev) {
             if (publisher.role === 'interpreter' && publisher.channelId !== id) {
                 return callback?.({ error: 'This interpreter link is authorized for a different channel.' });
             }
+            // A broadcaster that was taken over still sends this when it presses Stop. Ending
+            // the channel then would cut off whoever took it over, so only the owner may.
+            if (!ownsChannel(id)) return callback?.({ ok: true, ignored: true });
             closeProducerFor(id);
             callback?.({ ok: true });
         });
@@ -645,6 +688,7 @@ async function startServers(isDev) {
             }
             const producer = producers.get(id);
             if (!producer) return callback?.({ error: 'That channel is not broadcasting.' });
+            if (!ownsChannel(id)) return callback?.({ error: 'Another broadcaster now has this channel.' });
             void (paused ? producer.pause() : producer.resume())
                 .then(() => callback?.({ ok: true }))
                 .catch((error) => callback?.({ error: error.message }));
@@ -689,6 +733,9 @@ async function startServers(isDev) {
             if (!socketIsAdmin()) return callback?.({ error: 'Administrator login required.' });
             const id = String(channelId || '').slice(0, 80);
             if (!findLanguage(settings.languages, id)) return callback?.({ error: 'Unknown channel.' });
+            // Stopping a text session must not mark the channel offline while someone is
+            // still publishing audio on it, or listeners would see a live channel as idle.
+            if (!active && producers.has(id)) return callback?.({ ok: true });
             setChannelState(id, active ? 'ai-active' : undefined);
             callback?.({ ok: true });
         });
@@ -783,6 +830,16 @@ async function startServers(isDev) {
         response.json({ code, channelId, channelName: language.name, expiresAt });
     });
 
+    // Ends every interpreter session and unused code at once: a lost phone, a link shared
+    // further than intended, or simply the end of a service. Interpreter sessions otherwise
+    // lasted their full eight hours with no way to cut them short.
+    expressApp.post('/api/admin/interpreter-sessions/revoke', requireAdmin, (_request, response) => {
+        const codes = interpreterCodes.keys().length;
+        interpreterCodes.clear();
+        const sessions = revokeSessions(interpreterSessions);
+        response.json({ ok: true, sessions, codes });
+    });
+
     // Same escalating lockout as the admin PIN. A six-digit code with unlimited attempts is
     // reachable by brute force from anywhere on the Wi-Fi, and the prize is a live microphone.
     expressApp.post('/api/interpreter/login', (request, response) => {
@@ -857,9 +914,11 @@ async function startServers(isDev) {
             for (const channelId of [...liveChannels.keys()]) if (!keptIds.has(channelId)) liveChannels.delete(channelId);
             settings.languages = next;
         }
+        let pinChanged = false;
         if (patch.adminPin !== undefined) {
             if (!isValidPin(patch.adminPin)) return response.status(400).json({ error: 'The PIN must be 4 to 12 digits.' });
             setPin(settings, String(patch.adminPin));
+            pinChanged = true;
         }
         if (['en', 'ru'].includes(patch.interfaceLanguage)) settings.interfaceLanguage = patch.interfaceLanguage;
         // Lets an operator go back to the local certificate. The trusted key and cert are
@@ -876,6 +935,9 @@ async function startServers(isDev) {
         if (patch.clearOpenaiApiKey === true) settings.openaiApiKeyEncrypted = '';
         if (patch.clearGeminiApiKey === true) settings.geminiApiKeyEncrypted = '';
         if (!persist(response)) return;
+        // A PIN change is usually a response to the old PIN leaking, so every other operator
+        // session opened with it ends here. The session making the change stays signed in.
+        if (pinChanged) revokeSessions(adminSessions, requestToken(request));
         emitSettings();
         response.json(adminSettings(settings, liveChannels));
     });
@@ -890,6 +952,8 @@ async function startServers(isDev) {
                     Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json',
                     'OpenAI-Safety-Identifier': crypto.createHash('sha256').update(requestToken(request)).digest('hex'),
                 },
+                // gpt-realtime-translate accepts no custom instructions, so the glossary cannot
+                // be passed here; it is applied to the Gemini text fallback instead.
                 body: JSON.stringify({ session: {
                     model: 'gpt-realtime-translate',
                     audio: { output: { language: String(request.body?.targetLanguage || 'en').slice(0, 16) } },
@@ -908,7 +972,7 @@ async function startServers(isDev) {
                 const upstream = await fetchWithTimeout('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': geminiKey },
-                    body: JSON.stringify({ contents: [{ parts: [{ text: `Translate from ${sourceLang} to ${targetLang}. Return only the translation.\n${text}` }] }] }),
+                    body: JSON.stringify({ contents: [{ parts: [{ text: buildTranslationPrompt({ text, sourceLang, targetLang, glossary: settings.glossary }) }] }] }),
                 });
                 const data = await upstream.json();
                 const translatedText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
@@ -916,7 +980,8 @@ async function startServers(isDev) {
             } catch (error) { console.warn('Gemini translation failed:', error.message); }
         }
         try {
-            const upstream = await fetchWithTimeout(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${inferLanguageCode(sourceLang)}|${inferLanguageCode(targetLang)}`);
+            const langpair = `${languageCodeFor(settings.languages, sourceLang)}|${languageCodeFor(settings.languages, targetLang)}`;
+            const upstream = await fetchWithTimeout(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${encodeURIComponent(langpair)}`);
             const data = await upstream.json();
             if (upstream.ok && data.responseData?.translatedText) {
                 return response.json({ translatedText: data.responseData.translatedText, provider: 'mymemory' });

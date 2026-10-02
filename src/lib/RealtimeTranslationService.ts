@@ -26,9 +26,23 @@ interface Recording {
     label: string;
 }
 
+interface StartContext {
+    sourceLanguage: Language;
+    onStatus: (message: string) => void;
+    onUpdate: (update: TranslationUpdate) => void;
+    onListeners: (count: number) => void;
+}
+
 // The OpenAI leg runs over the public internet, so it needs a reflexive candidate. Host
 // candidates alone can leave the connection stuck in "checking" behind a symmetric NAT.
 const ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+
+// A dropped OpenAI leg used to stay silent until someone pressed Stop and Start. It is now
+// rebuilt on its own, with growing pauses, for about two minutes before the operator is asked
+// to switch to Human mode.
+const RECONNECT_DELAYS_MS = [1000, 3000, 5000, 10_000, 20_000, 30_000, 30_000];
+// "disconnected" often recovers by itself within a few seconds; only rebuild if it has not.
+const DISCONNECT_GRACE_MS = 5000;
 
 class RealtimeTranslationService {
     private sessions = new Map<string, ActiveSession>();
@@ -36,6 +50,11 @@ class RealtimeTranslationService {
     private sourceStream: MediaStream | null = null;
     private stopping = false;
     private muted = false;
+    private context: StartContext | null = null;
+    private targets = new Map<string, Language>();
+    private reconnectAttempts = new Map<string, number>();
+    private reconnectTimers = new Map<string, number>();
+    private stopReplacedWatch: (() => void) | null = null;
 
     async start(
         sourceLanguage: Language,
@@ -49,20 +68,22 @@ class RealtimeTranslationService {
         if (!settingsService.getAdminSettings()?.openaiConfigured) throw new Error('Add an OpenAI API key in Admin settings first.');
         this.stopping = false;
         this.muted = false;
+        this.context = { sourceLanguage, onStatus, onUpdate, onListeners };
+        this.targets = new Map(targets.map((target) => [target.id, target]));
+        // If the operator hands one of these channels to another broadcaster, stop paying for
+        // its OpenAI leg, and stop it from reconnecting and taking the channel back.
+        this.stopReplacedWatch?.();
+        this.stopReplacedWatch = voiceService.onProducerReplaced((channelId) => this.dropTarget(channelId));
         this.sourceStream = await voiceService.getInputStream(deviceId);
         if (settingsService.getAdminSettings()?.recordingEnabled) this.recordStream(this.sourceStream, 'source');
-        await Promise.all(targets.map((target) => this.startTarget(sourceLanguage, target, onStatus, onUpdate, onListeners)));
+        await Promise.all(targets.map((target) => this.startTarget(target)));
     }
 
-    private async startTarget(
-        sourceLanguage: Language,
-        target: Language,
-        onStatus: (message: string) => void,
-        onUpdate: (update: TranslationUpdate) => void,
-        onListeners: (count: number) => void,
-    ) {
-        onStatus(`Connecting OpenAI ${target.name}…`);
-        const { value: clientSecret } = await settingsService.createRealtimeSession(sourceLanguage.code, target.code);
+    private async startTarget(target: Language) {
+        const context = this.context;
+        if (!context) throw new Error('Translation is not running.');
+        context.onStatus(`Connecting OpenAI ${target.name}…`);
+        const { value: clientSecret } = await settingsService.createRealtimeSession(context.sourceLanguage.code, target.code);
         if (!clientSecret) throw new Error(`OpenAI did not return a client secret for ${target.name}.`);
         const [inputTrack] = this.sourceStream?.getAudioTracks() ?? [];
         if (!inputTrack) throw new Error('The selected input produced no audio track.');
@@ -76,20 +97,29 @@ class RealtimeTranslationService {
             peer, target, sourceTrack, translatedText: '', originalText: '', startedAt: performance.now(),
         };
         this.sessions.set(target.id, session);
+        const isCurrent = () => !this.stopping && this.sessions.get(target.id) === session;
 
         peer.ontrack = ({ track, streams }) => {
-            if (this.stopping) return;
+            if (!isCurrent()) return;
             session.outputTrack = track;
             session.firstOutputAt ||= performance.now();
             const outputStream = streams[0] || new MediaStream([track]);
             if (settingsService.getAdminSettings()?.recordingEnabled) this.recordStream(outputStream, `translated-${target.code}`);
-            void voiceService.publishTrack(target.id, track, 'ai', onStatus, onListeners).catch((error) => {
-                onStatus(`Could not publish ${target.name}: ${error instanceof Error ? error.message : String(error)}`);
+            // After a reconnect the channel is still published, so swap the audio in place and
+            // keep every listener attached instead of making them all renegotiate.
+            void voiceService.replaceTrack(target.id, track).then((replaced) => {
+                if (replaced) { context.onStatus(`OpenAI ${target.name} reconnected`); return; }
+                return voiceService.publishTrack(target.id, track, 'ai', context.onStatus, context.onListeners);
+            }).catch((error) => {
+                context.onStatus(`Could not publish ${target.name}: ${error instanceof Error ? error.message : String(error)}`);
             });
         };
         peer.onconnectionstatechange = () => {
-            if (['failed', 'disconnected'].includes(peer.connectionState) && !this.stopping) {
-                onStatus(`OpenAI ${target.name} ${peer.connectionState}. Stop and restart to reconnect.`);
+            if (!isCurrent()) return;
+            if (peer.connectionState === 'failed') this.scheduleReconnect(target.id);
+            if (peer.connectionState === 'disconnected') {
+                context.onStatus(`OpenAI ${target.name} connection unstable…`);
+                this.scheduleReconnect(target.id, DISCONNECT_GRACE_MS);
             }
         };
 
@@ -97,7 +127,11 @@ class RealtimeTranslationService {
         events.onmessage = ({ data }) => {
             try {
                 const event = JSON.parse(String(data)) as { type?: string; delta?: string; error?: { message?: string } };
-                if (event.type === 'session.output_transcript.delta') session.translatedText += event.delta || '';
+                if (event.type === 'session.output_transcript.delta') {
+                    session.translatedText += event.delta || '';
+                    // Translation is flowing again, so a later drop starts its backoff afresh.
+                    this.reconnectAttempts.delete(target.id);
+                }
                 if (event.type === 'session.input_transcript.delta') session.originalText += event.delta || '';
                 if (event.type === 'session.output_transcript.delta' || event.type === 'session.input_transcript.delta') {
                     const update: TranslationUpdate = {
@@ -107,14 +141,14 @@ class RealtimeTranslationService {
                         originalText: session.originalText,
                         latencyMs: session.firstOutputAt ? Math.round(session.firstOutputAt - session.startedAt) : undefined,
                     };
-                    onUpdate(update);
+                    context.onUpdate(update);
                     voiceService.sendTranslationText(target.id, update.translatedText, update.originalText);
                 }
                 if (event.type === 'session.output_transcript.done') {
                     session.translatedText = ''; session.originalText = '';
                     session.startedAt = performance.now(); session.firstOutputAt = undefined;
                 }
-                if (event.type === 'error') onStatus(`OpenAI ${target.name}: ${event.error?.message || 'unknown error'}`);
+                if (event.type === 'error') context.onStatus(`OpenAI ${target.name}: ${event.error?.message || 'unknown error'}`);
             } catch (error) { console.error('Invalid OpenAI realtime event:', error); }
         };
 
@@ -130,11 +164,67 @@ class RealtimeTranslationService {
             await peer.setRemoteDescription({ type: 'answer', sdp: await answer.text() });
         } catch (error) {
             // Leave nothing half-negotiated behind if the exchange fails.
-            sourceTrack.stop();
-            peer.close();
-            this.sessions.delete(target.id);
+            this.closeSession(session);
+            if (this.sessions.get(target.id) === session) this.sessions.delete(target.id);
             throw error;
         }
+    }
+
+    private closeSession(session: ActiveSession) {
+        session.peer.ontrack = null;
+        session.peer.onconnectionstatechange = null;
+        session.sourceTrack.stop();
+        session.peer.close();
+    }
+
+    private scheduleReconnect(targetId: string, minimumDelayMs = 0) {
+        if (this.stopping || this.reconnectTimers.has(targetId) || !this.targets.has(targetId)) return;
+        const attempts = this.reconnectAttempts.get(targetId) ?? 0;
+        const backoff = attempts ? RECONNECT_DELAYS_MS[Math.min(attempts - 1, RECONNECT_DELAYS_MS.length - 1)] : 0;
+        const timer = window.setTimeout(() => {
+            this.reconnectTimers.delete(targetId);
+            void this.reconnectTarget(targetId);
+        }, Math.max(minimumDelayMs, backoff));
+        this.reconnectTimers.set(targetId, timer);
+    }
+
+    private async reconnectTarget(targetId: string) {
+        const target = this.targets.get(targetId);
+        const context = this.context;
+        if (this.stopping || !target || !context) return;
+        const current = this.sessions.get(targetId);
+        // A "disconnected" leg that recovered during the grace period needs nothing.
+        if (current?.peer.connectionState === 'connected') return;
+        const attempt = (this.reconnectAttempts.get(targetId) ?? 0) + 1;
+        this.reconnectAttempts.set(targetId, attempt);
+        if (attempt > RECONNECT_DELAYS_MS.length) {
+            context.onStatus(`OpenAI ${target.name} could not reconnect. Switch to Human mode, or stop and start again.`);
+            return;
+        }
+        context.onStatus(`OpenAI ${target.name} connection lost. Reconnecting (attempt ${attempt} of ${RECONNECT_DELAYS_MS.length})…`);
+        // Detach the dying track before closing its connection: listeners hear silence and
+        // stay connected, rather than the channel ending when that track does.
+        await voiceService.replaceTrack(targetId, null).catch(() => false);
+        if (current) this.closeSession(current);
+        this.sessions.delete(targetId);
+        try {
+            await this.startTarget(target);
+        } catch (error) {
+            context.onStatus(`OpenAI ${target.name} reconnect failed: ${error instanceof Error ? error.message : String(error)}`);
+            this.scheduleReconnect(targetId);
+        }
+    }
+
+    /** Ends one target's OpenAI leg, e.g. after the operator handed its channel to someone else. */
+    private dropTarget(targetId: string) {
+        const timer = this.reconnectTimers.get(targetId);
+        if (timer !== undefined) window.clearTimeout(timer);
+        this.reconnectTimers.delete(targetId);
+        this.reconnectAttempts.delete(targetId);
+        this.targets.delete(targetId);
+        const session = this.sessions.get(targetId);
+        this.sessions.delete(targetId);
+        if (session) this.closeSession(session);
     }
 
     /**
@@ -157,12 +247,18 @@ class RealtimeTranslationService {
 
     async stop(downloadRecordings = true) {
         this.stopping = true;
-        for (const [targetId, session] of this.sessions) {
-            session.sourceTrack.stop();
-            session.peer.close();
-            voiceService.stopChannel(targetId);
-        }
+        this.stopReplacedWatch?.();
+        this.stopReplacedWatch = null;
+        for (const timer of this.reconnectTimers.values()) window.clearTimeout(timer);
+        this.reconnectTimers.clear();
+        this.reconnectAttempts.clear();
+        // A target that is between reconnect attempts has no session but is still published.
+        const channelIds = new Set([...this.sessions.keys(), ...this.targets.keys()]);
+        for (const targetId of channelIds) voiceService.stopChannel(targetId);
+        for (const session of this.sessions.values()) this.closeSession(session);
         this.sessions.clear();
+        this.targets.clear();
+        this.context = null;
         this.sourceStream?.getTracks().forEach((track) => track.stop());
         this.sourceStream = null;
         this.muted = false;

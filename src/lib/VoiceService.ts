@@ -26,6 +26,7 @@ export class VoiceService {
     private sourceStream: MediaStream | null = null;
     private sendTransports = new Map<string, mediasoupClient.types.Transport>();
     private producers = new Map<string, mediasoupClient.types.Producer>();
+    private publishModes = new Map<string, 'human' | 'ai'>();
     private recvTransport: mediasoupClient.types.Transport | null = null;
     private consumer: mediasoupClient.types.Consumer | null = null;
     private currentListenerChannelId: string | null = null;
@@ -34,7 +35,10 @@ export class VoiceService {
     private onTranslationTextReceived?: (text: string, originalText: string) => void;
     private onMuteStatusChange?: (muted: boolean) => void;
     private onConnectionsChange?: (count: number) => void;
+    private onPublishStatus: StatusCallback = () => undefined;
+    private replacedHandlers = new Set<(channelId: string) => void>();
     private listenerCounts = new Map<string, number>();
+    private muted = false;
     private handlersBound = false;
 
     private totalListeners() {
@@ -47,6 +51,13 @@ export class VoiceService {
 
     getBroadcastStream() { return this.sourceStream; }
     isDesktopApp() { return /\bElectron\//i.test(navigator.userAgent); }
+    isPublishing() { return this.producers.size > 0; }
+
+    /** Fires when the operator takes over a channel this device was publishing. */
+    onProducerReplaced(handler: (channelId: string) => void) {
+        this.replacedHandlers.add(handler);
+        return () => { this.replacedHandlers.delete(handler); };
+    }
 
     private mediaError(error: unknown) {
         const name = error instanceof DOMException ? error.name : '';
@@ -127,6 +138,14 @@ export class VoiceService {
         realtimeSocket.on<{ channelId: string }>('producerClosed', ({ channelId }) => {
             if (this.currentListenerChannelId === channelId) this.handleStreamLoss();
         });
+        realtimeSocket.on<{ channelId: string }>('producerReplaced', ({ channelId }) => {
+            if (!this.producers.has(channelId)) return;
+            // The server already closed this producer when the operator took the channel
+            // over, so tear down locally without asking it to close the channel again.
+            this.dropChannel(channelId);
+            this.onConnectionsChange?.(this.totalListeners());
+            this.replacedHandlers.forEach((handler) => handler(channelId));
+        });
         realtimeSocket.on<{ channelId: string; text: string; originalText: string }>('translationText', ({ channelId, text, originalText }) => {
             if (this.currentListenerChannelId === channelId) this.onTranslationTextReceived?.(text, originalText);
         });
@@ -145,9 +164,11 @@ export class VoiceService {
         realtimeSocket.on('sfuRestarting', () => {
             this.device = null;
             this.onListenerStatus?.('Media engine restarting…');
+            if (this.producers.size) this.onPublishStatus('Media engine restarting…');
         });
         realtimeSocket.on('sfuReady', () => {
             this.device = null;
+            if (this.producers.size) void this.republish();
             if (this.currentListenerChannelId) void this.reconnectListener();
         });
         // A dropped Wi-Fi link gives the reconnected socket a new id, so the server holds no
@@ -178,6 +199,7 @@ export class VoiceService {
     ) {
         await this.loadDevice();
         this.onConnectionsChange = onConnectionsChange;
+        this.onPublishStatus = onStatus;
         onStatus('Connecting…');
         const transportInfo = await realtimeSocket.request<TransportResponse>('createWebRtcTransport', { type: 'producer' });
         if (transportInfo.error) throw new Error(transportInfo.error);
@@ -194,10 +216,50 @@ export class VoiceService {
                 ? errback(new Error(result.error || 'No producer ID returned.'))
                 : callback({ id: result.id }));
         });
-        const producer = await transport.produce({ track });
+        // The track belongs to the caller (the capture stream or the OpenAI leg), which stops
+        // it. Letting the producer stop it on close would kill the track the moment the
+        // channel is re-published after a media-engine restart.
+        const producer = await transport.produce({ track, stopTracks: false });
         this.producers.set(channelId, producer);
+        this.publishModes.set(channelId, mode);
         producer.on('trackended', () => this.stopChannel(channelId));
         onStatus('Broadcasting');
+    }
+
+    /**
+     * Swaps the audio on a live channel without making listeners renegotiate. Used when the
+     * OpenAI leg reconnects, and with `null` to send silence while it does. Returns false when
+     * the channel is not published from this device.
+     */
+    async replaceTrack(channelId: string, track: MediaStreamTrack | null) {
+        const producer = this.producers.get(channelId);
+        if (!producer || producer.closed) return false;
+        await producer.replaceTrack({ track });
+        return true;
+    }
+
+    /**
+     * Re-publishes every live channel once a restarted media worker is ready. The server
+     * forgets all producers when the worker dies, so without this a broadcaster went on
+     * "broadcasting" to an engine that no longer knew about them until someone pressed Stop
+     * and Start again.
+     */
+    private async republish() {
+        const channels = [...this.producers].map(([channelId, producer]) => ({
+            channelId, track: producer.track, mode: this.publishModes.get(channelId) ?? 'human',
+        }));
+        for (const { channelId } of channels) this.dropChannel(channelId);
+        for (const { channelId, track, mode } of channels) {
+            // An AI leg that is mid-reconnect has no track yet; it publishes on its own once
+            // the new OpenAI connection delivers audio.
+            if (!track || track.readyState !== 'live') continue;
+            try {
+                await this.publishTrack(channelId, track, mode, this.onPublishStatus, this.onConnectionsChange);
+            } catch (error) {
+                this.onPublishStatus(`Could not resume broadcasting after the media engine restarted: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        }
+        if (this.muted) this.setMuted(true);
     }
 
     async startBroadcast(channelId: string, onStatus: StatusCallback, onConnectionsChange: (count: number) => void, deviceId?: string) {
@@ -214,6 +276,7 @@ export class VoiceService {
     }
 
     setMuted(muted: boolean) {
+        this.muted = muted;
         for (const [channelId, producer] of this.producers) {
             if (muted) producer.pause(); else producer.resume();
             // producer.pause() only pauses the local object; the server has to pause the real
@@ -232,17 +295,23 @@ export class VoiceService {
         if (result?.error) throw new Error(result.error);
     }
 
+    /** Closes a channel's local objects only, for when the server side is already gone. */
+    private dropChannel(channelId: string) {
+        this.producers.get(channelId)?.close();
+        this.sendTransports.get(channelId)?.close();
+        this.producers.delete(channelId);
+        this.sendTransports.delete(channelId);
+        this.publishModes.delete(channelId);
+        this.listenerCounts.delete(channelId);
+    }
+
     /**
      * Tears a channel down locally and tells the server. Closing only the local objects leaves
      * the server publishing a dead producer until DTLS eventually times out, during which a
      * listener can "successfully" subscribe to silence.
      */
     stopChannel(channelId: string) {
-        this.producers.get(channelId)?.close();
-        this.sendTransports.get(channelId)?.close();
-        this.producers.delete(channelId);
-        this.sendTransports.delete(channelId);
-        this.listenerCounts.delete(channelId);
+        this.dropChannel(channelId);
         realtimeSocket.emit('closeProducer', { channelId });
     }
 
@@ -251,6 +320,7 @@ export class VoiceService {
         this.sourceStream?.getTracks().forEach((track) => track.stop());
         this.sourceStream = null;
         this.listenerCounts.clear();
+        this.muted = false;
         this.onConnectionsChange?.(0);
         if (!this.currentListenerChannelId) this.device = null;
     }

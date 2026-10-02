@@ -16,6 +16,14 @@ const { ExpiringMap, LoginThrottle, isValidPin, newAccessCode, newToken, setPin,
 
 const HTTPS_PORT = 4173;
 const LOCAL_PORT = 4174;
+// Plain-HTTP port for listener phones only. A LAN address cannot get a publicly trusted
+// certificate, so every phone hit a certificate warning before it could listen. Listening
+// needs no secure context (only microphone capture does), so phones can use plain HTTP here,
+// while signing in and broadcasting stay on HTTPS. The audio itself is still encrypted by
+// WebRTC (DTLS-SRTP).
+const LISTENER_PORT = 4175;
+// The only API calls a listener page makes.
+const LISTENER_API = new Set(['/api/settings', '/api/health']);
 // One multiplexed ICE port for every transport (see createMedia). The wider range is only
 // used by the fallback path when the shared port cannot be bound.
 const RTC_PORT = 10000;
@@ -32,6 +40,8 @@ const WORKER_RESTART_DELAYS_MS = [1000, 2000, 5000, 10_000, 30_000];
 let mainWindow;
 let httpsServer;
 let httpServer;
+let listenerServer;
+let listenerPortError = '';
 let maintenanceTimer;
 let dynamicDnsTimer;
 let media = { worker: null, router: null, webRtcServer: null, error: '', portMode: 'unknown' };
@@ -447,6 +457,20 @@ async function startServers(isDev) {
         response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
         next();
     });
+    // The plain listener port serves listening and nothing else. It refuses every API that
+    // signs in or changes anything, so a PIN or interpreter code is never accepted over plain
+    // HTTP, and it sends the sign-in pages to the HTTPS address before anything is typed.
+    expressApp.use((request, response, next) => {
+        if (request.socket.localPort !== LISTENER_PORT) return next();
+        if (request.path.startsWith('/api/')) {
+            if (request.method === 'GET' && LISTENER_API.has(request.path)) return next();
+            return response.status(403).json({ error: 'This address is for listening only. Use the secure address to sign in or broadcast.' });
+        }
+        if (/^\/(admin|interpreter)(\/|$)/.test(request.path)) {
+            return response.redirect(302, `https://${request.hostname}:${HTTPS_PORT}${request.originalUrl}`);
+        }
+        next();
+    });
     expressApp.use(express.json({ limit: '256kb' }));
     expressApp.use((error, _request, response, next) => {
         if (error?.type === 'entity.parse.failed' || error instanceof SyntaxError) {
@@ -457,6 +481,7 @@ async function startServers(isDev) {
 
     httpsServer = https.createServer(await ensureServerCertificate(settings, localAddress), expressApp);
     httpServer = http.createServer(expressApp);
+    listenerServer = http.createServer(expressApp);
 
     const { Server: SocketServer } = require('socket.io');
     const io = new SocketServer(httpsServer, {
@@ -465,10 +490,12 @@ async function startServers(isDev) {
         allowRequest: (request, callback) =>
             callback(null, isAllowedOriginHeader(request.headers.origin, settings)),
     });
-    httpServer.on('upgrade', (request, socket, head) => {
+    const forwardUpgrade = (request, socket, head) => {
         if (!String(request.url || '').startsWith('/socket.io/')) return socket.destroy();
         io.engine.handleUpgrade(request, socket, head);
-    });
+    };
+    httpServer.on('upgrade', forwardUpgrade);
+    listenerServer.on('upgrade', forwardUpgrade);
 
     const liveChannels = new Map();
     const transports = new Map();
@@ -582,7 +609,10 @@ async function startServers(isDev) {
 
     io.on('connection', (socket) => {
         transports.set(socket.id, new Map());
-        const socketToken = () => socket.handshake.auth?.token;
+        // A socket that came in on the plain listener port is never treated as signed in, even
+        // if it presents a token: it may only listen.
+        const listenOnly = socket.request.socket?.localPort === LISTENER_PORT;
+        const socketToken = () => (listenOnly ? '' : socket.handshake.auth?.token);
         const socketIsAdmin = () => isAdminToken(socketToken());
         const socketPublisher = () => publisherSession(socketToken());
         // A reconnecting phone gets a new socket id but keeps its session token, so either one
@@ -753,7 +783,7 @@ async function startServers(isDev) {
         sfu: media.router ? 'ready' : 'unavailable',
         publicHost: certificateState.type === 'trusted' ? certificateState.hostname : localAddress,
         certificateType: certificateState.type,
-        ports: { https: HTTPS_PORT },
+        ports: { https: HTTPS_PORT, listener: listenerPortError ? null : LISTENER_PORT },
     }));
 
     // Anything holding a broadcaster session may read the microphone permission state, which
@@ -780,7 +810,11 @@ async function startServers(isDev) {
         certificatePath: path.join(certificateDirectory(), certificateState.type === 'trusted' ? 'trusted-cert.pem' : 'server-cert.pem'),
         microphoneAccess: ['win32', 'darwin'].includes(process.platform)
             ? systemPreferences.getMediaAccessStatus('microphone') : 'unknown',
-        ports: { https: HTTPS_PORT, local: LOCAL_PORT, rtc: media.portMode === 'multiplexed' ? `${RTC_PORT}/udp+tcp` : `${RTC_MIN_PORT}-${RTC_MAX_PORT}/udp+tcp` },
+        ports: {
+            https: HTTPS_PORT, local: LOCAL_PORT, listener: listenerPortError ? null : LISTENER_PORT,
+            rtc: media.portMode === 'multiplexed' ? `${RTC_PORT}/udp+tcp` : `${RTC_MIN_PORT}-${RTC_MAX_PORT}/udp+tcp`,
+        },
+        listenerPortError,
     }));
 
     expressApp.post('/api/admin/login', (request, response) => {
@@ -984,9 +1018,17 @@ async function startServers(isDev) {
     });
     await listen(httpServer, LOCAL_PORT, '127.0.0.1');
     await listen(httpsServer, HTTPS_PORT, '0.0.0.0');
+    // The plain listener port is a convenience, not a requirement: if something else holds
+    // it, start anyway and let Admin fall back to the HTTPS link and say why.
+    try { await listen(listenerServer, LISTENER_PORT, '0.0.0.0'); }
+    catch (error) {
+        listenerPortError = error.message;
+        console.warn(`Plain listener port unavailable: ${error.message}`);
+    }
     // Keep serving after startup even if a socket errors later.
     httpServer.on('error', (error) => console.error('Local HTTP server error:', error.message));
     httpsServer.on('error', (error) => console.error('HTTPS server error:', error.message));
+    listenerServer.on('error', (error) => console.error('Listener HTTP server error:', error.message));
 
     maintenanceTimer = setInterval(() => {
         adminSessions.prune(); interpreterSessions.prune(); interpreterCodes.prune();
@@ -1019,7 +1061,9 @@ async function startServers(isDev) {
     }, DYNAMIC_DNS_INTERVAL_MS);
     dynamicDnsTimer.unref?.();
 
-    console.log(`Lingua Franca listener: https://${certificateState.hostname || localAddress}:${HTTPS_PORT}/listener`);
+    console.log(listenerPortError
+        ? `Lingua Franca listener: https://${certificateState.hostname || localAddress}:${HTTPS_PORT}/listener`
+        : `Lingua Franca listener: http://${localAddress}:${LISTENER_PORT}/listener`);
 }
 
 /* ------------------------------------------------------------- bootstrap */
@@ -1064,6 +1108,7 @@ app.on('before-quit', () => {
     try { media.worker?.close(); } catch { /* already closed */ }
     try { httpsServer?.close(); } catch { /* already closed */ }
     try { httpServer?.close(); } catch { /* already closed */ }
+    try { listenerServer?.close(); } catch { /* already closed */ }
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

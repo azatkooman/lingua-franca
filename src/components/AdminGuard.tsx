@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Lock, ShieldAlert, ArrowLeft } from 'lucide-react';
 import { settingsService } from '../lib/SettingsService';
 import { useTranslation } from '../lib/i18n';
+import { isPlainListenerLink, secureLocation } from '../lib/navigation';
 import '../pages/Admin.css';
 
 export default function AdminGuard({ children }: { children: ReactNode }) {
@@ -20,6 +21,12 @@ export default function AdminGuard({ children }: { children: ReactNode }) {
         setIsAuthorized(authenticated);
         if (!authenticated) setError('');
     }), []);
+
+    // Reached from the plain listener link (for example Home, then Admin): move to HTTPS before
+    // a PIN can be typed. The server would refuse it on that port anyway, but only after the
+    // PIN had already crossed the Wi-Fi unencrypted.
+    const insecure = isPlainListenerLink();
+    useEffect(() => { if (insecure) window.location.replace(secureLocation()); }, [insecure]);
 
     const submit = async (event: FormEvent) => {
         event.preventDefault();
@@ -39,6 +46,7 @@ export default function AdminGuard({ children }: { children: ReactNode }) {
         }
     };
 
+    if (insecure) return <div className="page-container admin-gate"><p className="text-muted">{t('redirecting_secure')}</p></div>;
     if (isAuthorized) return <>{children}</>;
 
     return (

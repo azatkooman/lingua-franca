@@ -3,6 +3,7 @@ import { ArrowLeft, Lock, Mic, ShieldAlert } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { settingsService } from '../lib/SettingsService';
 import { useTranslation } from '../lib/i18n';
+import { isPlainListenerLink, secureLocation } from '../lib/navigation';
 import '../pages/Admin.css';
 
 const isAuthorized = () => settingsService.isAdminAuthenticated() || settingsService.isInterpreterAuthenticated();
@@ -65,11 +66,16 @@ export default function InterpreterGuard({ children }: { children: ReactNode }) 
         } finally { setChecking(false); }
     };
 
+    // Reached from the plain listener link: move to HTTPS before a code or PIN can be entered,
+    // and never send one from here. Broadcasting needs the microphone, which needs HTTPS anyway.
+    const insecure = isPlainListenerLink();
+    useEffect(() => { if (insecure) window.location.replace(secureLocation()); }, [insecure]);
+
     useEffect(() => {
-        if (authorized || automaticCode.length !== 6 || attempted.current) return;
+        if (insecure || authorized || automaticCode.length !== 6 || attempted.current) return;
         attempted.current = true;
         void login(automaticCode);
-    }, [authorized, automaticCode, login]);
+    }, [insecure, authorized, automaticCode, login]);
 
     const submit = (event: FormEvent) => {
         event.preventDefault();
@@ -78,6 +84,7 @@ export default function InterpreterGuard({ children }: { children: ReactNode }) 
 
     const switchMode = () => { setUsePin((current) => !current); setError(''); };
 
+    if (insecure) return <div className="page-container admin-gate"><p className="text-muted">{t('redirecting_secure')}</p></div>;
     if (authorized) return <>{children}</>;
 
     return (

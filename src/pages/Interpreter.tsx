@@ -34,6 +34,10 @@ export default function Interpreter() {
     const meterCleanup = useRef<(() => void) | null>(null);
     const transcriptId = useRef(0);
     const pickersSeeded = useRef(false);
+    // Read by the input-list refresh, which runs after a broadcast starts and on device changes;
+    // its errors must not replace the live status line.
+    const liveRef = useRef(false);
+    useEffect(() => { liveRef.current = isLive; }, [isLive]);
 
     const languages = settings.languages;
     const languageName = useCallback(
@@ -94,10 +98,10 @@ export default function Interpreter() {
                 const preferred = current || remembered;
                 return devices.some((device) => device.deviceId === preferred) ? preferred : '';
             });
-            if (!devices.length) setStatus(t('no_input_detected'));
+            if (!devices.length && !liveRef.current) setStatus(t('no_input_detected'));
         } catch (error) {
             setMicrophones([]);
-            setStatus(error instanceof Error ? error.message : String(error));
+            if (!liveRef.current) setStatus(error instanceof Error ? error.message : String(error));
         }
     }, [t]);
 
@@ -156,6 +160,7 @@ export default function Interpreter() {
             if (mode === 'human') {
                 if (!humanChannelId) throw new Error(t('choose_channel_first'));
                 await voiceService.startBroadcast(humanChannelId, setStatus, setListeners, selectedMic);
+                liveRef.current = true;
                 localStorage.setItem('lingua_franca_microphone', selectedMic);
                 void refreshMicrophones(false);
                 const stream = voiceService.getBroadcastStream();

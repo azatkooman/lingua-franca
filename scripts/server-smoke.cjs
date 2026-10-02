@@ -93,6 +93,8 @@ require(path.join(__dirname, '..', 'main.cjs'));
 markReady();
 
 const BASE = 'http://127.0.0.1:4174';
+// The plain-HTTP, listening-only port that phones use without a certificate warning.
+const LISTENER_BASE = 'http://127.0.0.1:4175';
 const results = [];
 const sockets = [];
 let failures = 0;
@@ -125,8 +127,8 @@ const login = async (pin = '1234') => (await json('/api/admin/login', {
 
 /* ------------------------------------------------------------- signalling */
 
-const connect = (token = '') => new Promise((resolve, reject) => {
-    const socket = io(BASE, { transports: ['websocket'], auth: { token }, reconnection: false });
+const connect = (token = '', base = BASE) => new Promise((resolve, reject) => {
+    const socket = io(base, { transports: ['websocket'], auth: { token }, reconnection: false });
     sockets.push(socket);
     socket.once('connect', () => resolve(socket));
     socket.once('connect_error', reject);
@@ -239,6 +241,58 @@ async function run() {
         assert.equal('openaiApiKeyEncrypted' in body, false);
         assert.equal('duckDnsTokenEncrypted' in body, false);
         return 'secrets absent';
+    });
+
+    await check('the plain listener port serves the channel list and health', async () => {
+        const settings = await fetch(`${LISTENER_BASE}/api/settings`);
+        assert.equal(settings.status, 200);
+        assert.ok(Array.isArray((await settings.json()).languages));
+        const health = await (await fetch(`${BASE}/api/health`)).json();
+        assert.equal(health.ports.listener, 4175, 'public health advertises the listener port');
+        assert.equal((await fetch(`${LISTENER_BASE}/api/health`)).status, 200);
+        return 'settings 200, health 200';
+    });
+
+    await check('the plain listener port refuses sign-in, codes and every operator call', async () => {
+        const refused = [
+            ['POST', '/api/admin/login', { pin: '1234' }],
+            ['POST', '/api/interpreter/login', { code: '123456' }],
+            ['GET', '/api/admin/settings'],
+            ['GET', '/api/admin/health'],
+            ['GET', '/api/diagnostics'],
+            ['POST', '/api/admin/restart'],
+            ['POST', '/api/realtime/session', {}],
+            ['POST', '/api/settings', {}],
+        ];
+        for (const [method, route, body] of refused) {
+            const response = await fetch(`${LISTENER_BASE}${route}`, {
+                method, headers: authed(token), body: body ? JSON.stringify(body) : undefined,
+            });
+            assert.equal(response.status, 403, `${method} ${route} returned ${response.status}`);
+        }
+        return `${refused.length} routes refused with a valid operator token`;
+    });
+
+    await check('the plain listener port sends sign-in pages to HTTPS before anything is typed', async () => {
+        for (const page of ['/admin', '/interpreter?code=123456']) {
+            const response = await fetch(`${LISTENER_BASE}${page}`, { redirect: 'manual' });
+            assert.equal(response.status, 302, `${page} returned ${response.status}`);
+            assert.equal(response.headers.get('location'), `https://127.0.0.1:4173${page}`);
+        }
+        return '302 to https://…:4173';
+    });
+
+    await check('a socket on the plain listener port can listen but never broadcast, even with a token', async () => {
+        const socket = await connect(token, LISTENER_BASE);
+        const producer = await ask(socket, 'createWebRtcTransport', { type: 'producer' });
+        if (!sfuReady) {
+            assert.ok(producer.error, 'expected a refusal');
+            return 'skipped media half (no media worker)';
+        }
+        assert.match(producer.error || '', /Broadcaster login required/);
+        const consumer = await ask(socket, 'createWebRtcTransport', { type: 'consumer' });
+        assert.ok(consumer.id, consumer.error || 'no consumer transport');
+        return 'producer refused, consumer allowed';
     });
 
     await check('renaming a channel preserves its id, so a live broadcast survives', async () => {

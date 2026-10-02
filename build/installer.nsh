@@ -2,7 +2,10 @@
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Lingua Franca HTTPS"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Lingua Franca WebRTC"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Lingua Franca WebRTC TCP"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Lingua Franca Listener"'
   nsExec::ExecToLog 'netsh advfirewall firewall add rule name="Lingua Franca HTTPS" dir=in action=allow protocol=TCP localport=4173 program="$INSTDIR\Lingua Franca.exe" profile=private'
+  ; Plain-HTTP listener port: phones open it without a certificate warning. It serves listening only.
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="Lingua Franca Listener" dir=in action=allow protocol=TCP localport=4175 program="$INSTDIR\Lingua Franca.exe" profile=private'
   ; All WebRTC transports share ICE port 10000. TCP is opened too: it is the fallback path for
   ; phones on Wi-Fi that blocks UDP, and previously it was advertised but never allowed through.
   nsExec::ExecToLog 'netsh advfirewall firewall add rule name="Lingua Franca WebRTC" dir=in action=allow protocol=UDP localport=10000 program="$INSTDIR\Lingua Franca.exe" profile=private'
@@ -13,4 +16,5 @@
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Lingua Franca HTTPS"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Lingua Franca WebRTC"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Lingua Franca WebRTC TCP"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Lingua Franca Listener"'
 !macroend

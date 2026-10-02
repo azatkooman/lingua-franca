@@ -18,7 +18,18 @@ interface HealthInfo {
     certificatePath: string;
     publicHost: string;
     certificate: { type: 'trusted' | 'self-signed'; hostname: string; expiresAt: string; error: string };
-    ports: { https: number; local: number; rtc: string };
+    ports: { https: number; local: number; listener: number | null; rtc: string };
+    listenerPortError: string;
+}
+
+type PhoneLink = 'plain' | 'secure';
+const PHONE_LINK_KEY = 'lingua_franca_phone_link';
+
+// Which address listener QR codes carry. Plain HTTP is the default because it opens with no
+// certificate warning and needs neither DuckDNS nor internet. Kept per operator device.
+function readPhoneLink(): PhoneLink {
+    try { return localStorage.getItem(PHONE_LINK_KEY) === 'secure' ? 'secure' : 'plain'; }
+    catch { return 'plain'; }
 }
 
 // Operators paste whatever DuckDNS showed them, which may be a full URL. Reduce it to the
@@ -38,6 +49,7 @@ export default function Admin() {
     const [settings, setSettings] = useState<AdminSettings | null>(settingsService.getAdminSettings());
     const [health, setHealth] = useState<HealthInfo | null>(null);
     const [qrChannelId, setQrChannelId] = useState('');
+    const [phoneLink, setPhoneLink] = useState<PhoneLink>(readPhoneLink);
     const [showQr, setShowQr] = useState(false);
     const [interpreterLink, setInterpreterLink] = useState<{ url: string; code: string; channelName: string } | null>(null);
     const [interpreterChannelId, setInterpreterChannelId] = useState('');
@@ -99,10 +111,23 @@ export default function Admin() {
     };
 
     const host = health?.publicHost || health?.localAddress;
+    const plainAvailable = Boolean(health?.ports.listener);
+    // Falls back to HTTPS when the plain port could not start, so a QR never points at a dead
+    // address.
+    const usePlainLink = phoneLink === 'plain' && plainAvailable;
+    const choosePhoneLink = (next: PhoneLink) => {
+        setPhoneLink(next);
+        try { localStorage.setItem(PHONE_LINK_KEY, next); } catch { /* optional preference */ }
+    };
     // Every channel gets its own link; the QR used to be hard-coded to a channel named
-    // "English", which broke as soon as the channel list was renamed.
-    const listenerUrlFor = (channelId: string) =>
-        host && health ? `https://${host}:${health.ports.https}/listener?channel=${encodeURIComponent(channelId)}` : '';
+    // "English", which broke as soon as the channel list was renamed. The plain link uses the
+    // LAN address directly: it needs no DNS, so it works on Wi-Fi without internet.
+    const listenerUrlFor = (channelId: string) => {
+        if (!health) return '';
+        const query = `/listener?channel=${encodeURIComponent(channelId)}`;
+        if (usePlainLink) return `http://${health.localAddress}:${health.ports.listener}${query}`;
+        return host ? `https://${host}:${health.ports.https}${query}` : '';
+    };
     const qrLanguage = settings?.languages.find((language) => language.id === qrChannelId) || null;
     const qrUrl = listenerUrlFor(qrChannelId);
 
@@ -197,7 +222,17 @@ export default function Admin() {
                     <p>{t('certificate_label')} <strong>{health?.certificate.type === 'trusted' ? t('certificate_trusted') : t('certificate_local')}</strong></p>
                     {health?.certificate.expiresAt && <p className="text-muted">{t('expires', { date: new Date(health.certificate.expiresAt).toLocaleDateString(locale) })}</p>}
                     {health?.certificate.error && <p style={{ color: 'var(--danger)' }}>{health.certificate.error}</p>}
-                    <p className="text-muted">{t('firewall_hint', { https: health?.ports.https ?? 4173, rtc: health?.ports.rtc ?? '10000/udp+tcp' })}</p>
+                    <p className="text-muted">{t('firewall_hint', { https: health?.ports.https ?? 4173, listener: health?.ports.listener ?? 4175, rtc: health?.ports.rtc ?? '10000/udp+tcp' })}</p>
+
+                    <label className="mt-4">{t('phone_link_type')}</label>
+                    <select className="custom-select" value={usePlainLink ? 'plain' : 'secure'} onChange={(event) => choosePhoneLink(event.target.value as PhoneLink)}>
+                        <option value="plain" disabled={!plainAvailable}>{t('phone_link_plain')}</option>
+                        <option value="secure">{t('phone_link_secure')}</option>
+                    </select>
+                    <p className="text-muted">{usePlainLink ? t('phone_link_plain_hint') : t('phone_link_secure_hint')}</p>
+                    {health?.listenerPortError && (
+                        <p style={{ color: 'var(--danger)' }}>{t('listener_port_unavailable', { error: health.listenerPortError })}</p>
+                    )}
 
                     <label className="mt-4">{t('listener_qr_channel')}</label>
                     <select className="custom-select" value={qrChannelId} onChange={(event) => setQrChannelId(event.target.value)}>

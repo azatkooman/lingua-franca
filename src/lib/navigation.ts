@@ -1,5 +1,18 @@
 import { useNavigate } from 'react-router-dom';
 
+const HTTPS_PORT = 4173;
+
+/**
+ * True on the plain-HTTP listener link (http://<LAN address>:4175). That link exists so phones
+ * can listen without a certificate warning; nothing secret may be typed into it. The desktop
+ * window (http://localhost) and every HTTPS address count as secure contexts.
+ */
+export const isPlainListenerLink = () => !window.isSecureContext;
+
+/** The same page on the HTTPS address, for sign-in screens reached from the plain link. */
+export const secureLocation = () =>
+    `https://${window.location.hostname}:${HTTPS_PORT}${window.location.pathname}${window.location.search}`;
+
 /**
  * A Back action that never leaves the app.
  *

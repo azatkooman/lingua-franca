@@ -18,7 +18,7 @@ npm ci
 npm run electron:build:win
 ```
 
-The build preflight rejects ARM builds and non-Windows `mediasoup-worker` binaries. The installer is written to `release` and adds private-network firewall rules for **TCP 4173** (the web UI) and **UDP and TCP 10000** (media).
+The build preflight rejects ARM builds and non-Windows `mediasoup-worker` binaries. The installer is written to `release` and adds private-network firewall rules for **TCP 4173** (the secure web UI), **TCP 4175** (the plain listener link) and **UDP and TCP 10000** (media).
 
 No local toolchain? Every push and pull request also builds the installer on GitHub Actions (see [Releases](#releases)).
 
@@ -67,8 +67,8 @@ Every WebRTC transport needs an ICE port. Lingua Franca puts all transports on a
 4. In Admin, select the physical network adapter if the automatic address is wrong, then press **Restart app**.
 5. Add an OpenAI API key if using AI translation. ChatGPT subscriptions do not include API usage. OpenAI's realtime translation model does not accept a custom glossary, so check names and Bible books by ear before the service.
 6. Under **Default language for phones**, choose the language phones start in. Each phone can still switch with EN/RU.
-7. For warning-free phone access, create a free subdomain at [DuckDNS](https://www.duckdns.org), then enter the subdomain, DuckDNS token, and contact email under **Trusted phone certificate**. The app obtains a free Let's Encrypt certificate and renews it automatically once it has fewer than 30 days remaining. A still-valid certificate is reused rather than reissued, which keeps you clear of the CA's weekly duplicate-certificate limit.
-8. Pick a channel under **Listener QR channel** and show its QR. Each channel has its own link. With a trusted certificate configured, phones open it without a certificate warning.
+7. Optional: listener phones need no certificate (see step 8), but interpreter phones and Admin on other devices use HTTPS. To remove the warning there too, create a free subdomain at [DuckDNS](https://www.duckdns.org), then enter the subdomain, DuckDNS token, and contact email under **Trusted phone certificate**. The app obtains a free Let's Encrypt certificate and renews it automatically once it has fewer than 30 days remaining. A still-valid certificate is reused rather than reissued, which keeps you clear of the CA's weekly duplicate-certificate limit.
+8. Pick a channel under **Listener QR channel** and show its QR. Each channel has its own link. By default the QR carries the **plain listener link** (`http://<computer address>:4175/listener?...`), which phones open straight away with no certificate warning, no DuckDNS and no internet. See [Listener link](#listener-link).
 9. On the home screen, choose **Be an Interpreter** and sign in with the operator PIN (an interpreter phone uses its QR code instead). Select the soundboard, USB interface, or microphone input. The desktop app also offers **System output / loopback** to capture whatever Windows is currently playing. Choose **Human**, or **AI** with the source and target languages (Russian to English is preselected when those channels exist), then start the broadcast.
 10. Press **Sign out** in Admin when the service is over, so the next person at the computer needs the PIN.
 
@@ -79,6 +79,17 @@ A phone cannot start broadcasting on a channel that is already live, and cannot 
 The API key and PIN are never returned to listener browsers. Listener devices receive only the channel list; network configuration and diagnostics require an operator session. API keys are encrypted with the operating system's secure storage and only short-lived operator sessions may publish media or captions.
 
 Renaming a channel keeps its identity, so a rename mid-service will not interrupt a live broadcast. Deleting a channel stops its broadcast immediately.
+
+## Listener link
+
+A phone only trusts certificates for public domain names, and a `192.168.x.x` address cannot get one, so HTTPS links show a certificate warning on every phone. Listening does not need HTTPS: browsers require a secure page only for microphone access, which listeners never use. So listener phones get a plain-HTTP link on **TCP 4175**:
+
+- It opens with no warning, needs no DuckDNS and works on Wi-Fi without internet.
+- The audio is still encrypted: WebRTC always encrypts media (DTLS-SRTP). Only the page and the connection setup travel unencrypted on the church Wi-Fi.
+- It serves listening only. Every sign-in, interpreter-code and operator request is refused on that port, sockets from it can never broadcast, and `/admin` and `/interpreter` redirect to HTTPS before anything can be typed.
+- The **Phone / Speaker** switch may not work there, because browsers keep audio-output selection for secure pages. Normal playback and volume are unaffected.
+
+Interpreter phones and Admin stay on HTTPS (they need the microphone or a PIN). They show the certificate warning once per phone unless the DuckDNS certificate in step 7 is set up. Admin can switch listener QR codes back to HTTPS under **Link for listener phones**. If TCP 4175 is taken by another program, the app still starts and Admin says so, and QR codes fall back to HTTPS.
 
 ## Pre-service checks
 
@@ -119,8 +130,9 @@ Each simulated client connects and allocates a real listener transport, so this 
 
 - **The app will not start:** it now reports the reason in the window and in an error dialog instead of failing silently. The usual cause is a second copy already running, or something else holding TCP 4173 or 4174. Only one instance can run at a time; launching again focuses the existing window.
 - **Worker missing or wrong format:** remove only `node_modules`, then run `npm ci` locally on Windows.
-- **Phones cannot connect:** confirm the Windows network is Private, the firewall rules exist for TCP 4173 and UDP/TCP 10000, and the displayed IP is correct.
-- **Certificate warning:** the app is still using its self-signed fallback. Complete **Trusted phone certificate** setup in Admin; a public CA cannot issue a trusted certificate directly for a private `192.168.x.x`/`10.x.x.x` address. To rehearse the setup without consuming the CA's weekly issuance budget, start the app with `LINGUA_FRANCA_ACME_STAGING=1` — staging certificates still show a warning on phones.
+- **Phones cannot connect:** confirm the Windows network is Private, the firewall rules exist for TCP 4173, TCP 4175 and UDP/TCP 10000, and the displayed IP is correct.
+- **Certificate warning on listener phones:** make sure **Link for listener phones** in Admin is set to the plain link, then show the QR again.
+- **Certificate warning on interpreter phones or Admin:** the app is still using its self-signed fallback. Complete **Trusted phone certificate** setup in Admin; a public CA cannot issue a trusted certificate directly for a private `192.168.x.x`/`10.x.x.x` address. To rehearse the setup without consuming the CA's weekly issuance budget, start the app with `LINGUA_FRANCA_ACME_STAGING=1` — staging certificates still show a warning on phones.
 - **Trusted hostname does not open:** confirm the phone is on the same Wi-Fi, DuckDNS resolves to the computer's current LAN address, and TCP 4173 is allowed through Windows Firewall. The app re-points DuckDNS automatically if the computer's address changes while it is running.
 - **No microphone labels:** tap the refresh button next to the input selector and allow microphone access. Some phones expose only the system-default input.
 - **A speaker or virtual-cable playback endpoint is missing:** Windows exposes playback and recording endpoints separately. Select **System output / loopback** for the current Windows playback mix, or select the virtual cable's recording endpoint (usually named "Output") as the microphone input.

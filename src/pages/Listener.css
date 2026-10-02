@@ -215,23 +215,27 @@
     transform: scale(1.1);
 }
 
+/* Incoming audio level. Drawn as a visible track, the same colour as the slider's empty
+   part, because an empty meter used to be just a divider border and read as a stray line. */
 .signal-meter {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    padding: 0 0.75rem;
+    justify-content: flex-end;
+    flex-shrink: 0;
+    width: 6px;
     height: 32px;
-    border-right: 1px solid rgba(255, 255, 255, 0.1);
-    margin-right: 0.5rem;
+    margin: 0 0.25rem;
+    background: var(--surface-2);
+    border-radius: 3px;
+    overflow: hidden;
 }
 
 .signal-bar {
-    width: 4px;
+    width: 100%;
     background: var(--accent);
-    border-radius: 2px;
+    border-radius: 3px;
     transition: height 0.1s ease-out;
     box-shadow: 0 0 8px var(--accent-glow);
-    margin-top: auto;
 }
 
 .signal-label {

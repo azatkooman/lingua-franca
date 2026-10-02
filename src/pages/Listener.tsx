@@ -17,6 +17,23 @@ function resolveChannel(languages: Language[], requested: string): Language | nu
         || null;
 }
 
+const VOLUME_KEY = 'lingua_franca_listener_volume';
+
+// Start at full volume: the phone's own buttons are the main control, and the old fixed 80%
+// start capped how loud a listener could ever get. A listener's own choice is remembered on
+// this device. A saved 0 is ignored so nobody reconnects to apparent silence.
+function readSavedVolume() {
+    try {
+        const saved = Number(localStorage.getItem(VOLUME_KEY) ?? NaN);
+        return Number.isFinite(saved) && saved > 0 && saved <= 100 ? saved : 100;
+    } catch { return 100; }
+}
+
+function saveVolume(volume: number) {
+    try { localStorage.setItem(VOLUME_KEY, String(volume)); }
+    catch { /* private browsing or a full quota; remembering is optional */ }
+}
+
 export default function Listener() {
     const navigate = useNavigate();
     const { t } = useTranslation();
@@ -24,7 +41,7 @@ export default function Listener() {
     const [languages, setLanguages] = useState<Language[]>([]);
     const [requestedChannel] = useState(() => new URLSearchParams(window.location.search).get('channel') || '');
     const [selectedId, setSelectedId] = useState('');
-    const [volume, setVolume] = useState(80);
+    const [volume, setVolume] = useState(readSavedVolume);
     const [isMuted, setIsMuted] = useState(false);
     const [playbackMode, setPlaybackMode] = useState<'speaker' | 'earpiece'>('speaker');
     const [playbackHint, setPlaybackHint] = useState('');
@@ -367,7 +384,8 @@ export default function Listener() {
                     {playbackHint && <p className="playback-hint">{playbackHint}</p>}
 
                     <div className="volume-control glass-panel">
-                        <div className="signal-meter">
+                        <div className="signal-meter" role="meter" aria-label="Incoming audio level" title="Incoming audio level"
+                            aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(signalLevel)}>
                             <div className="signal-bar" style={{ height: `${signalLevel}%` }}></div>
                         </div>
                         <button className="btn-icon" onClick={() => setIsMuted(!isMuted)} aria-label={isMuted ? t('unmute_audio') : t('mute_audio')}>
@@ -380,7 +398,9 @@ export default function Listener() {
                             value={isMuted ? 0 : volume}
                             style={{ '--volume-percent': `${isMuted ? 0 : volume}%` } as CSSProperties}
                             onChange={(e) => {
-                                setVolume(parseInt(e.target.value));
+                                const next = parseInt(e.target.value);
+                                setVolume(next);
+                                saveVolume(next);
                                 if (isMuted) setIsMuted(false);
                             }}
                             className="volume-slider"

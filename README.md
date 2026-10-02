@@ -1,6 +1,6 @@
 # Lingua Franca
 
-Local-network simultaneous interpretation for churches and meetings. A Windows computer captures the soundboard or microphone, translates Russian speech into English, and broadcasts one synchronized audio channel to listeners who join by QR code.
+Local-network simultaneous interpretation for any kind of event: conferences, meetings, services, seminars and more. A Windows computer takes the audio from the mixer or a microphone, has it interpreted live (by a human interpreter, or by OpenAI for example from Russian into English), and broadcasts each language as its own audio channel to listeners, who join on their own phones by scanning a QR code.
 
 ## Modes
 
@@ -62,14 +62,14 @@ Every WebRTC transport needs an ICE port. Lingua Franca puts all transports on a
 ## First service
 
 1. Connect the computer and listener phones to the same private Wi-Fi network.
-2. Connect the soundboard line output to a USB audio interface on the computer.
+2. Connect the mixer's line output to a USB audio interface on the computer. Send a speech-only mix (the speaker's microphone, not music or room sound).
 3. Launch Lingua Franca and sign in as operator. The initial PIN is `1234`; change it immediately. A PIN may be 4 to 12 digits, and longer is meaningfully harder to guess. Repeated wrong entries lock the app out for progressively longer. Changing the PIN signs out every other operator session.
 4. In Admin, select the physical network adapter if the automatic address is wrong, then press **Restart app**.
 5. Add an OpenAI API key if using AI translation. ChatGPT subscriptions do not include API usage. OpenAI's realtime translation model does not accept a custom glossary, so check names and Bible books by ear before the service.
 6. Under **Default language for phones**, choose the language phones start in. Each phone can still switch with EN/RU.
 7. Optional: listener phones need no certificate (see step 8), but interpreter phones and Admin on other devices use HTTPS. To remove the warning there too, create a free subdomain at [DuckDNS](https://www.duckdns.org), then enter the subdomain, DuckDNS token, and contact email under **Trusted phone certificate**. The app obtains a free Let's Encrypt certificate and renews it automatically once it has fewer than 30 days remaining. A still-valid certificate is reused rather than reissued, which keeps you clear of the CA's weekly duplicate-certificate limit.
 8. Pick a channel under **Listener QR channel** and show its QR. Each channel has its own link. By default the QR carries the **plain listener link** (`http://<computer address>:4175/listener?...`), which phones open straight away with no certificate warning, no DuckDNS and no internet. See [Listener link](#listener-link).
-9. On the home screen, choose **Be an Interpreter** and sign in with the operator PIN (an interpreter phone uses its QR code instead). Select the soundboard, USB interface, or microphone input. The desktop app also offers **System output / loopback** to capture whatever Windows is currently playing. Choose **Human**, or **AI** with the source and target languages (Russian to English is preselected when those channels exist), then start the broadcast.
+9. On the home screen, choose **Be an Interpreter** and sign in with the operator PIN (an interpreter phone uses its QR code instead). Select the mixer's USB interface or a microphone input. The desktop app also offers **System output / loopback** to capture whatever Windows is currently playing. Choose **Human**, or **AI** with the source and target languages (Russian to English is preselected when those channels exist), then start the broadcast.
 10. Press **Sign out** in Admin when the service is over, so the next person at the computer needs the PIN.
 
 If a human interpreter will use a phone, choose the target channel under **Phone interpreter** and create an interpreter QR. The link is valid for eight hours, can be exchanged once, and authorizes that phone to publish only the selected channel. The interpreter opens it, chooses the phone microphone, and taps **Start broadcast**. No administrator PIN is shared with the interpreter. Repeated wrong codes are rate limited the same way the operator PIN is. **End all interpreter access** in Admin cuts every interpreter session and unused code at once, and disconnects any phone that is broadcasting.
@@ -85,7 +85,7 @@ Renaming a channel keeps its identity, so a rename mid-service will not interrup
 A phone only trusts certificates for public domain names, and a `192.168.x.x` address cannot get one, so HTTPS links show a certificate warning on every phone. Listening does not need HTTPS: browsers require a secure page only for microphone access, which listeners never use. So listener phones get a plain-HTTP link on **TCP 4175**:
 
 - It opens with no warning, needs no DuckDNS and works on Wi-Fi without internet.
-- The audio is still encrypted: WebRTC always encrypts media (DTLS-SRTP). Only the page and the connection setup travel unencrypted on the church Wi-Fi.
+- The audio is still encrypted: WebRTC always encrypts media (DTLS-SRTP). Only the page and the connection setup travel unencrypted on the venue Wi-Fi.
 - It serves listening only. Every sign-in, interpreter-code and operator request is refused on that port, sockets from it can never broadcast, and `/admin` and `/interpreter` redirect to HTTPS before anything can be typed.
 - The **Phone / Speaker** switch may not work there, because browsers keep audio-output selection for secure pages. Normal playback and volume are unaffected.
 
@@ -94,8 +94,8 @@ Interpreter phones and Admin stay on HTTPS (they need the microphone or a PIN). 
 ## Pre-service checks
 
 - SFU status reads **ready** in Admin, with no capacity warning.
-- The selected IP belongs to the church Wi-Fi adapter, not VPN/VMware/Hyper-V.
-- A listener phone can open the displayed listener hostname on the church Wi-Fi.
+- The selected IP belongs to the venue Wi-Fi adapter, not VPN/VMware/Hyper-V.
+- A listener phone can open the listener QR link on the venue Wi-Fi.
 - The source meter moves without clipping.
 - Translation quality has been checked for names, Bible books, numbers, and quotations.
 - A human interpreter is ready to take over.

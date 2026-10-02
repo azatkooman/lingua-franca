@@ -340,7 +340,7 @@ function findWorkerBinary(isDev) {
 
 // A WebRtcServer multiplexes every transport onto one ICE port. Allocating a port per
 // transport instead caps the room at (range / 2) listeners, which is roughly 49 phones on the
-// old 10000-10100 range -- right where a full church service lands.
+// old 10000-10100 range -- right where a full event audience lands.
 async function createMedia(isDev, localAddress) {
     const mediasoup = require('mediasoup');
     const worker = await mediasoup.createWorker({
@@ -1047,7 +1047,7 @@ async function startServers(isDev) {
     //
     // This cannot fully repair itself: the shared ICE port announces the address it was
     // created with, so media for *new* listeners still advertises the old one. Rebuilding the
-    // WebRtcServer would drop every listener already connected, which is worse mid-sermon, so
+    // WebRtcServer would drop every listener already connected, which is worse mid-event, so
     // the operator is told to restart at a moment of their choosing instead.
     dynamicDnsTimer = setInterval(() => {
         const current = selectLocalAddress(networkAddresses(), process.env.LINGUA_FRANCA_HOST_IP || settings.preferredAddress);

@@ -1,4 +1,4 @@
-/* Self-hosted so the app needs no internet: it runs on an isolated church LAN, and
+/* Self-hosted so the app needs no internet: it often runs on an isolated venue LAN, and
    the page CSP (style-src 'self') blocks the Google Fonts stylesheet anyway.
    Outfit publishes no Cyrillic subset, so Russian text intentionally uses the
    system stack declared in --font-sans below. See src/assets/fonts/OFL.txt. */

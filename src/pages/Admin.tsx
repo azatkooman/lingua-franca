@@ -182,7 +182,7 @@ export default function Admin() {
                         <div className="divider" />
                         <button className={`lang-btn ${locale === 'ru' ? 'active' : ''}`} onClick={() => setLocale('ru')}>RU</button>
                     </div>
-                    {/* There was no way to sign out, so a shared church computer stayed signed in. */}
+                    {/* There was no way to sign out, so a shared computer at the venue stayed signed in. */}
                     <button className="btn-secondary" onClick={() => void settingsService.logout()}><LogOut size={18} /> {t('sign_out')}</button>
                 </div>
             </header>
@@ -261,7 +261,7 @@ export default function Admin() {
                 <div className="card-header"><ShieldAlert size={20} /><h3>{t('trusted_certificate')}</h3></div>
                 <p className="text-muted">{t('trusted_certificate_hint')}</p>
                 <label>{t('duckdns_subdomain')}</label>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}><input className="custom-input" value={duckDomain} onChange={(event) => setDuckDomain(normaliseDuckDomain(event.target.value))} placeholder="my-church" /><span>.duckdns.org</span></div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}><input className="custom-input" value={duckDomain} onChange={(event) => setDuckDomain(normaliseDuckDomain(event.target.value))} placeholder="my-event" /><span>.duckdns.org</span></div>
                 <label className="mt-4">{t('duckdns_token')} {settings.duckDnsConfigured && <span className="text-muted">{t('token_saved')}</span>}</label>
                 <input className="custom-input" type="password" value={duckToken} onChange={(event) => setDuckToken(event.target.value)} placeholder={t('duckdns_token_placeholder')} />
                 <label className="mt-4">{t('certificate_email')}</label>

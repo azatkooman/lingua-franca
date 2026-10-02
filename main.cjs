@@ -9,8 +9,8 @@ const http = require('http');
 const forge = require('node-forge');
 
 const {
-    DEFAULT_SETTINGS, adminSettings, buildTranslationPrompt, findLanguage, isValidDuckDnsDomain,
-    isValidEmail, languageCodeFor, normalizeDuckDnsDomain, normalizeLanguages, publicSettings, selectLocalAddress,
+    DEFAULT_SETTINGS, adminSettings, dropRetiredSettings, findLanguage, isValidDuckDnsDomain,
+    isValidEmail, normalizeDuckDnsDomain, normalizeLanguages, publicSettings, selectLocalAddress,
 } = require('./lib/settings.cjs');
 const { ExpiringMap, LoginThrottle, isValidPin, newAccessCode, newToken, setPin, verifyPin } = require('./lib/security.cjs');
 
@@ -79,7 +79,8 @@ function loadSettings() {
     settings.languages = normalizeLanguages(loaded.languages);
     if (!settings.languages.length) settings.languages = normalizeLanguages(DEFAULT_SETTINGS.languages);
     migrateSecret(settings, 'openaiApiKey', 'openaiApiKeyEncrypted');
-    migrateSecret(settings, 'geminiApiKey', 'geminiApiKeyEncrypted');
+    // Translation is OpenAI only; forget the old text-fallback settings and any Gemini key.
+    dropRetiredSettings(settings);
     if (!settings.adminPinHash || !settings.adminPinSalt) setPin(settings, settings.adminPin || '1234');
     delete settings.adminPin;
     settings.languages.forEach((language) => delete language.activePeerId);
@@ -729,17 +730,6 @@ async function startServers(isDev) {
             callback?.({ ok: true });
         });
 
-        socket.on('setTextChannel', ({ channelId, active } = {}, callback) => {
-            if (!socketIsAdmin()) return callback?.({ error: 'Administrator login required.' });
-            const id = String(channelId || '').slice(0, 80);
-            if (!findLanguage(settings.languages, id)) return callback?.({ error: 'Unknown channel.' });
-            // Stopping a text session must not mark the channel offline while someone is
-            // still publishing audio on it, or listeners would see a live channel as idle.
-            if (!active && producers.has(id)) return callback?.({ ok: true });
-            setChannelState(id, active ? 'ai-active' : undefined);
-            callback?.({ ok: true });
-        });
-
         socket.on('disconnect', () => {
             for (const transport of transports.get(socket.id)?.values() || []) {
                 try { transport.close(); } catch { /* already closed */ }
@@ -924,16 +914,12 @@ async function startServers(isDev) {
         // Lets an operator go back to the local certificate. The trusted key and cert are
         // left on disk so re-enabling does not need a fresh issuance from the CA.
         if (patch.certificateMode === 'self-signed') settings.certificateMode = 'self-signed';
-        if (['openai', 'gemini', 'browser'].includes(patch.aiProvider)) settings.aiProvider = patch.aiProvider;
-        if (typeof patch.glossary === 'string') settings.glossary = patch.glossary.slice(0, 8000);
         if (typeof patch.preferredAddress === 'string') settings.preferredAddress = patch.preferredAddress.slice(0, 64);
         if (typeof patch.recordingEnabled === 'boolean') settings.recordingEnabled = patch.recordingEnabled;
         try {
             if (typeof patch.openaiApiKey === 'string' && patch.openaiApiKey.trim()) settings.openaiApiKeyEncrypted = protectSecret(patch.openaiApiKey.trim());
-            if (typeof patch.geminiApiKey === 'string' && patch.geminiApiKey.trim()) settings.geminiApiKeyEncrypted = protectSecret(patch.geminiApiKey.trim());
         } catch (error) { return response.status(503).json({ error: error.message }); }
         if (patch.clearOpenaiApiKey === true) settings.openaiApiKeyEncrypted = '';
-        if (patch.clearGeminiApiKey === true) settings.geminiApiKeyEncrypted = '';
         if (!persist(response)) return;
         // A PIN change is usually a response to the old PIN leaking, so every other operator
         // session opened with it ends here. The session making the change stays signed in.
@@ -952,8 +938,6 @@ async function startServers(isDev) {
                     Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json',
                     'OpenAI-Safety-Identifier': crypto.createHash('sha256').update(requestToken(request)).digest('hex'),
                 },
-                // gpt-realtime-translate accepts no custom instructions, so the glossary cannot
-                // be passed here; it is applied to the Gemini text fallback instead.
                 body: JSON.stringify({ session: {
                     model: 'gpt-realtime-translate',
                     audio: { output: { language: String(request.body?.targetLanguage || 'en').slice(0, 16) } },
@@ -963,31 +947,12 @@ async function startServers(isDev) {
         } catch (error) { response.status(502).json({ error: `OpenAI connection failed: ${error.message}` }); }
     });
 
-    expressApp.post('/api/translate', requireAdmin, async (request, response) => {
-        const { text, sourceLang, targetLang } = request.body || {};
-        if (!text) return response.status(400).json({ error: 'Text is required.' });
-        const geminiKey = revealSecret(settings.geminiApiKeyEncrypted);
-        if (settings.aiProvider === 'gemini' && geminiKey) {
-            try {
-                const upstream = await fetchWithTimeout('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': geminiKey },
-                    body: JSON.stringify({ contents: [{ parts: [{ text: buildTranslationPrompt({ text, sourceLang, targetLang, glossary: settings.glossary }) }] }] }),
-                });
-                const data = await upstream.json();
-                const translatedText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-                if (upstream.ok && translatedText) return response.json({ translatedText, provider: 'gemini' });
-            } catch (error) { console.warn('Gemini translation failed:', error.message); }
-        }
-        try {
-            const langpair = `${languageCodeFor(settings.languages, sourceLang)}|${languageCodeFor(settings.languages, targetLang)}`;
-            const upstream = await fetchWithTimeout(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${encodeURIComponent(langpair)}`);
-            const data = await upstream.json();
-            if (upstream.ok && data.responseData?.translatedText) {
-                return response.json({ translatedText: data.responseData.translatedText, provider: 'mymemory' });
-            }
-        } catch (error) { console.warn('Fallback translation failed:', error.message); }
-        response.status(502).json({ error: 'Translation service unavailable.' });
+    // Admin used to say "Restart the app to apply it" and leave the operator to find and close
+    // the window. This relaunches the desktop app instead. Every broadcast stops for the few
+    // seconds it takes to start again, so the Admin screen asks before calling it.
+    expressApp.post('/api/admin/restart', requireAdmin, (_request, response) => {
+        response.json({ ok: true });
+        setTimeout(() => { app.relaunch(); app.quit(); }, 300);
     });
 
     expressApp.use('/api', (_request, response) => response.status(404).json({ error: 'Not found.' }));

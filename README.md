@@ -5,10 +5,9 @@ Local-network simultaneous interpretation for churches and meetings. A Windows c
 ## Modes
 
 - **Human:** publishes an interpreter's microphone directly over the local WebRTC SFU.
-- **OpenAI Realtime:** sends the source track to `gpt-realtime-translate`, republishes the translated audio track through the local SFU, and sends synchronized captions. If the OpenAI connection drops, the app rebuilds it on its own for about two minutes; listeners hear silence instead of being disconnected while it does.
-- **Text fallback:** browser speech recognition plus Gemini or MyMemory translation. Listener devices synthesize this fallback text themselves.
+- **OpenAI Realtime (AI):** sends the source track to `gpt-realtime-translate`, republishes the translated audio track through the local SFU, and sends synchronized captions. If the OpenAI connection drops, the app rebuilds it on its own for about two minutes; listeners hear silence instead of being disconnected while it does.
 
-Human mode remains available as the operational fallback if AI or internet service is unavailable.
+OpenAI is the only translation provider. Human mode is the fallback if the internet or OpenAI is unavailable. (An earlier text fallback built on browser speech recognition plus Gemini or MyMemory was removed: speech recognition does not work inside the desktop app, and it needed the internet anyway. Settings from it, including any saved Gemini key, are deleted from the settings file on first launch.)
 
 ## Windows x64 setup
 
@@ -65,18 +64,19 @@ Every WebRTC transport needs an ICE port. Lingua Franca puts all transports on a
 1. Connect the computer and listener phones to the same private Wi-Fi network.
 2. Connect the soundboard line output to a USB audio interface on the computer.
 3. Launch Lingua Franca and sign in as operator. The initial PIN is `1234`; change it immediately. A PIN may be 4 to 12 digits, and longer is meaningfully harder to guess. Repeated wrong entries lock the app out for progressively longer. Changing the PIN signs out every other operator session.
-4. In Admin, select the physical network adapter and restart if the automatic address is wrong.
-5. Add an OpenAI API key if using Realtime translation. ChatGPT subscriptions do not include API usage.
-6. Add names and church terminology to the glossary. It is used by the Gemini text fallback; OpenAI's realtime translation model does not accept custom terms, so check names by ear in that mode.
+4. In Admin, select the physical network adapter if the automatic address is wrong, then press **Restart app**.
+5. Add an OpenAI API key if using AI translation. ChatGPT subscriptions do not include API usage. OpenAI's realtime translation model does not accept a custom glossary, so check names and Bible books by ear before the service.
+6. Under **Default language for phones**, choose the language phones start in. Each phone can still switch with EN/RU.
 7. For warning-free phone access, create a free subdomain at [DuckDNS](https://www.duckdns.org), then enter the subdomain, DuckDNS token, and contact email under **Trusted phone certificate**. The app obtains a free Let's Encrypt certificate and renews it automatically once it has fewer than 30 days remaining. A still-valid certificate is reused rather than reissued, which keeps you clear of the CA's weekly duplicate-certificate limit.
 8. Pick a channel under **Listener QR channel** and show its QR. Each channel has its own link. With a trusted certificate configured, phones open it without a certificate warning.
-9. On the operator screen, select the soundboard, USB interface, or microphone input. The desktop app also offers **System output / loopback** to capture whatever Windows is currently playing. Choose the source and target languages, then start the broadcast.
+9. On the home screen, choose **Be an Interpreter** and sign in with the operator PIN (an interpreter phone uses its QR code instead). Select the soundboard, USB interface, or microphone input. The desktop app also offers **System output / loopback** to capture whatever Windows is currently playing. Choose **Human**, or **AI** with the source and target languages (Russian to English is preselected when those channels exist), then start the broadcast.
+10. Press **Sign out** in Admin when the service is over, so the next person at the computer needs the PIN.
 
 If a human interpreter will use a phone, choose the target channel under **Phone interpreter** and create an interpreter QR. The link is valid for eight hours, can be exchanged once, and authorizes that phone to publish only the selected channel. The interpreter opens it, chooses the phone microphone, and taps **Start broadcast**. No administrator PIN is shared with the interpreter. Repeated wrong codes are rate limited the same way the operator PIN is. **End all interpreter access** in Admin cuts every interpreter session and unused code at once, and disconnects any phone that is broadcasting.
 
 A phone cannot start broadcasting on a channel that is already live, and cannot mute or end someone else's broadcast. The operator screen can take any channel over; the broadcaster it replaces is told and stops.
 
-The API key and PIN are never returned to listener browsers. Listener devices receive only the channel list; the glossary, network configuration and diagnostics require an operator session. API keys are encrypted with the operating system's secure storage and only short-lived operator sessions may publish media or captions.
+The API key and PIN are never returned to listener browsers. Listener devices receive only the channel list; network configuration and diagnostics require an operator session. API keys are encrypted with the operating system's secure storage and only short-lived operator sessions may publish media or captions.
 
 Renaming a channel keeps its identity, so a rename mid-service will not interrupt a live broadcast. Deleting a channel stops its broadcast immediately.
 
@@ -95,7 +95,7 @@ Renaming a channel keeps its identity, so a rename mid-service will not interrup
 npm test
 ```
 
-Unit tests for the settings, credential, session and translation helpers in `lib/`. They run with the Node test runner and need no extra dependencies.
+Unit tests for the settings, credential and session helpers in `lib/`. They run with the Node test runner and need no extra dependencies.
 
 ```powershell
 npm run test:server
@@ -127,7 +127,7 @@ Each simulated client connects and allocates a real listener transport, so this 
 - **Human interpreter cannot start:** create a new interpreter QR; links are single-use and expire after eight hours. Confirm the certificate status says **trusted** on phones and the SFU status says **ready**. If the phone says the channel is already being broadcast, stop the other broadcast first.
 - **A listener hears nothing on iPhone:** the listener must tap **Connect** on the phone itself; iOS only permits audio playback that begins from a tap.
 - **Media engine stopped:** the worker restarts automatically; broadcasters resume publishing and listeners reconnect on their own. If Admin keeps reporting the SFU as unavailable, restart the app.
-- **OpenAI unavailable:** the app retries a dropped connection for about two minutes and shows each attempt. If it gives up, switch to Human mode immediately; use text fallback only as a secondary option.
+- **OpenAI unavailable:** the app retries a dropped connection for about two minutes and shows each attempt. If it gives up, switch to Human mode immediately.
 
 ## Releases
 

@@ -22,6 +22,11 @@ const mediasoup = require('mediasoup');
 const { io } = require('socket.io-client');
 
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'lingua-franca-smoke-'));
+// A settings file from an older build that still has the retired text-fallback settings.
+const settingsFile = path.join(userData, 'lingua-franca-settings.json');
+fs.writeFileSync(settingsFile, JSON.stringify({
+    aiProvider: 'gemini', glossary: 'Pastor Ivanov', geminiApiKey: 'plain-gemini-key',
+}));
 let markReady;
 const ready = new Promise((resolve) => { markReady = resolve; });
 
@@ -229,7 +234,7 @@ async function run() {
 
     await check('operator settings expose configuration but never secrets', async () => {
         const { body } = await json('/api/admin/settings', { headers: authed(token) });
-        assert.ok('glossary' in body);
+        assert.ok('openaiConfigured' in body);
         assert.equal('adminPinHash' in body, false);
         assert.equal('openaiApiKeyEncrypted' in body, false);
         assert.equal('duckDnsTokenEncrypted' in body, false);
@@ -376,6 +381,25 @@ async function run() {
         const health = await json('/api/admin/health', { headers: authed(token) });
         assert.equal(health.body.certificate.type, 'self-signed');
         return 'reverted';
+    });
+
+    await check('retired text-fallback settings and a stored Gemini key are dropped on load', async () => {
+        const saved = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+        for (const key of ['aiProvider', 'glossary', 'geminiApiKey', 'geminiApiKeyEncrypted']) {
+            assert.equal(key in saved, false, `${key} is still in the settings file`);
+        }
+        return 'removed from disk';
+    });
+
+    await check('the retired text-translation endpoint is gone', async () => {
+        assert.equal((await json('/api/translate', { method: 'POST', headers: authed(token), body: '{}' })).status, 404);
+        return '404';
+    });
+
+    // Only the refusal is checked: a successful call would relaunch the process under test.
+    await check('restarting the app requires an operator session', async () => {
+        assert.equal((await json('/api/admin/restart', { method: 'POST' })).status, 401);
+        return '401';
     });
 
     await check('an unknown API route returns JSON, not the SPA shell', async () => {

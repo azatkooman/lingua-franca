@@ -43,15 +43,6 @@ export default function AdminGuard({ children }: { children: ReactNode }) {
 
     return (
         <div className="page-container admin-gate">
-            <button
-                className="btn-icon"
-                onClick={() => navigate('/')}
-                style={{ position: 'fixed', top: '1.5rem', left: '1.5rem', zIndex: 1000 }}
-                title={t('back')}
-            >
-                <ArrowLeft size={24} />
-            </button>
-
             <div className="language-toggle">
                 <button className={`lang-btn ${locale === 'en' ? 'active' : ''}`} onClick={() => setLocale('en')}>EN</button>
                 <div className="divider"></div>
@@ -85,6 +76,7 @@ export default function AdminGuard({ children }: { children: ReactNode }) {
                     autoComplete="current-password"
                     autoFocus
                     maxLength={12}
+                    aria-label={t('pin_placeholder')}
                     style={{ textAlign: 'center', letterSpacing: '0.5em', fontSize: '1.5rem' }}
                     value={pin}
                     disabled={isChecking}
@@ -92,7 +84,7 @@ export default function AdminGuard({ children }: { children: ReactNode }) {
                 />
 
                 <button className="btn-primary mt-4" type="submit" disabled={pin.length < 4 || isChecking} style={{ width: '100%' }}>
-                    {isChecking ? '…' : t('enter_pin')}
+                    {isChecking ? t('checking') : t('enter_pin')}
                 </button>
 
                 {error && (
@@ -100,6 +92,12 @@ export default function AdminGuard({ children }: { children: ReactNode }) {
                         {error}
                     </p>
                 )}
+
+                {/* The old exit was a small dark icon floating above the card, easy to miss, and
+                    the desktop app has no browser Back button. */}
+                <button className="btn-secondary mt-4" type="button" onClick={() => navigate('/')} style={{ width: '100%' }}>
+                    <ArrowLeft size={18} /> {t('back_home')}
+                </button>
             </form>
         </div>
     );

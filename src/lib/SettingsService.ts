@@ -8,8 +8,6 @@ export interface Language {
     activePeerId?: 'sfu-active' | 'ai-active';
 }
 
-export type AiProvider = 'openai' | 'gemini' | 'browser';
-
 /** What every listener device is allowed to see. Deliberately small. */
 export interface AppSettings {
     languages: Language[];
@@ -18,10 +16,7 @@ export interface AppSettings {
 
 /** Operator-only configuration, fetched separately once an admin session exists. */
 export interface AdminSettings extends AppSettings {
-    aiProvider: AiProvider;
     openaiConfigured: boolean;
-    geminiConfigured: boolean;
-    glossary: string;
     preferredAddress: string;
     recordingEnabled: boolean;
     duckDnsConfigured: boolean;
@@ -279,13 +274,10 @@ class SettingsService {
     }
 
     async setAdminPin(adminPin: string) { await this.patchAdminSettings({ adminPin }); }
+    /** The interface language a phone uses until it picks EN or RU itself. */
     async setInterfaceLanguage(interfaceLanguage: 'en' | 'ru') { await this.patchAdminSettings({ interfaceLanguage }); }
-    async setAiProvider(aiProvider: AiProvider) { await this.patchAdminSettings({ aiProvider }); }
     async setOpenAiApiKey(openaiApiKey: string) { await this.patchAdminSettings({ openaiApiKey }); }
     async clearOpenAiApiKey() { await this.patchAdminSettings({ clearOpenaiApiKey: true }); }
-    async setGeminiApiKey(geminiApiKey: string) { await this.patchAdminSettings({ geminiApiKey }); }
-    async clearGeminiApiKey() { await this.patchAdminSettings({ clearGeminiApiKey: true }); }
-    async setGlossary(glossary: string) { await this.patchAdminSettings({ glossary }); }
     async setPreferredAddress(preferredAddress: string) { await this.patchAdminSettings({ preferredAddress }); }
     async setRecordingEnabled(recordingEnabled: boolean) { await this.patchAdminSettings({ recordingEnabled }); }
     /** Reverts to the local self-signed certificate after the next restart. */
@@ -318,11 +310,9 @@ class SettingsService {
         return response.json() as Promise<{ value: string }>;
     }
 
-    async translateText(text: string, sourceLang: string, targetLang: string) {
-        const response = await this.adminRequest('/api/translate', {
-            method: 'POST', body: JSON.stringify({ text, sourceLang, targetLang }),
-        });
-        return response.json() as Promise<{ translatedText: string; provider?: string }>;
+    /** Relaunches the desktop app. Every broadcast stops until it is back. */
+    async restartApp() {
+        await this.adminRequest('/api/admin/restart', { method: 'POST' });
     }
 }
 

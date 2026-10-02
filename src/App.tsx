@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Navigate, Routes, Route } from 'react-router-dom';
 import Home from './pages/Home';
 import Admin from './pages/Admin';
 import Interpreter from './pages/Interpreter';
@@ -24,6 +24,8 @@ function App() {
             <Route path="/admin" element={<AdminGuard><Admin /></AdminGuard>} />
             <Route path="/interpreter" element={<InterpreterGuard><Interpreter /></InterpreterGuard>} />
             <Route path="/listener" element={<Listener />} />
+            {/* A mistyped or outdated link used to show an empty page with no way back. */}
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>
       </div>

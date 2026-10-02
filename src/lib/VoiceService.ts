@@ -3,6 +3,12 @@ import { realtimeSocket } from './realtimeSocket';
 
 export const SYSTEM_AUDIO_DEVICE_ID = '__lingua_franca_system_audio__';
 type StatusCallback = (status: string) => void;
+/**
+ * Listener connection states as codes, not sentences. Listener phones are the audience most
+ * likely to use Russian, and English status text went straight onto their screens.
+ */
+export type ListenerStatus = 'connecting' | 'receiving' | 'waiting' | 'restarting' | 'error';
+type ListenerStatusCallback = (status: ListenerStatus) => void;
 
 interface TransportResponse {
     id: string;
@@ -30,7 +36,7 @@ export class VoiceService {
     private recvTransport: mediasoupClient.types.Transport | null = null;
     private consumer: mediasoupClient.types.Consumer | null = null;
     private currentListenerChannelId: string | null = null;
-    private onListenerStatus?: StatusCallback;
+    private onListenerStatus?: ListenerStatusCallback;
     private onListenerStreamReceived?: (stream: MediaStream) => void;
     private onTranslationTextReceived?: (text: string, originalText: string) => void;
     private onMuteStatusChange?: (muted: boolean) => void;
@@ -163,7 +169,7 @@ export class VoiceService {
         // capabilities and every transport from the previous router are stale.
         realtimeSocket.on('sfuRestarting', () => {
             this.device = null;
-            this.onListenerStatus?.('Media engine restarting…');
+            this.onListenerStatus?.('restarting');
             if (this.producers.size) this.onPublishStatus('Media engine restarting…');
         });
         realtimeSocket.on('sfuReady', () => {
@@ -290,11 +296,6 @@ export class VoiceService {
         realtimeSocket.emit('sendTranslationText', { channelId, text, originalText });
     }
 
-    async setTextChannel(channelId: string, active: boolean) {
-        const result = await realtimeSocket.request<{ ok?: boolean; error?: string }>('setTextChannel', { channelId, active });
-        if (result?.error) throw new Error(result.error);
-    }
-
     /** Closes a channel's local objects only, for when the server side is already gone. */
     private dropChannel(channelId: string) {
         this.producers.get(channelId)?.close();
@@ -327,7 +328,7 @@ export class VoiceService {
 
     async listenToChannel(
         channelId: string,
-        onStatus: StatusCallback,
+        onStatus: ListenerStatusCallback,
         onStreamReceived: (stream: MediaStream) => void,
         onMuteStatusChange?: (muted: boolean) => void,
         onTranslationTextReceived?: (text: string, originalText: string) => void,
@@ -354,7 +355,7 @@ export class VoiceService {
             this.recvTransport?.close();
             this.consumer = null;
             this.recvTransport = null;
-            onStatus('Connecting…');
+            onStatus('connecting');
             await this.loadDevice();
             const transportInfo = await realtimeSocket.request<TransportResponse>('createWebRtcTransport', { type: 'consumer' });
             if (transportInfo.error) throw new Error(transportInfo.error);
@@ -367,23 +368,23 @@ export class VoiceService {
             const consumeInfo = await realtimeSocket.request<ConsumeResponse>('consume', {
                 transportId: recvTransport.id, rtpCapabilities: this.device!.rtpCapabilities, channelId,
             });
-            if (consumeInfo.error) { onStatus('Waiting for the broadcast to start…'); return; }
+            if (consumeInfo.error) { onStatus('waiting'); return; }
             this.consumer = await recvTransport.consume(consumeInfo);
             this.consumer.on('transportclose', () => this.handleStreamLoss());
             this.consumer.on('trackended', () => this.handleStreamLoss());
             this.onMuteStatusChange?.(Boolean(consumeInfo.producerPaused));
-            onStatus('Connected & receiving');
+            onStatus('receiving');
             this.onListenerStreamReceived?.(new MediaStream([this.consumer.track]));
         } catch (error) {
             console.error('Listen failed:', error);
-            onStatus(error instanceof Error && /waiting/i.test(error.message) ? error.message : 'Connection error. Waiting…');
+            onStatus(error instanceof Error && /waiting/i.test(error.message) ? 'waiting' : 'error');
         }
     }
 
     private handleStreamLoss() {
         this.consumer?.close();
         this.consumer = null;
-        if (this.currentListenerChannelId) this.onListenerStatus?.('Waiting for the broadcast to start…');
+        if (this.currentListenerChannelId) this.onListenerStatus?.('waiting');
     }
 
     stopListening() {

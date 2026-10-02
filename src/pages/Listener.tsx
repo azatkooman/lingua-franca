@@ -1,9 +1,9 @@
-import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Headphones, Volume2, VolumeX, Cpu, Ear } from 'lucide-react';
 import { useState, useEffect, useMemo, useRef, type CSSProperties } from 'react';
-import { voiceService } from '../lib/VoiceService';
+import { voiceService, type ListenerStatus } from '../lib/VoiceService';
 import { settingsService, type Language } from '../lib/SettingsService';
-import { useTranslation } from '../lib/i18n';
+import { useTranslation, type TranslationKey } from '../lib/i18n';
+import { useGoBack } from '../lib/navigation';
 import './Interpreter.css';
 import './Listener.css';
 
@@ -34,8 +34,17 @@ function saveVolume(volume: number) {
     catch { /* private browsing or a full quota; remembering is optional */ }
 }
 
+// The status is kept as a translation key, so it follows an EN/RU switch mid-service.
+const STATUS_TEXT: Record<ListenerStatus, TranslationKey> = {
+    connecting: 'connecting',
+    receiving: 'connected_receiving',
+    waiting: 'waiting_broadcast',
+    restarting: 'media_restarting',
+    error: 'connection_error_waiting',
+};
+
 export default function Listener() {
-    const navigate = useNavigate();
+    const goBack = useGoBack();
     const { t } = useTranslation();
     const [isConnected, setIsConnected] = useState(false);
     const [languages, setLanguages] = useState<Language[]>([]);
@@ -45,7 +54,7 @@ export default function Listener() {
     const [isMuted, setIsMuted] = useState(false);
     const [playbackMode, setPlaybackMode] = useState<'speaker' | 'earpiece'>('speaker');
     const [playbackHint, setPlaybackHint] = useState('');
-    const [status, setStatus] = useState(t('loading'));
+    const [status, setStatus] = useState<TranslationKey>('loading');
     const [notice, setNotice] = useState('');
     const [isInterpreterMuted, setIsInterpreterMuted] = useState(false);
     const [signalLevel, setSignalLevel] = useState(0);
@@ -124,8 +133,6 @@ export default function Listener() {
         audio.setAttribute('playsinline', '');
         audioRef.current = audio;
 
-        if (window.speechSynthesis) window.speechSynthesis.getVoices();
-
         return () => {
             voiceService.stopListening();
             if (audioRef.current) {
@@ -135,7 +142,6 @@ export default function Listener() {
             meterCleanup.current?.();
             void audioContextRef.current?.close();
             audioContextRef.current = null;
-            if (window.speechSynthesis) window.speechSynthesis.cancel();
         };
     }, []);
 
@@ -144,7 +150,6 @@ export default function Listener() {
             audioRef.current.muted = isMuted;
             audioRef.current.volume = volume / 100;
         }
-        if (isMuted && window.speechSynthesis) window.speechSynthesis.cancel();
     }, [volume, isMuted]);
 
     /**
@@ -169,19 +174,6 @@ export default function Listener() {
         }
     };
 
-    const speakText = (text: string, language: Language) => {
-        if (!window.speechSynthesis) return;
-        const utterance = new SpeechSynthesisUtterance(text);
-        const voices = window.speechSynthesis.getVoices();
-        const code = (language.code || 'en').toLowerCase();
-        const voice = voices.find((candidate) => candidate.lang.toLowerCase().startsWith(code));
-        utterance.lang = voice?.lang || code;
-        if (voice) utterance.voice = voice;
-        // Read from the audio element so delayed translation callbacks respect the latest controls.
-        utterance.volume = audioRef.current?.muted ? 0 : (audioRef.current?.volume ?? volume / 100);
-        window.speechSynthesis.speak(utterance);
-    };
-
     const connectToChannel = () => {
         const language = languages.find((entry) => entry.id === channelId);
         if (!language) {
@@ -191,11 +183,11 @@ export default function Listener() {
         setNotice('');
         unlockPlayback();
         setIsConnected(true);
-        setStatus(language.activePeerId ? t('connecting') : t('waiting_interpreter'));
+        setStatus(language.activePeerId ? 'connecting' : 'waiting_interpreter');
 
         void voiceService.listenToChannel(
             language.id,
-            (newStatus) => setStatus(newStatus),
+            (next) => setStatus(STATUS_TEXT[next]),
             (stream) => {
                 const audio = audioRef.current;
                 if (!audio) return;
@@ -204,7 +196,7 @@ export default function Listener() {
                     void applyPlaybackMode(playbackModeRef.current);
                 }).catch((error) => {
                     console.error('Audio playback failed:', error);
-                    setStatus(t('no_sound_hint'));
+                    setStatus('no_sound_hint');
                 });
                 meterCleanup.current?.();
                 meterCleanup.current = voiceService.createLevelMeter(stream, setSignalLevel);
@@ -213,8 +205,6 @@ export default function Listener() {
             (text, originalText) => {
                 setSubtitleText(text);
                 setOriginalSubtitleText(originalText);
-                // Text fallback has no centralized media producer, so the device speaks it.
-                if (!audioRef.current?.srcObject) speakText(text, language);
             },
         );
     };
@@ -222,13 +212,12 @@ export default function Listener() {
     const disconnect = () => {
         voiceService.stopListening();
         setIsConnected(false);
-        setStatus(t('loading'));
+        setStatus('loading');
         setSignalLevel(0);
         setSubtitleText('');
         setOriginalSubtitleText('');
         setPlaybackHint('');
         setIsInterpreterMuted(false);
-        if (window.speechSynthesis) window.speechSynthesis.cancel();
         meterCleanup.current?.();
         meterCleanup.current = null;
         if (audioRef.current) {
@@ -240,7 +229,7 @@ export default function Listener() {
     return (
         <div className="page-container">
             <header className="page-header">
-                <button className="btn-icon" onClick={() => navigate(-1)} title={t('back')}>
+                <button className="btn-icon" onClick={goBack} title={t('back')}>
                     <ArrowLeft size={24} />
                 </button>
                 <h2>{t('be_listener')}</h2>
@@ -328,7 +317,7 @@ export default function Listener() {
 
                     <h3 className="listening-title">{t('listener_mode')}: {activeLanguage?.name}</h3>
                     <p className={`status-text ${isInterpreterMuted ? 'text-danger pulse' : 'text-accent'}`}>
-                        {isInterpreterMuted ? t('interpreter_muted') : status}
+                        {isInterpreterMuted ? t('interpreter_muted') : t(status)}
                     </p>
 
                     {isAiChannel && (
@@ -384,7 +373,7 @@ export default function Listener() {
                     {playbackHint && <p className="playback-hint">{playbackHint}</p>}
 
                     <div className="volume-control glass-panel">
-                        <div className="signal-meter" role="meter" aria-label="Incoming audio level" title="Incoming audio level"
+                        <div className="signal-meter" role="meter" aria-label={t('audio_level')} title={t('audio_level')}
                             aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(signalLevel)}>
                             <div className="signal-bar" style={{ height: `${signalLevel}%` }}></div>
                         </div>

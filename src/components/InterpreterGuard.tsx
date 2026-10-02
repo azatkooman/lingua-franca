@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { ArrowLeft, Mic, ShieldAlert } from 'lucide-react';
+import { ArrowLeft, Lock, Mic, ShieldAlert } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { settingsService } from '../lib/SettingsService';
 import '../pages/Admin.css';
@@ -11,7 +11,11 @@ export default function InterpreterGuard({ children }: { children: ReactNode }) 
     const [searchParams] = useSearchParams();
     const automaticCode = searchParams.get('code')?.replace(/\D/g, '').slice(0, 6) || '';
     const [authorized, setAuthorized] = useState(isAuthorized);
+    // The operator reaches this screen from "Be an Interpreter" on the desktop app and has no
+    // interpreter code, only the PIN. Without this they were stuck on a code prompt.
+    const [usePin, setUsePin] = useState(false);
     const [code, setCode] = useState(automaticCode);
+    const [pin, setPin] = useState('');
     const [error, setError] = useState('');
     const [checking, setChecking] = useState(!authorized && automaticCode.length === 6);
     // Codes are single use, so an automatic attempt must never be repeated by a re-render.
@@ -46,29 +50,65 @@ export default function InterpreterGuard({ children }: { children: ReactNode }) 
         } finally { setChecking(false); }
     };
 
+    const loginOperator = async () => {
+        if (pin.length < 4) return;
+        setChecking(true); setError('');
+        try {
+            await settingsService.login(pin);
+            setAuthorized(true);
+        } catch (loginError) {
+            // The server's message includes how long a lockout lasts after repeated misses.
+            setError(loginError instanceof Error ? loginError.message : String(loginError));
+            setPin('');
+        } finally { setChecking(false); }
+    };
+
     useEffect(() => {
         if (authorized || automaticCode.length !== 6 || attempted.current) return;
         attempted.current = true;
         void login(automaticCode);
     }, [authorized, automaticCode]);
 
-    const submit = (event: FormEvent) => { event.preventDefault(); void login(code); };
+    const submit = (event: FormEvent) => {
+        event.preventDefault();
+        void (usePin ? loginOperator() : login(code));
+    };
+
+    const switchMode = () => { setUsePin((current) => !current); setError(''); };
 
     if (authorized) return <>{children}</>;
 
     return (
         <div className="page-container admin-gate">
-            <button className="btn-icon" onClick={() => navigate('/')} style={{ position: 'fixed', top: '1.5rem', left: '1.5rem' }}><ArrowLeft size={24} /></button>
             <form className="card fade-in" onSubmit={submit} style={{ maxWidth: 450, margin: '20px auto', padding: '3rem' }}>
                 <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
-                    {error ? <ShieldAlert size={48} color="var(--danger)" /> : <Mic size={48} color="var(--primary)" />}
-                    <h2>Interpreter access</h2>
-                    <p className="text-muted">Scan the interpreter QR code from the desktop admin page, or enter its six-digit code.</p>
+                    {error ? <ShieldAlert size={48} color="var(--danger)" /> : usePin ? <Lock size={48} color="var(--primary)" /> : <Mic size={48} color="var(--primary)" />}
+                    <h2>{usePin ? 'Operator sign-in' : 'Interpreter access'}</h2>
+                    <p className="text-muted">
+                        {usePin
+                            ? 'Enter the administrator PIN to broadcast from this device.'
+                            : 'Scan the interpreter QR code from the desktop admin page, or enter its six-digit code.'}
+                    </p>
                 </div>
-                <input className="custom-input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code}
-                    onChange={(event) => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="6-digit code" disabled={checking} />
-                <button className="btn-primary mt-4" type="submit" disabled={code.length !== 6 || checking}>{checking ? 'Checking…' : 'Continue as interpreter'}</button>
+                {usePin ? (
+                    <input key="pin" className="custom-input" type="password" inputMode="numeric" autoComplete="current-password" autoFocus
+                        maxLength={12} value={pin} placeholder="Administrator PIN" disabled={checking}
+                        onChange={(event) => setPin(event.target.value.replace(/\D/g, '').slice(0, 12))} />
+                ) : (
+                    <input key="code" className="custom-input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code}
+                        onChange={(event) => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="6-digit code" disabled={checking} />
+                )}
+                <button className="btn-primary mt-4" type="submit" disabled={checking || (usePin ? pin.length < 4 : code.length !== 6)}>
+                    {checking ? 'Checking…' : usePin ? 'Sign in as operator' : 'Continue as interpreter'}
+                </button>
                 {error && <p style={{ color: 'var(--danger)', marginTop: '1rem' }}>{error}</p>}
+                <button className="btn-secondary mt-4" type="button" onClick={switchMode} disabled={checking} style={{ width: '100%' }}>
+                    {usePin ? 'I have an interpreter code' : 'Operator? Sign in with your PIN'}
+                </button>
+                {/* The desktop app has no browser Back button, so this is the only way out. */}
+                <button className="btn-secondary mt-4" type="button" onClick={() => navigate('/')} style={{ width: '100%' }}>
+                    <ArrowLeft size={18} /> Back to home
+                </button>
             </form>
         </div>
     );

@@ -1,4 +1,5 @@
-import { BrowserRouter, Navigate, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Link, Navigate, Routes, Route } from 'react-router-dom';
+import LogoMark from './components/LogoMark';
 import Home from './pages/Home';
 import Admin from './pages/Admin';
 import Interpreter from './pages/Interpreter';
@@ -12,10 +13,10 @@ function App() {
     <BrowserRouter>
       <div className="app-container">
         <header className="app-header">
-          <div className="logo-container">
-            <span className="logo-icon">🎙️</span>
+          <Link to="/" className="logo-container" aria-label="Lingua Franca home">
+            <LogoMark className="logo-icon" />
             <h1>Lingua<span className="logo-accent">Franca</span></h1>
-          </div>
+          </Link>
         </header>
 
         <main className="app-main">

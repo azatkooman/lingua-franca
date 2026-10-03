@@ -1,7 +1,7 @@
 {
   "name": "lingua-franca",
   "private": true,
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "Lingua Franca - Real-time Audio Translation",
   "author": "Azat Kooman",
   "type": "module",
@@ -17,6 +17,7 @@
     "test:load": "node scripts/load-test.cjs",
     "test": "node --test \"lib/*.test.cjs\"",
     "test:server": "node scripts/server-smoke.cjs",
+    "icons": "electron scripts/generate-icons.cjs",
     "electron:build:mac": "bash scripts/build-mac.sh"
   },
   "build": {

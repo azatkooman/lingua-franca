@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/branding/banner.png" alt="Lingua Franca: real-time interpretation for any event" width="840"></p>
+
 # Lingua Franca
 
 Local-network simultaneous interpretation for any kind of event: conferences, meetings, services, seminars and more. A Windows computer takes the audio from the mixer or a microphone, has it interpreted live (by a human interpreter, or by OpenAI for example from Russian into English), and broadcasts each language as its own audio channel to listeners, who join on their own phones by scanning a QR code.
@@ -140,6 +142,20 @@ Each simulated client connects and allocates a real listener transport, so this 
 - **A listener hears nothing on iPhone:** the listener must tap **Connect** on the phone itself; iOS only permits audio playback that begins from a tap.
 - **Media engine stopped:** the worker restarts automatically; broadcasters resume publishing and listeners reconnect on their own. If Admin keeps reporting the SFU as unavailable, restart the app.
 - **OpenAI unavailable:** the app retries a dropped connection for about two minutes and shows each attempt. If it gives up, switch to Human mode immediately.
+
+## Branding
+
+The mark is two speech bubbles: the original speech (white or violet) and the interpreted audio (green, with sound bars). Colors come from the app: violet `#8b5cf6`, green `#10b981`, navy `#0d0f17`. The type is Outfit.
+
+The SVG sources live in `branding/`:
+
+- `app-icon.svg`: the app icon at 48 px and up.
+- `app-icon-small.svg`: a simplified icon for 16 to 40 px, also the browser favicon.
+- `logo-mark.svg`: the bubbles alone, for dark backgrounds (in-app header, startup screen, banners).
+
+After changing one, run `npm run icons`. It redraws every size from the vector and rewrites the Windows `.ico`, the macOS `.icns`, the installer images in `build/`, the favicons and phone icons in `public/`, and the banner and social preview in `docs/branding/`. Commit the results.
+
+`docs/branding/social-preview.png` is the image GitHub shows when the repository link is shared. GitHub has no API for it: upload it under **Settings > General > Social preview**.
 
 ## Releases
 

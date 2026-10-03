@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom';
 import { Mic, Headphones, Settings } from 'lucide-react';
 import { useTranslation } from '../lib/i18n';
+import LogoMark from '../components/LogoMark';
 import './Home.css';
 
 export default function Home() {
@@ -26,6 +27,7 @@ export default function Home() {
             </div>
 
             <main className="hero fade-in">
+                <LogoMark className="hero-mark" />
                 <h1 className="title">{t('welcome_title')}</h1>
                 <p className="subtitle">{t('welcome_subtitle')}</p>
 

@@ -30,7 +30,7 @@ Every screen has a help button (a question mark) with the organiser's contacts (
 
 ## Operator tools
 
-**Live now** (top of Admin) refreshes every few seconds: each channel's state (off air, interpreter, AI translation or original, and for how long), whether it is muted or being recorded, how many phones are listening now and the most at once, and the total. When AI translation has run it also shows the time used and a rough cost, at OpenAI's price of $0.034 per minute of audio for each translated language. Your OpenAI bill has the exact amount.
+**Live now** (top of Admin) refreshes every few seconds: each channel's state (off air, interpreter, AI translation or original, and for how long), whether it is muted or being recorded, how many phones are listening now and the most at once, and the total. When AI translation has run it also shows the time used and a rough cost, at OpenAI's prices of about $0.051 per minute for each translated language ($0.034 for the translation and $0.017 for transcribing the original speech). Your OpenAI bill has the exact amount.
 
 **Recordings and transcripts** (in Admin):
 
@@ -102,8 +102,8 @@ Every WebRTC transport needs an ICE port. Lingua Franca puts all transports on a
 6. Under **Default language for phones**, choose the language phones start in (English, Russian or Kazakh). Each phone can still switch with RU / KK / EN.
    Under **Event**, enter the event name and dates; they are shown at the top of the home and listener screens. Under **Contact for listeners**, enter a name, phone, WhatsApp, Telegram or email for people who have no sound or a question. Leave every contact field empty to hide the help button.
 7. Optional: listener phones need no certificate (see step 8), but interpreter phones and Admin on other devices use HTTPS. To remove the warning there too, create a free subdomain at [DuckDNS](https://www.duckdns.org), then enter the subdomain, DuckDNS token, and contact email under **Trusted phone certificate**. The app obtains a free Let's Encrypt certificate and renews it automatically once it has fewer than 30 days remaining. A still-valid certificate is reused rather than reissued, which keeps you clear of the CA's weekly duplicate-certificate limit.
-8. Print a poster with **Print a QR poster**, or pick a channel under **Listener QR channel** and show its QR. Each channel has its own link. By default the QR carries the **plain listener link** (`http://<computer address>:4175/listener?...`), which phones open straight away with no certificate warning, no DuckDNS and no internet. See [Listener link](#listener-link).
-9. On the home screen, choose **Be an Interpreter** and sign in with the operator PIN (an interpreter phone uses its QR code instead). Select the mixer's USB interface or a microphone input. The desktop app also offers **System output / loopback** to capture whatever Windows is currently playing. Choose **Human**, or **AI** with the source and target languages (Russian to English is preselected when those channels exist), then start the broadcast.
+8. Print a poster with **Print a QR poster**, or pick a channel under **Listener QR channel** and show its QR. Each channel has its own link. Without a trusted certificate the QR carries the **plain listener link** (`http://<computer address>:4175/listener?...`), which phones open straight away with no certificate warning, no DuckDNS and no internet. Once the DuckDNS certificate is set up, QR codes use the HTTPS link instead, which also opens without a warning and is fully secure. See [Listener link](#listener-link).
+9. On the home screen, choose **Be an Interpreter** and sign in with the operator PIN (an interpreter phone uses its QR code instead). Select the mixer's USB interface or a microphone input. If the chosen input is missing (unplugged, or renamed by Windows), starting fails with a clear message instead of quietly using another microphone; if it stops mid-broadcast, the screen says so. The desktop app also offers **System output / loopback** to capture whatever Windows is currently playing. Choose **Human**, or **AI** with the source and target languages (Russian to English is preselected when those channels exist), then start the broadcast.
 10. Press **Sign out** in Admin when the service is over, so the next person at the computer needs the PIN.
 
 If a human interpreter will use a phone, choose the target channel under **Phone interpreter** and create an interpreter QR. The link is valid for eight hours, can be exchanged once, and authorizes that phone to publish only the selected channel. The interpreter opens it, chooses the phone microphone, and taps **Start broadcast**. No administrator PIN is shared with the interpreter. Repeated wrong codes are rate limited the same way the operator PIN is. **End all interpreter access** in Admin cuts every interpreter session and unused code at once, and disconnects any phone that is broadcasting.
@@ -123,7 +123,7 @@ A phone only trusts certificates for public domain names, and a `192.168.x.x` ad
 - It serves listening only. Every sign-in, interpreter-code and operator request is refused on that port, sockets from it can never broadcast, and `/admin` and `/interpreter` redirect to HTTPS before anything can be typed.
 - The **Phone / Speaker** switch may not work there, because browsers keep audio-output selection for secure pages. Normal playback and volume are unaffected. The screen still stays on, using a silent video instead of the wake lock.
 
-Interpreter phones and Admin stay on HTTPS (they need the microphone or a PIN). They show the certificate warning once per phone unless the DuckDNS certificate in step 7 is set up. Admin can switch listener QR codes back to HTTPS under **Link for listener phones**. If TCP 4175 is taken by another program, the app still starts and Admin says so, and QR codes fall back to HTTPS.
+Interpreter phones and Admin stay on HTTPS (they need the microphone or a PIN). They show the certificate warning once per phone unless the DuckDNS certificate in step 7 is set up. The plain link's page and connection setup are not authenticated, so someone on the same Wi-Fi with the right tools could tamper with them; for that reason QR codes switch to HTTPS automatically once a trusted certificate is set up. Admin can choose either link under **Link for listener phones**. If TCP 4175 is taken by another program, the app still starts and Admin says so, and QR codes fall back to HTTPS.
 
 ## Pre-service checks
 
@@ -163,6 +163,8 @@ npm run test:load
 Each simulated client connects and allocates a real listener transport, so this verifies both signalling concurrency and media-port capacity. It does not replace a real Wi-Fi test with 20–50 phones and live audio.
 
 ## Troubleshooting
+
+- **Wi-Fi drops for a moment:** broadcasting phones and the operator's screen publish again, and listening phones reconnect, on their own once the link is back.
 
 - **The app will not start:** it now reports the reason in the window and in an error dialog instead of failing silently. The usual cause is a second copy already running, or something else holding TCP 4173 or 4174. Only one instance can run at a time; launching again focuses the existing window.
 - **Worker missing or wrong format:** remove only `node_modules`, then run `npm ci` locally on Windows.

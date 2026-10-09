@@ -8,7 +8,7 @@ import { useGoBack } from '../lib/navigation';
 import './Interpreter.css';
 import './Listener.css';
 
-interface TranscriptItem { id: number; original: string; translations: Record<string, string>; latencyMs?: number; }
+interface TranscriptItem { id: number; key: string; original: string; translations: Record<string, string>; latencyMs?: number; }
 
 export default function Interpreter() {
     const goBack = useGoBack();
@@ -68,15 +68,6 @@ export default function Interpreter() {
         () => languages.filter((language) => language.id !== sourceChannelId),
         [languages, sourceChannelId],
     );
-
-    // Drop targets that no longer exist or that became the source.
-    useEffect(() => {
-        setTargetIds((previous) => {
-            const allowed = new Set(targetCandidates.map((language) => language.id));
-            const next = new Set([...previous].filter((id) => allowed.has(id)));
-            return next.size === previous.size ? previous : next;
-        });
-    }, [targetCandidates]);
 
     useEffect(() => {
         if (!isDesktopApp) return;
@@ -140,17 +131,18 @@ export default function Interpreter() {
     }, []);
 
     const updateTranscript = (update: TranslationUpdate) => {
+        // One card per caption sentence. Matching on the text itself made a new card for every
+        // word, since the original grows with each update.
         setTranscript((previous) => {
-            const first = previous[0];
-            if (first && first.original === update.originalText) {
-                return [
-                    { ...first, translations: { ...first.translations, [update.targetName]: update.translatedText }, latencyMs: update.latencyMs },
-                    ...previous.slice(1),
-                ];
+            const index = previous.findIndex((item) => item.key === update.segmentId);
+            if (index >= 0) {
+                const next = [...previous];
+                next[index] = { ...next[index], original: update.originalText, translations: { [update.targetName]: update.translatedText }, latencyMs: update.latencyMs };
+                return next;
             }
             transcriptId.current += 1;
             return [
-                { id: transcriptId.current, original: update.originalText, translations: { [update.targetName]: update.translatedText }, latencyMs: update.latencyMs },
+                { id: transcriptId.current, key: update.segmentId, original: update.originalText, translations: { [update.targetName]: update.translatedText }, latencyMs: update.latencyMs },
                 ...previous,
             ].slice(0, 50);
         });

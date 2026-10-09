@@ -484,6 +484,44 @@ async function run() {
         return 'liveRole original, then cleared';
     });
 
+    await check('a phone switching channels lowers the old channel listener count at once', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const { body: settings } = await json('/api/settings');
+        const [first, second] = settings.languages.map((language) => language.id);
+        const operator = await connect(token);
+        assert.ok((await produce(operator, first, 1212)).id);
+        assert.ok((await produce(operator, second, 1313)).id);
+        const phone = await connect('', LISTENER_BASE);
+        const capabilities = await new Promise((resolve) => phone.emit('getRouterRtpCapabilities', resolve));
+        const consume = async (channelId) => {
+            const transport = await ask(phone, 'createWebRtcTransport', { type: 'consumer' });
+            return ask(phone, 'consume', { transportId: transport.id, rtpCapabilities: capabilities, channelId });
+        };
+        // The latest count per channel: counts reach the broadcaster in no fixed order relative
+        // to the phone's own replies.
+        const latest = new Map();
+        operator.on('listenerCount', ({ channelId, count }) => latest.set(channelId, count));
+        // Other checks' listeners come and go in the background, so check what matters: after the
+        // switch both channels are told, and what they are told matches the server's count.
+        const listeners = async () => Object.fromEntries((await json('/api/admin/live', { headers: authed(token) })).body.channels.map((entry) => [entry.id, entry.listeners]));
+        try {
+            assert.ok((await consume(first)).id);
+            await sleep(300);
+            latest.clear();
+            assert.ok((await consume(second)).id);
+            await sleep(300);
+            const now = await listeners();
+            assert.ok(latest.has(first), 'the old channel was told');
+            assert.equal(latest.get(first), now[first]);
+            assert.equal(latest.get(second), now[second]);
+        } finally {
+            phone.close();
+            await ask(operator, 'closeProducer', { channelId: first });
+            await ask(operator, 'closeProducer', { channelId: second });
+        }
+        return 'both channels told their current count';
+    });
+
     await check('the dashboard shows each live channel with its listeners and peak', async () => {
         if (!sfuReady) return 'skipped (no media worker)';
         const { body: settings } = await json('/api/settings');

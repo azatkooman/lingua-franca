@@ -2,6 +2,8 @@ import { settingsService, type Language } from './SettingsService';
 import { voiceService } from './VoiceService';
 
 export interface TranslationUpdate {
+    /** Stable for one caption sentence on one target, so a screen updates it in place. */
+    segmentId: string;
     targetId: string;
     targetName: string;
     translatedText: string;
@@ -22,6 +24,8 @@ interface ActiveSession {
     // update one line while it grows and start a new line after each finished sentence.
     segmentKey: string;
     segment: number;
+    /** Finishes the current caption sentence now (sends it as final). */
+    flush: () => void;
 }
 
 interface StartContext {
@@ -41,6 +45,14 @@ const ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
 const RECONNECT_DELAYS_MS = [1000, 3000, 5000, 10_000, 20_000, 30_000, 30_000];
 // "disconnected" often recovers by itself within a few seconds; only rebuild if it has not.
 const DISCONNECT_GRACE_MS = 5000;
+// OpenAI's translation API sends transcript deltas but never says where a sentence ends. A
+// caption line is finished after this much quiet, or early at a sentence end once it is long.
+const SEGMENT_IDLE_MS = 1400;
+const SEGMENT_MAX_CHARS = 280;
+const SENTENCE_END = /[.!?…。！？]["»”')\]]*\s*$/;
+// The original speech is transcribed only when asked for (input transcription). Without it the
+// Original box and the original channel's captions stayed empty.
+const INPUT_TRANSCRIPTION_MODEL = 'gpt-realtime-whisper';
 
 class RealtimeTranslationService {
     private sessions = new Map<string, ActiveSession>();
@@ -116,7 +128,7 @@ class RealtimeTranslationService {
         peer.addTrack(sourceTrack, new MediaStream([sourceTrack]));
         const session: ActiveSession = {
             peer, target, sourceTrack, translatedText: '', originalText: '', startedAt: performance.now(),
-            segmentKey: `${target.id}-${Date.now().toString(36)}`, segment: 1,
+            segmentKey: `${target.id}-${Date.now().toString(36)}`, segment: 1, flush: () => undefined,
         };
         this.sessions.set(target.id, session);
         const isCurrent = () => !this.stopping && this.sessions.get(target.id) === session;
@@ -155,7 +167,26 @@ class RealtimeTranslationService {
             }
         };
 
+        let idleTimer = 0;
+        // Sends the current sentence as final (so phones close the line and the transcript file
+        // gets it), then starts a new one.
+        const finishSegment = () => {
+            window.clearTimeout(idleTimer);
+            idleTimer = 0;
+            if (session.translatedText || session.originalText) sendCaptions(true);
+            session.translatedText = ''; session.originalText = '';
+            session.startedAt = performance.now(); session.firstOutputAt = undefined;
+            session.segment += 1;
+        };
+        session.flush = finishSegment;
+
         const events = peer.createDataChannel('oai-events');
+        events.onopen = () => {
+            events.send(JSON.stringify({
+                type: 'session.update',
+                session: { audio: { input: { transcription: { model: INPUT_TRANSCRIPTION_MODEL } } } },
+            }));
+        };
         events.onmessage = ({ data }) => {
             try {
                 const event = JSON.parse(String(data)) as { type?: string; delta?: string; error?: { message?: string } };
@@ -167,6 +198,7 @@ class RealtimeTranslationService {
                 if (event.type === 'session.input_transcript.delta') session.originalText += event.delta || '';
                 if (event.type === 'session.output_transcript.delta' || event.type === 'session.input_transcript.delta') {
                     const update: TranslationUpdate = {
+                        segmentId: `${session.segmentKey}-${session.segment}`,
                         targetId: target.id,
                         targetName: target.name,
                         translatedText: session.translatedText,
@@ -175,13 +207,9 @@ class RealtimeTranslationService {
                     };
                     context.onUpdate(update);
                     sendCaptions(false);
-                }
-                if (event.type === 'session.output_transcript.done') {
-                    // Mark the sentence finished on every phone, then start a new line.
-                    if (session.translatedText || session.originalText) sendCaptions(true);
-                    session.translatedText = ''; session.originalText = '';
-                    session.startedAt = performance.now(); session.firstOutputAt = undefined;
-                    session.segment += 1;
+                    window.clearTimeout(idleTimer);
+                    if (session.translatedText.length > SEGMENT_MAX_CHARS && SENTENCE_END.test(session.translatedText)) finishSegment();
+                    else idleTimer = window.setTimeout(() => { if (isCurrent()) finishSegment(); }, SEGMENT_IDLE_MS);
                 }
                 if (event.type === 'error') context.onStatus(`OpenAI ${target.name}: ${event.error?.message || 'unknown error'}`);
             } catch (error) { console.error('Invalid OpenAI realtime event:', error); }
@@ -206,6 +234,9 @@ class RealtimeTranslationService {
     }
 
     private closeSession(session: ActiveSession) {
+        // Whatever was being said is kept as a finished line rather than lost.
+        session.flush();
+        session.flush = () => undefined;
         session.peer.ontrack = null;
         session.peer.onconnectionstatechange = null;
         session.sourceTrack.stop();
@@ -288,6 +319,9 @@ class RealtimeTranslationService {
         for (const timer of this.reconnectTimers.values()) window.clearTimeout(timer);
         this.reconnectTimers.clear();
         this.reconnectAttempts.clear();
+        // Finish the sentence being spoken first, while the original channel is still known, so
+        // the last line reaches phones and the transcript files.
+        for (const session of this.sessions.values()) session.flush();
         // A target that is between reconnect attempts has no session but is still published.
         const channelIds = new Set([...this.sessions.keys(), ...this.targets.keys()]);
         if (this.floorChannel) channelIds.add(this.floorChannel.id);

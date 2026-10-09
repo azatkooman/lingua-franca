@@ -67,6 +67,10 @@ export class VoiceService {
     private listenerCounts = new Map<string, number>();
     private muted = false;
     private handlersBound = false;
+    // Set when the signalling connection drops on its own. The server tears down every transport
+    // of a socket that goes away, so on the next connect this device must publish and listen again.
+    private socketDropped = false;
+    private republishTimer = 0;
 
     private totalListeners() {
         let total = 0;
@@ -148,9 +152,12 @@ export class VoiceService {
         try {
             this.sourceStream = await navigator.mediaDevices.getUserMedia({ audio });
         } catch (error) {
-            if (!deviceId || !(error instanceof DOMException) || !['NotFoundError', 'OverconstrainedError'].includes(error.name)) throw this.mediaError(error);
-            try { this.sourceStream = await navigator.mediaDevices.getUserMedia({ audio: { ...audio, deviceId: undefined } }); }
-            catch (fallbackError) { throw this.mediaError(fallbackError); }
+            // A chosen input that is gone used to fall back to the default device without a word,
+            // which could broadcast the laptop microphone instead of the mixer feed.
+            if (deviceId && error instanceof DOMException && ['NotFoundError', 'OverconstrainedError'].includes(error.name)) {
+                throw new Error('The selected input is not available. Reconnect it, press refresh and choose it again. Nothing was broadcast.');
+            }
+            throw this.mediaError(error);
         }
         return this.sourceStream;
     }
@@ -200,9 +207,30 @@ export class VoiceService {
         });
         // A dropped Wi-Fi link gives the reconnected socket a new id, so the server holds no
         // transports for it and the listener has to negotiate again.
-        realtimeSocket.on('connect', () => {
-            if (this.currentListenerChannelId && !this.consumer) void this.reconnectListener();
+        realtimeSocket.on<string>('disconnect', (reason) => {
+            // Our own disconnect (a sign-in change) is not a dropped link.
+            if (reason === 'io client disconnect') return;
+            this.socketDropped = true;
+            if (this.producers.size) this.onPublishStatus('Connection to the computer lost. Reconnecting…');
+            if (this.currentListenerChannelId) this.onListenerStatus?.('restarting');
         });
+        realtimeSocket.on('connect', () => {
+            const recovering = this.socketDropped;
+            this.socketDropped = false;
+            // After a drop the server has already closed this device's producers and consumer,
+            // even if the objects here still look alive, so rebuild both.
+            if (recovering && (this.producers.size || this.recordOnly)) void this.republish();
+            if (this.currentListenerChannelId && (recovering || !this.consumer)) void this.reconnectListener();
+        });
+    }
+
+    /** Rebuilds every published channel once, after its media link failed. */
+    private scheduleRepublish() {
+        if (this.republishTimer || (!this.producers.size && !this.recordOnly)) return;
+        this.republishTimer = window.setTimeout(() => {
+            this.republishTimer = 0;
+            if (this.producers.size || this.recordOnly) void this.republish();
+        }, 1000);
     }
 
     private async loadDevice() {
@@ -233,6 +261,7 @@ export class VoiceService {
                 ? errback(new Error(result.error || 'No producer ID returned.'))
                 : callback({ id: result.id }));
         });
+        transport.on('connectionstatechange', (state) => { if (state === 'failed') this.scheduleRepublish(); });
         return transport;
     }
 
@@ -256,7 +285,12 @@ export class VoiceService {
         const producer = await transport.produce({ track, stopTracks: false });
         this.producers.set(channelId, producer);
         this.publishModes.set(channelId, { mode, role });
-        producer.on('trackended', () => this.stopChannel(channelId));
+        // The input itself stopped (a USB interface unplugged, the device switched off). The
+        // channel ends; say so, since the screen otherwise still looked live.
+        producer.on('trackended', () => {
+            this.stopChannel(channelId);
+            this.onPublishStatus('The audio input stopped sending sound, so this channel is off air. Check the cable or device, then press Stop and start again.');
+        });
         onStatus('Broadcasting');
     }
 
@@ -434,6 +468,15 @@ export class VoiceService {
             if (stale()) return;
             const recvTransport = this.device!.createRecvTransport(transportInfo);
             this.recvTransport = recvTransport;
+            // A media link that fails (Wi-Fi roaming, the computer's address changing) gives no
+            // other sign: the consumer object stays, and the listener just hears nothing.
+            recvTransport.on('connectionstatechange', (state) => {
+                if (state !== 'failed' || stale() || this.recvTransport !== recvTransport) return;
+                this.handleStreamLoss();
+                window.setTimeout(() => {
+                    if (!stale() && this.currentListenerChannelId === channelId) void this.reconnectListener();
+                }, 1000);
+            });
             recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
                 void realtimeSocket.request<{ error?: string } | undefined>('connectTransport', { transportId: recvTransport.id, dtlsParameters })
                     .then((result) => result?.error ? errback(new Error(result.error)) : callback());

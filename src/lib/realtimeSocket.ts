@@ -20,8 +20,9 @@ type InternalHandler = (payload: unknown) => void;
 class RealtimeSocket {
     private socket: Socket | null = null;
     private token = '';
-    private pending: Promise<Socket> | null = null;
     private handlers = new Map<string, Set<InternalHandler>>();
+    // Callers waiting for a connection. They carry over when the socket is replaced.
+    private waiters: { resolve: (socket: Socket) => void; reject: (error: Error) => void }[] = [];
 
     setAuthToken(token: string) {
         if (token === this.token) return;
@@ -30,8 +31,32 @@ class RealtimeSocket {
         // Reconnect so the server re-reads the handshake with the new credentials.
         this.socket.disconnect();
         this.socket = null;
-        this.pending = null;
-        void this.connect();
+        this.open();
+    }
+
+    private open() {
+        const socket = io({
+            transports: ['websocket'],
+            auth: { token: this.token },
+            reconnection: true,
+            reconnectionDelay: 500,
+            reconnectionDelayMax: 5000,
+        });
+        this.socket = socket;
+        for (const [event, handlers] of this.handlers) {
+            for (const handler of handlers) socket.on(event, handler);
+        }
+        socket.on('connect', () => {
+            if (this.socket !== socket) return;
+            for (const waiter of this.waiters.splice(0)) waiter.resolve(socket);
+        });
+        // The socket keeps retrying on its own; waiting callers get the error now, and the next
+        // connect() waits for this same socket rather than opening another.
+        socket.on('connect_error', (error) => {
+            if (this.socket !== socket) return;
+            const failure = error instanceof Error ? error : new Error(String(error));
+            for (const waiter of this.waiters.splice(0)) waiter.reject(failure);
+        });
     }
 
     on<T>(event: string, handler: (payload: T) => void): () => void {
@@ -48,26 +73,8 @@ class RealtimeSocket {
 
     connect(): Promise<Socket> {
         if (this.socket?.connected) return Promise.resolve(this.socket);
-        if (this.pending) return this.pending;
-        this.pending = new Promise<Socket>((resolve, reject) => {
-            const socket = io({
-                transports: ['websocket'],
-                auth: { token: this.token },
-                reconnection: true,
-                reconnectionDelay: 500,
-                reconnectionDelayMax: 5000,
-            });
-            this.socket = socket;
-            for (const [event, handlers] of this.handlers) {
-                for (const handler of handlers) socket.on(event, handler);
-            }
-            socket.once('connect', () => resolve(socket));
-            socket.once('connect_error', (error) => {
-                this.pending = null;
-                reject(error instanceof Error ? error : new Error(String(error)));
-            });
-        });
-        return this.pending;
+        if (!this.socket) this.open();
+        return new Promise<Socket>((resolve, reject) => { this.waiters.push({ resolve, reject }); });
     }
 
     emit(event: string, ...args: unknown[]) {
@@ -98,7 +105,7 @@ class RealtimeSocket {
     disconnect() {
         this.socket?.disconnect();
         this.socket = null;
-        this.pending = null;
+        for (const waiter of this.waiters.splice(0)) waiter.reject(new Error('Disconnected.'));
     }
 }
 

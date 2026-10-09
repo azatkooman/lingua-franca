@@ -14,6 +14,7 @@ const {
     selectLocalAddress,
 } = require('./lib/settings.cjs');
 const { TranscriptStore } = require('./lib/transcript.cjs');
+const { certificateCoversHost, certificateDetails: readCertificateDetails } = require('./lib/certificates.cjs');
 const { RecordingStore, ROLES, TranscriptLog } = require('./lib/recordings.cjs');
 const { startChannelRecording } = require('./lib/recorder.cjs');
 const { ExpiringMap, LoginThrottle, isValidPin, newAccessCode, newToken, setPin, verifyPin } = require('./lib/security.cjs');
@@ -40,9 +41,10 @@ const CERTIFICATE_RENEWAL_DAYS = 30;
 const MAINTENANCE_INTERVAL_MS = 60 * 60 * 1000;
 const DYNAMIC_DNS_INTERVAL_MS = 5 * 60 * 1000;
 const WORKER_RESTART_DELAYS_MS = [1000, 2000, 5000, 10_000, 30_000];
-// OpenAI's price for gpt-realtime-translate, per minute of audio, per target language (2026).
-// Only used for the rough cost shown on the operator's dashboard.
-const AI_PRICE_PER_MINUTE = 0.034;
+// OpenAI's prices per minute of audio, per target language (2026): gpt-realtime-translate
+// ($0.034) plus gpt-realtime-whisper ($0.017), which transcribes the original speech for its
+// captions. Only used for the rough cost shown on the operator's dashboard.
+const AI_PRICE_PER_MINUTE = 0.034 + 0.017;
 
 let mainWindow;
 let httpsServer;
@@ -163,14 +165,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = OUTBOUND_TIMEOUT_
 
 /* ------------------------------------------------------------ certificate */
 
-function certificateDetails(certPem) {
-    const certificate = forge.pki.certificateFromPem(String(certPem));
-    return {
-        expiresAt: certificate.validity.notAfter.toISOString(),
-        expiresSoon: certificate.validity.notAfter.getTime() <= Date.now() + CERTIFICATE_RENEWAL_DAYS * 24 * 60 * 60 * 1000,
-        expired: certificate.validity.notAfter.getTime() <= Date.now(),
-    };
-}
+const certificateDetails = (certPem) => readCertificateDetails(certPem, CERTIFICATE_RENEWAL_DAYS);
 
 function ensureSelfSignedCertificate(localAddress) {
     const directory = certificateDirectory();
@@ -294,8 +289,11 @@ async function issueTrustedCertificate(settings, localAddress) {
 
 async function ensureServerCertificate(settings, localAddress, { forceRenewal = false } = {}) {
     if (settings.certificateMode === 'duckdns') {
-        const stored = readTrustedCertificate();
         const domain = normalizeDuckDnsDomain(settings.certificateHostname);
+        // Only a certificate issued for this host is any use: after the DuckDNS name changes,
+        // the old one would be served and rejected by every browser.
+        const found = readTrustedCertificate();
+        const stored = found && certificateCoversHost(found.details, `${domain}.duckdns.org`) ? found : null;
         try {
             // Reuse a certificate that is still comfortably valid instead of asking the CA
             // for another one on every launch.
@@ -874,7 +872,13 @@ async function startServers(isDev) {
                 const transport = transports.get(socket.id)?.get(transportId);
                 if (!transport) throw new Error('Consumer transport not found.');
                 const consumer = await transport.consume({ producerId: producer.id, rtpCapabilities, paused: false });
+                // A phone switching channels leaves its old one: tell that broadcaster too, or
+                // its count stayed one too high until something else changed it.
+                const previousChannel = listenerChannels.get(socket.id);
                 listenerChannels.set(socket.id, channelId);
+                if (previousChannel && previousChannel !== channelId) {
+                    io.emit('listenerCount', { channelId: previousChannel, count: countListeners(previousChannel) });
+                }
                 const count = countListeners(channelId);
                 peakListeners.set(channelId, Math.max(peakListeners.get(channelId) || 0, count));
                 io.emit('listenerCount', { channelId, count });
@@ -1255,7 +1259,8 @@ async function startServers(isDev) {
         adminThrottle.prune(); interpreterThrottle.prune();
         if (settings.certificateMode !== 'duckdns') return;
         const stored = readTrustedCertificate();
-        if (stored && !stored.details.expiresSoon) return;
+        const host = `${normalizeDuckDnsDomain(settings.certificateHostname)}.duckdns.org`;
+        if (stored && !stored.details.expiresSoon && certificateCoversHost(stored.details, host)) return;
         void ensureServerCertificate(settings, localAddress, { forceRenewal: true })
             .then((context) => httpsServer.setSecureContext(context))
             .catch((error) => console.error('Scheduled certificate renewal failed:', error.message));

@@ -27,14 +27,15 @@ export default function Admin() {
     const { t, locale } = useTranslation();
     const [settings, setSettings] = useState<AdminSettings | null>(settingsService.getAdminSettings());
     const [health, setHealth] = useState<HealthInfo | null>(null);
-    const [qrChannelId, setQrChannelId] = useState('');
-    const [phoneLink, setPhoneLink] = useState<PhoneLink>(readPhoneLink);
+    const [qrChoice, setQrChannelId] = useState('');
+    const [phoneLink, setPhoneLink] = useState<PhoneLink | null>(readPhoneLink);
     const [showQr, setShowQr] = useState(false);
     const [interpreterLink, setInterpreterLink] = useState<{ url: string; code: string; channelName: string } | null>(null);
-    const [interpreterChannelId, setInterpreterChannelId] = useState('');
-    const [duckDomain, setDuckDomain] = useState('');
+    const [interpreterChoice, setInterpreterChannelId] = useState('');
+    // null until edited, so the saved values show without being copied into state.
+    const [duckDomainDraft, setDuckDomain] = useState<string | null>(null);
     const [duckToken, setDuckToken] = useState('');
-    const [certificateEmail, setCertificateEmail] = useState('');
+    const [certificateEmailDraft, setCertificateEmail] = useState<string | null>(null);
     const [editingLang, setEditingLang] = useState<Language | null>(null);
     const [languageName, setLanguageName] = useState('');
     const [languageCode, setLanguageCode] = useState('');
@@ -57,13 +58,12 @@ export default function Admin() {
     useEffect(() => settingsService.subscribeAdmin(setSettings), []);
     useEffect(() => { void refreshHealth(); }, []);
 
-    useEffect(() => {
-        if (!settings?.languages.length) return;
-        setQrChannelId((current) => settings.languages.some((l) => l.id === current) ? current : settings.languages[0].id);
-        setInterpreterChannelId((current) => settings.languages.some((l) => l.id === current) ? current : settings.languages[0].id);
-        setDuckDomain((current) => current || settings.certificateHostname);
-        setCertificateEmail((current) => current || settings.certificateEmail);
-    }, [settings]);
+    // A choice for a channel that has since been removed falls back to the first channel.
+    const existingChannel = (id: string) => (settings?.languages.some((language) => language.id === id) ? id : settings?.languages[0]?.id ?? '');
+    const qrChannelId = existingChannel(qrChoice);
+    const interpreterChannelId = existingChannel(interpreterChoice);
+    const duckDomain = duckDomainDraft ?? settings?.certificateHostname ?? '';
+    const certificateEmail = certificateEmailDraft ?? settings?.certificateEmail ?? '';
 
     const run = async (action: () => Promise<unknown>, success: string) => {
         setBusy(true); setMessage('');

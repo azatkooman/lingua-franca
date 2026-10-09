@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Mail, MessageCircle, Monitor, Moon, Phone, Send, Sun } from 'lucide-react';
+import { CircleHelp, Mail, MessageCircle, Monitor, Moon, Phone, Send, Sun } from 'lucide-react';
 import LogoMark from './LogoMark';
 import { settingsService, type ContactInfo } from '../lib/SettingsService';
 import { LOCALES, useTranslation } from '../lib/i18n';
@@ -56,7 +56,7 @@ function ContactButton() {
         <div className="contact-wrapper" ref={wrapper}>
             <button type="button" className="header-icon-btn" aria-label={t('contact_us')} title={t('contact_us')}
                 aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen((value) => !value)}>
-                <Phone size={18} />
+                <CircleHelp size={18} />
             </button>
             {open && (
                 <div className="contact-popover" role="dialog" aria-label={t('contacts_title')}>

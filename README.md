@@ -18,7 +18,7 @@ OpenAI is the only translation provider. Human mode is the fallback if the inter
 Listeners scan the QR code, see the event name and dates, pick a language and tap **Tap to listen**. While listening:
 
 - **Live captions** (AI channels): a scrolling transcript that follows the newest line and highlights it. Scrolling up to reread pauses it, and **Jump to latest** brings it back. A phone that joins late gets the last few sentences straight away.
-- **Original text**: a second card with the speaker's own words, which the listener can hide.
+- **Original text**: on translation channels, a second box under the translation with the speaker's own words, shown from the start and filled in as they speak. The listener can hide it. When AI mode also broadcasts the original speech, that channel is tagged **Original** in the list and its captions are labelled **Original speech**.
 - **Text size**: the **A** button cycles medium, large and small.
 - **Full screen**: a reading view with large text and a small bar for status, text size, mute and exit.
 - **Switch language** with the tabs at the top, without going back.
@@ -26,7 +26,7 @@ Listeners scan the QR code, see the event name and dates, pick a language and ta
 - **Sound**: mute, volume, a level meter, and Phone / Speaker output, under **Sound**.
 - The screen is kept on while listening, on both links: the browser's wake lock on HTTPS, and on the plain link a tiny muted video that phones treat as playing ([NoSleep.js](https://github.com/richtr/NoSleep.js)). Text size, the original-text choice and the volume are remembered on each phone.
 
-Every screen has a phone button with the organiser's contacts (set in Admin, hidden when empty), the **RU / KK / EN** interface switch, and a light / dark / system theme switch. The Kazakh text has not yet been reviewed by a native speaker.
+Every screen has a help button (a question mark) with the organiser's contacts (set in Admin, hidden when empty), the **RU / KK / EN** interface switch, and a light / dark / system theme switch. The Kazakh text has not yet been reviewed by a native speaker.
 
 ## Operator tools
 
@@ -100,7 +100,7 @@ Every WebRTC transport needs an ICE port. Lingua Franca puts all transports on a
 4. In Admin, select the physical network adapter if the automatic address is wrong, then press **Restart app**.
 5. Add an OpenAI API key if using AI translation. ChatGPT subscriptions do not include API usage. OpenAI's realtime translation model does not accept a custom glossary, so check names and Bible books by ear before the service.
 6. Under **Default language for phones**, choose the language phones start in (English, Russian or Kazakh). Each phone can still switch with RU / KK / EN.
-   Under **Event**, enter the event name and dates; they are shown at the top of the home and listener screens. Under **Contact for listeners**, enter a name, phone, WhatsApp, Telegram or email for people who have no sound or a question. Leave every contact field empty to hide the phone button.
+   Under **Event**, enter the event name and dates; they are shown at the top of the home and listener screens. Under **Contact for listeners**, enter a name, phone, WhatsApp, Telegram or email for people who have no sound or a question. Leave every contact field empty to hide the help button.
 7. Optional: listener phones need no certificate (see step 8), but interpreter phones and Admin on other devices use HTTPS. To remove the warning there too, create a free subdomain at [DuckDNS](https://www.duckdns.org), then enter the subdomain, DuckDNS token, and contact email under **Trusted phone certificate**. The app obtains a free Let's Encrypt certificate and renews it automatically once it has fewer than 30 days remaining. A still-valid certificate is reused rather than reissued, which keeps you clear of the CA's weekly duplicate-certificate limit.
 8. Print a poster with **Print a QR poster**, or pick a channel under **Listener QR channel** and show its QR. Each channel has its own link. By default the QR carries the **plain listener link** (`http://<computer address>:4175/listener?...`), which phones open straight away with no certificate warning, no DuckDNS and no internet. See [Listener link](#listener-link).
 9. On the home screen, choose **Be an Interpreter** and sign in with the operator PIN (an interpreter phone uses its QR code instead). Select the mixer's USB interface or a microphone input. The desktop app also offers **System output / loopback** to capture whatever Windows is currently playing. Choose **Human**, or **AI** with the source and target languages (Russian to English is preselected when those channels exist), then start the broadcast.

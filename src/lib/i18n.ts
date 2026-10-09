@@ -141,7 +141,7 @@ const en = {
     event_end: 'End date (optional)',
     event_saved: 'Event saved.',
     contact_title: 'Contact for listeners',
-    contact_hint: 'Shown behind the phone button on every screen, for listeners with no sound or a question. Leave every field empty to hide the button.',
+    contact_hint: 'Shown behind the help button (?) on every screen, for listeners with no sound or a question. Leave every field empty to hide the button.',
     contact_name: 'Name',
     contact_phone: 'Phone',
     contact_whatsapp: 'WhatsApp number',
@@ -280,6 +280,8 @@ const en = {
     poster_password: 'Password: {password}',
     poster_headphones: 'Use headphones, and keep your screen on.',
     poster_print_hint: 'To save a PDF, choose "Microsoft Print to PDF" as the printer.',
+    original_speech_label: 'Original speech',
+    original_waiting: 'The speaker’s own words will appear here.',
 };
 
 export type TranslationKey = keyof typeof en;
@@ -418,7 +420,7 @@ const ru: Record<TranslationKey, string> = {
     event_end: 'Дата окончания (необязательно)',
     event_saved: 'Мероприятие сохранено.',
     contact_title: 'Контакты для слушателей',
-    contact_hint: 'Открываются по кнопке с телефоном на каждом экране, для слушателей без звука или с вопросом. Оставьте все поля пустыми, чтобы скрыть кнопку.',
+    contact_hint: 'Открываются по кнопке помощи (?) на каждом экране, для слушателей без звука или с вопросом. Оставьте все поля пустыми, чтобы скрыть кнопку.',
     contact_name: 'Имя',
     contact_phone: 'Телефон',
     contact_whatsapp: 'Номер WhatsApp',
@@ -557,6 +559,8 @@ const ru: Record<TranslationKey, string> = {
     poster_password: 'Пароль: {password}',
     poster_headphones: 'Используйте наушники и не гасите экран.',
     poster_print_hint: 'Чтобы сохранить PDF, выберите принтер «Microsoft Print to PDF».',
+    original_speech_label: 'Оригинальная речь',
+    original_waiting: 'Здесь появятся слова спикера на языке оригинала.',
 };
 
 // Kazakh. Written for this release; worth a read-through by a native speaker before an event.
@@ -692,7 +696,7 @@ const kk: Record<TranslationKey, string> = {
     event_end: 'Аяқталу күні (міндетті емес)',
     event_saved: 'Іс-шара сақталды.',
     contact_title: 'Тыңдаушыларға арналған байланыс',
-    contact_hint: 'Әр экрандағы телефон батырмасы арқылы ашылады: дыбысы жоқ немесе сұрағы бар тыңдаушыларға арналған. Батырманы жасыру үшін барлық өрісті бос қалдырыңыз.',
+    contact_hint: 'Әр экрандағы көмек батырмасы (?) арқылы ашылады: дыбысы жоқ немесе сұрағы бар тыңдаушыларға арналған. Батырманы жасыру үшін барлық өрісті бос қалдырыңыз.',
     contact_name: 'Аты',
     contact_phone: 'Телефон',
     contact_whatsapp: 'WhatsApp нөмірі',
@@ -831,6 +835,8 @@ const kk: Record<TranslationKey, string> = {
     poster_password: 'Құпиясөз: {password}',
     poster_headphones: 'Құлаққап киіп, экранды өшірмеңіз.',
     poster_print_hint: 'PDF сақтау үшін «Microsoft Print to PDF» принтерін таңдаңыз.',
+    original_speech_label: 'Түпнұсқа сөз',
+    original_waiting: 'Мұнда спикердің түпнұсқа тілдегі сөздері шығады.',
 };
 
 export const translations = { en, ru, kk };

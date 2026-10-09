@@ -555,8 +555,8 @@ async function startServers(isDev) {
     };
 
     const emitSettings = () => io.emit('settingsChanged', publicSettings(settings, liveChannels));
-    const setChannelState = (channelId, mode) => {
-        if (mode) liveChannels.set(channelId, { mode, updatedAt: Date.now() });
+    const setChannelState = (channelId, mode, role) => {
+        if (mode) liveChannels.set(channelId, { mode, role, updatedAt: Date.now() });
         else liveChannels.delete(channelId);
         emitSettings();
     };
@@ -778,8 +778,8 @@ async function startServers(isDev) {
                 const producer = await transport.produce({ kind, rtpParameters, appData: { channelId } });
                 producers.set(channelId, producer);
                 producerOwners.set(channelId, { socketId: socket.id, token: socketToken() || '' });
-                setChannelState(channelId, appData?.mode === 'ai' ? 'ai-active' : 'sfu-active');
                 const role = ROLES.includes(appData?.role) ? appData.role : appData?.mode === 'ai' ? 'translation' : 'interpreter';
+                setChannelState(channelId, appData?.mode === 'ai' ? 'ai-active' : 'sfu-active', role);
                 broadcastInfo.set(channelId, { role, since: Date.now() });
                 startRecording(channelId, producer, role);
                 producer.on('transportclose', () => {

@@ -6,6 +6,8 @@ export interface Language {
     code: string;
     description: string;
     activePeerId?: 'sfu-active' | 'ai-active';
+    /** What a live channel carries; 'original' is the speaker's own voice with captions. */
+    liveRole?: 'original' | 'translation' | 'interpreter';
 }
 
 export type InterfaceLanguage = 'en' | 'ru' | 'kk';
@@ -17,7 +19,7 @@ export interface EventInfo {
     endDate: string;
 }
 
-/** Who listeners can reach behind the header's phone button. Empty fields are hidden. */
+/** Who listeners can reach behind the header's help button. Empty fields are hidden. */
 export interface ContactInfo {
     name: string;
     phone: string;

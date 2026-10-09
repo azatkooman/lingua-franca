@@ -109,6 +109,12 @@
     background: var(--accent-glow);
 }
 
+.channel-badge.original {
+    color: #d97706;
+    background: rgba(217, 119, 6, 0.14);
+    text-transform: uppercase;
+}
+
 .channel-badge.ai {
     color: var(--primary);
     background: var(--primary-glow);
@@ -371,6 +377,15 @@
 
 .caption-card.original .transcript {
     height: min(22vh, 180px);
+}
+
+/* Both boxes on one phone screen, as listeners read the two side by side. */
+.listen-session.with-original .caption-card:not(.original) .transcript {
+    height: min(32vh, 300px);
+}
+
+.listen-session.with-original .caption-card.original .transcript {
+    height: min(18vh, 170px);
 }
 
 .transcript-line {

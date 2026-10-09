@@ -150,10 +150,16 @@ export default function Listener() {
     const linkedChannelMissing = Boolean(requestedChannel) && languages.length > 0 && !linkedLanguage;
     const activeLanguage = languages.find((language) => language.id === channelId) || null;
     const channelLive = Boolean(activeLanguage?.activePeerId);
-    const hasOriginals = segments.some((segment) => segment.originalText.trim());
     // Human interpreters produce no captions. Show the transcript when the channel is an AI
     // channel or captions have actually arrived; otherwise say it is audio only.
     const captioned = activeLanguage?.activePeerId === 'ai-active' || segments.length > 0;
+    // This channel is the speaker's own voice: its captions are the original already.
+    const isOriginalChannel = activeLanguage?.liveRole === 'original';
+    // A human interpreter's channel has no captions at all, so nothing to show either way.
+    const audioOnly = channelLive && !captioned;
+    // Shown from the start, like the translation box, so listeners know it is there; it fills
+    // in as soon as the speaker talks. Hidden only when it would repeat the main box.
+    const showOriginalCard = showOriginal && !audioOnly && !isOriginalChannel;
     const dates = event ? formatEventDates(event.startDate, event.endDate, locale) : '';
 
     useEffect(() => settingsService.subscribe((settings) => {
@@ -427,6 +433,7 @@ export default function Listener() {
                         <div className="lobby-channels" role="radiogroup" aria-label={t('select_channel')}>
                             {languages.map((language) => {
                                 const isAi = language.activePeerId === 'ai-active';
+                                const isOriginal = language.liveRole === 'original';
                                 return (
                                     <button key={language.id} type="button" role="radio" aria-checked={channelId === language.id}
                                         className={`lobby-channel ${channelId === language.id ? 'selected' : ''}`} onClick={() => chooseChannel(language)}>
@@ -434,7 +441,11 @@ export default function Listener() {
                                             <strong>{language.name}</strong>
                                             {language.description && <small>{language.description}</small>}
                                         </span>
-                                        {language.activePeerId && <span className={`channel-badge ${isAi ? 'ai' : 'live'}`}>{isAi ? 'AI' : 'LIVE'}</span>}
+                                        {language.activePeerId && (
+                                            <span className={`channel-badge ${isOriginal ? 'original' : isAi ? 'ai' : 'live'}`}>
+                                                {isOriginal ? t('role_original') : isAi ? 'AI' : 'LIVE'}
+                                            </span>
+                                        )}
                                     </button>
                                 );
                             })}
@@ -449,15 +460,19 @@ export default function Listener() {
                     </div>
                 </div>
             ) : (
-                <div className="listen-session fade-in">
+                <div className={`listen-session fade-in ${showOriginalCard ? 'with-original' : ''}`}>
                     {channelTabs}
 
                     <div className="listen-controls">
                         {muteButton(false)}
-                        <button type="button" className={`listen-control icon-only ${showOriginal ? 'active' : ''}`} onClick={toggleOriginal}
-                            disabled={!hasOriginals} aria-pressed={showOriginal} aria-label={t('show_original')} title={t('show_original')}>
-                            <Captions size={20} />
-                        </button>
+                        {/* Only where there is an original to show: not on an interpreter's
+                            audio-only channel, nor on the channel that is the original itself. */}
+                        {!audioOnly && !isOriginalChannel && (
+                            <button type="button" className={`listen-control icon-only ${showOriginal ? 'active' : ''}`} onClick={toggleOriginal}
+                                aria-pressed={showOriginal} aria-label={t('show_original')} title={t('show_original')}>
+                                <Captions size={20} />
+                            </button>
+                        )}
                         {textSizeButton}
                         <button type="button" className="listen-control icon-only" onClick={toggleFullscreen} aria-label={t('fullscreen')} title={t('fullscreen')}>
                             <Maximize2 size={20} />
@@ -471,7 +486,7 @@ export default function Listener() {
                     {captioned || !channelLive ? (
                         <section className="caption-card">
                             <div className="caption-card-head">
-                                <span className="caption-label">{t('translation_label')} · {activeLanguage?.name}</span>
+                                <span className="caption-label">{isOriginalChannel ? t('original_speech_label') : t('translation_label')} · {activeLanguage?.name}</span>
                                 {statusChip}
                             </div>
                             <Transcript segments={segments} field="text" empty={emptyTranslation} sizeClass={sizeClass} jumpLabel={t('jump_latest')} />
@@ -493,12 +508,12 @@ export default function Listener() {
                         </section>
                     )}
 
-                    {captioned && showOriginal && hasOriginals && (
+                    {showOriginalCard && (
                         <section className="caption-card original">
                             <div className="caption-card-head">
                                 <span className="caption-label">{t('original_label')}</span>
                             </div>
-                            <Transcript segments={segments} field="originalText" empty="…" sizeClass="size-small" jumpLabel={t('jump_latest')} />
+                            <Transcript segments={segments} field="originalText" empty={t('original_waiting')} sizeClass="size-small" jumpLabel={t('jump_latest')} />
                         </section>
                     )}
 

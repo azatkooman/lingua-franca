@@ -450,6 +450,24 @@ async function run() {
         return 'locked out';
     });
 
+    await check('phones are told which live channel carries the original speech', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const { body: settings } = await json('/api/settings');
+        const channel = settings.languages[1].id;
+        const operator = await connect(token);
+        const transport = await ask(operator, 'createWebRtcTransport', { type: 'producer' });
+        const produced = await ask(operator, 'produce', {
+            transportId: transport.id, kind: 'audio', rtpParameters: opusRtp(9999), appData: { channelId: channel, mode: 'ai', role: 'original' },
+        });
+        assert.ok(produced.id, produced.error);
+        const live = (await json('/api/settings')).body.languages.find((language) => language.id === channel);
+        assert.deepEqual([live.activePeerId, live.liveRole], ['ai-active', 'original']);
+        await ask(operator, 'closeProducer', { channelId: channel });
+        const after = (await json('/api/settings')).body.languages.find((language) => language.id === channel);
+        assert.equal(after.liveRole, undefined, 'cleared when the broadcast ends');
+        return 'liveRole original, then cleared';
+    });
+
     await check('the dashboard shows each live channel with its listeners and peak', async () => {
         if (!sfuReady) return 'skipped (no media worker)';
         const { body: settings } = await json('/api/settings');

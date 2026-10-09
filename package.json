@@ -1,7 +1,7 @@
 {
   "name": "lingua-franca",
   "private": true,
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Lingua Franca - Real-time Audio Translation",
   "author": "Azat Kooman",
   "type": "module",
@@ -31,6 +31,7 @@
       "lib/**/*.cjs",
       "!lib/**/*.test.cjs",
       "desktop/startup.html",
+      "desktop/preload.cjs",
       "main.cjs",
       "package.json",
       "!**/._*",

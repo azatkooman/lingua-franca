@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeft, Printer } from 'lucide-react';
+import { ArrowLeft, FileDown, Printer } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { settingsService, type AdminSettings } from '../lib/SettingsService';
 import { LOCALES, formatEventDates, translateFor, useTranslation, type Locale } from '../lib/i18n';
 import { fetchAdminHealth, listenerUrl, readPhoneLink, type HealthInfo } from '../lib/listenerLinks';
 import { useGoBack } from '../lib/navigation';
+import { desktopBridge } from '../lib/desktop';
 import './Poster.css';
 
 const WIFI_KEY = 'lingua_franca_poster_wifi';
@@ -40,11 +41,32 @@ export default function Poster() {
     const [wifi, setWifi] = useState<WifiDetails>(readWifi);
     const [hidden, setHidden] = useState<Set<string>>(() => new Set());
     const [phoneLink] = useState(readPhoneLink);
+    const [pdfMessage, setPdfMessage] = useState('');
+    const [savingPdf, setSavingPdf] = useState(false);
+    const eventName = settings?.event?.name || '';
+    // The page title is the file name a browser suggests for "Save as PDF".
+    const fileName = `${t('poster_title')} - ${eventName || 'Lingua Franca'}`;
+
+    useEffect(() => {
+        const previous = document.title;
+        document.title = fileName;
+        return () => { document.title = previous; };
+    }, [fileName]);
 
     useEffect(() => settingsService.subscribeAdmin(setSettings), []);
     useEffect(() => { void fetchAdminHealth(settingsService.getAdminToken()).then(setHealth); }, []);
 
     const updateWifi = (next: WifiDetails) => { setWifi(next); saveWifi(next); };
+
+    const savePdf = async () => {
+        if (!desktopBridge) return;
+        setSavingPdf(true); setPdfMessage('');
+        try {
+            const result = await desktopBridge.savePageAsPdf(fileName);
+            if (result.saved) setPdfMessage(t('poster_pdf_saved', { path: result.saved }));
+            else if (result.error) setPdfMessage(result.error);
+        } finally { setSavingPdf(false); }
+    };
 
     if (!settings) return <div className="page-container">{t('loading')}</div>;
 
@@ -93,10 +115,18 @@ export default function Poster() {
                     ))}
                 </div>
                 {!health && <p className="text-danger">{t('network_not_ready')}</p>}
-                <button className="btn-primary mt-4" disabled={!health || !channels.length} onClick={() => window.print()}>
-                    <Printer size={18} /> {t('poster_print')}
-                </button>
-                <p className="text-muted checkbox-hint">{t('poster_print_hint')}</p>
+                <div className="poster-actions mt-4">
+                    {desktopBridge && (
+                        <button className="btn-primary" disabled={!health || !channels.length || savingPdf} onClick={() => void savePdf()}>
+                            <FileDown size={18} /> {t('poster_save_pdf')}
+                        </button>
+                    )}
+                    <button className={desktopBridge ? 'btn-secondary' : 'btn-primary'} disabled={!health || !channels.length} onClick={() => window.print()}>
+                        <Printer size={18} /> {t('poster_print')}
+                    </button>
+                </div>
+                {pdfMessage && <p className="poster-pdf-message">{pdfMessage}</p>}
+                {!desktopBridge && <p className="text-muted checkbox-hint">{t('poster_print_hint')}</p>}
             </div>
 
             <article className="poster-sheet" lang={locale}>

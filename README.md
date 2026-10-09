@@ -40,7 +40,7 @@ Every screen has a help button (a question mark) with the organiser's contacts (
 
 `.opus` files play in Windows Media Player, VLC, browsers, and on phones.
 
-**Print a QR poster** (next to **Show listener QR**) makes one printable A4 page: the event name and dates, a heading in each language on the poster, an optional Wi-Fi QR code that joins the network when scanned, and a QR code for each language with "Scan to listen" in that language. The Wi-Fi name and password stay on the operator's device. Choose **Microsoft Print to PDF** to save it as a PDF.
+**Print a QR poster** (next to **Show listener QR**) makes one printable A4 page: the event name and dates, a heading in each language on the poster, an optional Wi-Fi QR code that joins the network when scanned, and a QR code for each language with "Scan to listen" in that language. The Wi-Fi name and password stay on the operator's device. In the desktop app, **Save as PDF** saves it straight to a file named after the event (for example `QR poster - Spring Forum.pdf`); **Print** opens the Windows print dialog. In a browser, choose **Save as PDF** in the print window.
 
 ## Windows x64 setup
 

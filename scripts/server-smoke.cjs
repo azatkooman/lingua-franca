@@ -71,7 +71,8 @@ const electronStub = {
         decryptString: (buffer) => buffer.toString().replace(/^enc:/, ''),
     },
     systemPreferences: { getMediaAccessStatus: () => 'granted' },
-    shell: { openPath: async () => '' },
+    shell: { openPath: async () => '', showItemInFolder() {} },
+    ipcMain: { handle() {} },
 };
 
 const stubPath = path.join(__dirname, '__electron_stub__');
@@ -95,8 +96,23 @@ console.error = (...args) => {
     realError(...args);
 };
 
-require(path.join(__dirname, '..', 'main.cjs'));
-markReady();
+// The checks sign in with the default PIN and change settings (PIN, channel names, event,
+// contact). If a real copy of Lingua Franca holds the ports, this server cannot start and every
+// check would land on that app instead and change its settings. Refuse to run at all then.
+const portFree = (port, host) => new Promise((resolve) => {
+    const probe = require('net').createServer();
+    probe.once('error', () => resolve(false));
+    probe.listen(port, host, () => probe.close(() => resolve(true)));
+});
+const started = (async () => {
+    for (const [port, host] of [[4174, '127.0.0.1'], [4173, '0.0.0.0'], [4175, '0.0.0.0']]) {
+        if (await portFree(port, host)) continue;
+        console.error(`Port ${port} is already in use, probably by a running copy of Lingua Franca. Close it and run the smoke test again: it changes settings and must never run against a real app.`);
+        process.exit(1);
+    }
+    require(path.join(__dirname, '..', 'main.cjs'));
+    markReady();
+})();
 
 const BASE = 'http://127.0.0.1:4174';
 // The plain-HTTP, listening-only port that phones use without a certificate warning.
@@ -672,4 +688,4 @@ async function run() {
 }
 
 // Give the HTTPS listener time to generate its self-signed certificate and bind.
-setTimeout(() => { void run(); }, 3500);
+void started.then(() => setTimeout(() => { void run(); }, 3500));

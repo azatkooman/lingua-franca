@@ -279,7 +279,9 @@ const en = {
     poster_network: 'Network: {name}',
     poster_password: 'Password: {password}',
     poster_headphones: 'Use headphones, and keep your screen on.',
-    poster_print_hint: 'To save a PDF, choose "Microsoft Print to PDF" as the printer.',
+    poster_print_hint: 'To get a PDF file, choose "Save as PDF" in the print window.',
+    poster_save_pdf: 'Save as PDF',
+    poster_pdf_saved: 'Saved: {path}',
     original_speech_label: 'Original speech',
     original_waiting: 'The speaker’s own words will appear here.',
 };
@@ -558,7 +560,9 @@ const ru: Record<TranslationKey, string> = {
     poster_network: 'Сеть: {name}',
     poster_password: 'Пароль: {password}',
     poster_headphones: 'Используйте наушники и не гасите экран.',
-    poster_print_hint: 'Чтобы сохранить PDF, выберите принтер «Microsoft Print to PDF».',
+    poster_print_hint: 'Чтобы получить файл PDF, в окне печати выберите «Сохранить как PDF».',
+    poster_save_pdf: 'Сохранить как PDF',
+    poster_pdf_saved: 'Сохранено: {path}',
     original_speech_label: 'Оригинальная речь',
     original_waiting: 'Здесь появятся слова спикера на языке оригинала.',
 };
@@ -834,7 +838,9 @@ const kk: Record<TranslationKey, string> = {
     poster_network: 'Желі: {name}',
     poster_password: 'Құпиясөз: {password}',
     poster_headphones: 'Құлаққап киіп, экранды өшірмеңіз.',
-    poster_print_hint: 'PDF сақтау үшін «Microsoft Print to PDF» принтерін таңдаңыз.',
+    poster_print_hint: 'PDF файлын алу үшін басып шығару терезесінде «PDF ретінде сақтау» тармағын таңдаңыз.',
+    poster_save_pdf: 'PDF ретінде сақтау',
+    poster_pdf_saved: 'Сақталды: {path}',
     original_speech_label: 'Түпнұсқа сөз',
     original_waiting: 'Мұнда спикердің түпнұсқа тілдегі сөздері шығады.',
 };

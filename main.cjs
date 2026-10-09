@@ -1,4 +1,4 @@
-const { app, BrowserWindow, desktopCapturer, dialog, safeStorage, shell, systemPreferences } = require('electron');
+const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, safeStorage, shell, systemPreferences } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -397,10 +397,43 @@ function appUrl(isDev) {
     return isDev ? 'https://localhost:5173' : `http://localhost:${LOCAL_PORT}/`;
 }
 
+// A name Windows accepts: no path characters, not empty, ending in .pdf.
+function pdfFileName(value) {
+    const printable = [...String(value || '')].filter((character) => character.charCodeAt(0) >= 32).join('');
+    const cleaned = printable.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const base = cleaned.replace(/\.pdf$/i, '').replace(/[. ]+$/, '') || 'Lingua Franca';
+    return `${base}.pdf`;
+}
+
+// "Save as PDF" for the QR poster. The Windows print dialog's Microsoft Print to PDF opens its
+// save box with an empty file name; this prints the page itself and suggests a real name.
+function registerDesktopActions(isDev) {
+    const appOrigin = isDev ? 'https://localhost:5173' : `http://localhost:${LOCAL_PORT}`;
+    ipcMain.handle('save-page-as-pdf', async (event, requestedName) => {
+        let origin = '';
+        try { origin = new URL(event.senderFrame?.url || '').origin; } catch { /* not a page of ours */ }
+        if (origin !== appOrigin || !mainWindow || event.sender !== mainWindow.webContents) return { error: 'Not available here.' };
+        const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+            defaultPath: path.join(app.getPath('documents'), pdfFileName(requestedName)),
+            filters: [{ name: 'PDF', extensions: ['pdf'] }],
+        });
+        if (canceled || !filePath) return { canceled: true };
+        try {
+            const data = await event.sender.printToPDF({ printBackground: true, preferCSSPageSize: true });
+            fs.writeFileSync(filePath, data);
+            shell.showItemInFolder(filePath);
+            return { saved: filePath };
+        } catch (error) { return { error: error.message }; }
+    });
+}
+
 function createWindow(isDev) {
     mainWindow = new BrowserWindow({
         width: 1200, height: 800, show: false,
-        webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+        webPreferences: {
+            nodeIntegration: false, contextIsolation: true, sandbox: true,
+            preload: path.join(__dirname, 'desktop', 'preload.cjs'),
+        },
     });
     // Only the origin this mode actually serves: the packaged app has no reason to trust the
     // Vite dev server, and vice versa.
@@ -1269,6 +1302,7 @@ if (!app.requestSingleInstanceLock()) {
 
     app.whenReady().then(async () => {
         const isDev = process.env.NODE_ENV === 'development';
+        registerDesktopActions(isDev);
         // The window comes up first and shows a splash, so a failure below is visible rather
         // than leaving the operator staring at a dock icon that never opens a window.
         createWindow(isDev);

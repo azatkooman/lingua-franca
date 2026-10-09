@@ -4,6 +4,7 @@ import { voiceService, type CaptionSegment, type ListenerStatus } from '../lib/V
 import { settingsService, type EventInfo, type Language } from '../lib/SettingsService';
 import { formatEventDates, useTranslation, type TranslationKey } from '../lib/i18n';
 import { useGoBack } from '../lib/navigation';
+import { allowSleep, keepAwake } from '../lib/keepAwake';
 import './Interpreter.css';
 import './Listener.css';
 
@@ -106,34 +107,6 @@ function Transcript({ segments, field, empty, sizeClass, jumpLabel }: {
 
 /* ------------------------------------------------------------ device helpers */
 
-type WakeLockLike = { release: () => Promise<void> };
-type WakeLockNavigator = Navigator & { wakeLock?: { request: (type: 'screen') => Promise<WakeLockLike> } };
-
-// Keeps the screen on while listening, where the browser allows it (secure pages only). The
-// lobby hint covers the rest. The lock drops whenever the page is hidden, so it is taken again
-// when the listener comes back.
-function useWakeLock(active: boolean) {
-    useEffect(() => {
-        const wakeLock = (navigator as WakeLockNavigator).wakeLock;
-        if (!active || !wakeLock) return;
-        let sentinel: WakeLockLike | null = null;
-        let cancelled = false;
-        const acquire = () => {
-            if (document.visibilityState !== 'visible') return;
-            void wakeLock.request('screen').then((lock) => {
-                if (cancelled) void lock.release(); else sentinel = lock;
-            }).catch(() => undefined);
-        };
-        acquire();
-        document.addEventListener('visibilitychange', acquire);
-        return () => {
-            cancelled = true;
-            document.removeEventListener('visibilitychange', acquire);
-            void sentinel?.release().catch(() => undefined);
-        };
-    }, [active]);
-}
-
 type AudioSessionNavigator = Navigator & { audioSession?: { type: 'auto' | 'playback' | 'play-and-record' } };
 type SinkAudioElement = HTMLAudioElement & { setSinkId?: (sinkId: string) => Promise<void> };
 
@@ -183,8 +156,6 @@ export default function Listener() {
     const captioned = activeLanguage?.activePeerId === 'ai-active' || segments.length > 0;
     const dates = event ? formatEventDates(event.startDate, event.endDate, locale) : '';
 
-    useWakeLock(listening);
-
     useEffect(() => settingsService.subscribe((settings) => {
         setLanguages(settings.languages);
         setEvent(settings.event);
@@ -197,6 +168,7 @@ export default function Listener() {
         audioRef.current = audio;
         return () => {
             listeningTo.current = '';
+            allowSleep();
             voiceService.stopListening();
             if (audioRef.current) {
                 audioRef.current.pause();
@@ -325,6 +297,8 @@ export default function Listener() {
         }
         setNotice('');
         unlockPlayback();
+        // Inside the tap: the plain-link fallback (a silent video) needs a gesture to start.
+        keepAwake();
         setListening(true);
         connect(language);
     };
@@ -344,6 +318,7 @@ export default function Listener() {
 
     const stopListening = () => {
         listeningTo.current = '';
+        allowSleep();
         voiceService.stopListening();
         setListening(false);
         setFullscreen(false);

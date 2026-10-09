@@ -118,7 +118,7 @@ export default function Interpreter() {
     const stopBroadcast = useCallback(async () => {
         setIsLive(false); setIsMuted(false); setStatus(t('offline')); setSignalLevel(0); setListeners(0);
         meterCleanup.current?.(); meterCleanup.current = null;
-        if (mode === 'ai') await realtimeTranslationService.stop();
+        if (mode === 'ai') realtimeTranslationService.stop();
         // Always release the capture device and the send transports, including in AI mode --
         // skipping this left the microphone open and the server still holding the producer.
         voiceService.stopBroadcast();
@@ -135,7 +135,7 @@ export default function Interpreter() {
     useEffect(() => () => {
         meterCleanup.current?.();
         meterCleanup.current = null;
-        void realtimeTranslationService.stop(false);
+        realtimeTranslationService.stop();
         voiceService.stopBroadcast();
     }, []);
 
@@ -181,7 +181,7 @@ export default function Interpreter() {
         } catch (error) {
             setIsLive(false);
             setStatus(error instanceof Error ? error.message : String(error));
-            await realtimeTranslationService.stop(false);
+            realtimeTranslationService.stop();
             voiceService.stopBroadcast();
         }
     };

@@ -18,6 +18,7 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
+const dgram = require('dgram');
 const mediasoup = require('mediasoup');
 const { io } = require('socket.io-client');
 
@@ -33,7 +34,11 @@ const ready = new Promise((resolve) => { markReady = resolve; });
 // main.cjs resolves the same mediasoup module, so its workers show up here and a test can
 // kill one to exercise the restart path.
 const workers = [];
-mediasoup.observer.on('newworker', (worker) => workers.push(worker));
+const routers = [];
+mediasoup.observer.on('newworker', (worker) => {
+    workers.push(worker);
+    worker.observer.on('newrouter', (router) => routers.push(router));
+});
 
 class FakeWindow {
     constructor() {
@@ -66,6 +71,7 @@ const electronStub = {
         decryptString: (buffer) => buffer.toString().replace(/^enc:/, ''),
     },
     systemPreferences: { getMediaAccessStatus: () => 'granted' },
+    shell: { openPath: async () => '' },
 };
 
 const stubPath = path.join(__dirname, '__electron_stub__');
@@ -153,6 +159,16 @@ const produce = async (socket, channelId, ssrc) => {
     const transport = await ask(socket, 'createWebRtcTransport', { type: 'producer' });
     if (transport.error) return transport;
     return ask(socket, 'produce', { transportId: transport.id, kind: 'audio', rtpParameters: opusRtp(ssrc), appData: { channelId, mode: 'human' } });
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const rtpPacket = (sequence, timestamp, ssrc, payload) => {
+    const header = Buffer.alloc(12);
+    header[0] = 0x80;
+    header[1] = 111;
+    header.writeUInt16BE(sequence & 0xffff, 2);
+    header.writeUInt32BE(timestamp >>> 0, 4);
+    header.writeUInt32BE(ssrc, 8);
+    return Buffer.concat([header, payload]);
 };
 const channelMode = async (channelId) =>
     (await json('/api/settings')).body.languages.find((language) => language.id === channelId)?.activePeerId;
@@ -341,6 +357,37 @@ async function run() {
         return 'refused, refused, unknown channel';
     });
 
+    await check('the dashboard and recordings require an operator session', async () => {
+        for (const route of ['/api/admin/live', '/api/admin/recordings', '/api/admin/recordings/file/x.txt']) {
+            assert.equal((await json(route)).status, 401, route);
+        }
+        assert.equal((await json('/api/admin/recordings/open-folder', { method: 'POST' })).status, 401);
+        const plain = await fetch(`${LISTENER_BASE}/api/admin/live`, { headers: authed(token) });
+        assert.equal(plain.status, 403, 'never on the plain listener port');
+        return '401 x4, 403 on the plain port';
+    });
+
+    await check('finished caption sentences are saved as a transcript to download', async () => {
+        const { body } = await json('/api/admin/recordings', { headers: authed(token) });
+        const transcript = body.items.find((item) => item.type === 'transcript');
+        assert.ok(transcript, 'transcript listed');
+        assert.equal(transcript.lines, 1, 'only the finished sentence');
+        const response = await fetch(`${BASE}/api/admin/recordings/file/${transcript.name}`, { headers: authed(token) });
+        assert.equal(response.status, 200);
+        assert.match(response.headers.get('content-disposition') || '', /attachment/);
+        assert.match(await response.text(), /\] Good morning\n {11}Доброе утро\n/);
+        return transcript.name;
+    });
+
+    await check('recording files cannot be read or deleted outside the recordings folder', async () => {
+        for (const name of ['..%2Flingua-franca-settings.json', '..%5Clingua-franca-settings.json', 'lingua-franca-settings.json']) {
+            assert.equal((await json(`/api/admin/recordings/file/${name}`, { headers: authed(token) })).status, 404, name);
+            assert.equal((await json(`/api/admin/recordings/file/${name}`, { method: 'DELETE', headers: authed(token) })).status, 404, name);
+        }
+        assert.ok(fs.existsSync(settingsFile), 'the settings file is untouched');
+        return 'refused';
+    });
+
     await check('renaming a channel preserves its id, so a live broadcast survives', async () => {
         const { body: before } = await json('/api/admin/settings', { headers: authed(token) });
         const target = before.languages[0];
@@ -401,6 +448,96 @@ async function run() {
         }
         assert.ok(lockedOut, 'expected a 429 lockout');
         return 'locked out';
+    });
+
+    await check('the dashboard shows each live channel with its listeners and peak', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const { body: settings } = await json('/api/settings');
+        const channel = settings.languages[1].id;
+        const operator = await connect(token);
+        assert.ok((await produce(operator, channel, 5555)).id);
+        const listener = await connect('', LISTENER_BASE);
+        const capabilities = await new Promise((resolve) => listener.emit('getRouterRtpCapabilities', resolve));
+        const transport = await ask(listener, 'createWebRtcTransport', { type: 'consumer' });
+        const consumed = await ask(listener, 'consume', { transportId: transport.id, rtpCapabilities: capabilities, channelId: channel });
+        assert.ok(consumed.id, consumed.error);
+        const { body } = await json('/api/admin/live', { headers: authed(token) });
+        const row = body.channels.find((entry) => entry.id === channel);
+        assert.deepEqual([row.live, row.role, row.listeners, row.peakListeners], [true, 'interpreter', 1, 1]);
+        assert.ok(row.since <= Date.now());
+        assert.equal(typeof body.aiPricePerMinute, 'number');
+        listener.close();
+        await sleep(300);
+        await ask(operator, 'closeProducer', { channelId: channel });
+        const after = (await json('/api/admin/live', { headers: authed(token) })).body.channels.find((entry) => entry.id === channel);
+        assert.deepEqual([after.live, after.listeners, after.peakListeners], [false, 0, 1], 'the peak is kept');
+        return '1 listener, peak kept';
+    });
+
+    await check('with recording on, every broadcast and the unbroadcast original are recorded', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const patch = (body) => json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify(body) });
+        const { body: settings } = await json('/api/settings');
+        const channel = settings.languages[1].id;
+        const source = settings.languages[0].id;
+        const operator = await connect(token);
+        assert.ok((await produce(operator, channel, 6666)).id, 'broadcast started before recording was switched on');
+        assert.equal((await patch({ recordingEnabled: true })).body.recordingEnabled, true);
+        const transport = await ask(operator, 'createWebRtcTransport', { type: 'producer' });
+        const original = await ask(operator, 'produce', {
+            transportId: transport.id, kind: 'audio', rtpParameters: opusRtp(7777), appData: { channelId: source, recordOnly: true },
+        });
+        assert.ok(original.id, original.error);
+        assert.equal(await channelMode(source), undefined, 'the original is recorded, not broadcast');
+        const phone = await connect(interpreterToken);
+        const phoneTransport = await ask(phone, 'createWebRtcTransport', { type: 'producer' });
+        const refused = await ask(phone, 'produce', {
+            transportId: phoneTransport.id, kind: 'audio', rtpParameters: opusRtp(7778), appData: { channelId: source, recordOnly: true },
+        });
+        assert.match(refused.error || '', /Only the operator/);
+        await sleep(500);
+        const active = (await json('/api/admin/recordings', { headers: authed(token) })).body.items.filter((item) => item.active);
+        assert.deepEqual(active.map((item) => item.role).sort(), ['interpreter', 'original']);
+        assert.equal((await json('/api/admin/live', { headers: authed(token) })).body.channels.find((entry) => entry.id === channel).recording, true);
+        assert.equal((await patch({ recordingEnabled: false })).status, 200);
+        await sleep(300);
+        const items = (await json('/api/admin/recordings', { headers: authed(token) })).body.items;
+        assert.equal(items.filter((item) => item.active).length, 0, 'switching off stops every recording');
+        assert.equal(items.filter((item) => item.type === 'audio').length, 0, 'recordings that never got audio leave no file');
+        assert.equal((await ask(operator, 'closeRecordOnly', { producerId: original.id })).ok, true);
+        await ask(operator, 'closeProducer', { channelId: channel });
+        return 'interpreter + original recorded, both stopped';
+    });
+
+    await check('a recording captures real Opus audio, with pauses kept as silence', async () => {
+        if (!sfuReady || !routers.length) return 'skipped (no media worker)';
+        const { startChannelRecording } = require('../lib/recorder.cjs');
+        const router = routers.at(-1);
+        const input = await router.createPlainTransport({ listenInfo: { protocol: 'udp', ip: '127.0.0.1' }, rtcpMux: true, comedia: true });
+        const producer = await input.produce({ kind: 'audio', rtpParameters: opusRtp(8888) });
+        const filePath = path.join(userData, 'smoke-recording.opus');
+        const handle = await startChannelRecording({ router, producer, filePath, tags: { title: 'smoke' } });
+        const sender = dgram.createSocket('udp4');
+        const send = (packet) => new Promise((resolve) => sender.send(packet, input.tuple.localPort, '127.0.0.1', resolve));
+        const voice = Buffer.from([0xfc, 0x10, 0x20, 0x30, 0x40]);
+        let sequence = 0;
+        // 2 s of audio, a 1 s pause (as when the speaker mutes), then 1 s more.
+        for (let index = 0; index < 150; index += 1) {
+            const frame = index < 100 ? index : index + 50;
+            await send(rtpPacket(sequence++, 5000 + frame * 960, 8888, voice));
+            if (index % 10 === 9) await sleep(15);
+        }
+        await sleep(500);
+        const result = handle.stop();
+        sender.close();
+        producer.close();
+        input.close();
+        const bytes = fs.readFileSync(filePath);
+        assert.equal(bytes.toString('ascii', 0, 4), 'OggS');
+        assert.equal(bytes.toString('ascii', 28, 36), 'OpusHead');
+        assert.equal(result.packets, 150, 'every packet arrived through the media server');
+        assert.equal(result.durationMs, 4000, '2 s + 1 s of silence + 1 s');
+        return `${result.packets} packets, ${result.durationMs} ms, ${bytes.length} bytes`;
     });
 
     await check('an interpreter cannot cut off, mute or end a live broadcast it does not own', async () => {

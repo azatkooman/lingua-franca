@@ -1,0 +1,196 @@
+.page-container.poster-page {
+    max-width: 900px;
+}
+
+.poster-channels-label {
+    margin: 0.75rem 0 0.4rem;
+    font-weight: 600;
+}
+
+.poster-channel-picks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.25rem;
+}
+
+/* The sheet is always printed black on white, whatever theme the screen uses, so what is on
+   screen is what comes out of the printer. */
+.poster-sheet {
+    margin-top: 1.5rem;
+    padding: 2rem;
+    background: #ffffff;
+    color: #111827;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    box-shadow: var(--shadow-soft);
+    font-family: inherit;
+}
+
+.poster-top {
+    text-align: center;
+    margin-bottom: 1.5rem;
+}
+
+.poster-top h1 {
+    margin: 0;
+    font-size: 2rem;
+    line-height: 1.2;
+    color: #111827;
+}
+
+.poster-heading {
+    margin: 0.4rem 0 0;
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: #6d28d9;
+}
+
+.poster-dates {
+    margin: 0.3rem 0 0;
+    color: #4b5563;
+}
+
+.poster-wifi {
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+    margin: 0 auto 1.5rem;
+    padding: 1rem 1.25rem;
+    max-width: 520px;
+    border: 2px dashed #d1d5db;
+    border-radius: 12px;
+}
+
+.poster-wifi h2,
+.poster-step {
+    margin: 0 0 0.35rem;
+    font-size: 1.25rem;
+    color: #111827;
+}
+
+.poster-wifi p {
+    margin: 0.15rem 0;
+    font-size: 1.05rem;
+    overflow-wrap: anywhere;
+}
+
+.poster-step {
+    text-align: center;
+    margin-bottom: 1rem;
+}
+
+.poster-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1.25rem;
+}
+
+.poster-grid.count-1 {
+    grid-template-columns: minmax(0, 340px);
+    justify-content: center;
+}
+
+.poster-grid.count-3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.poster-channel {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 1.1rem 0.75rem;
+    border: 2px solid #e5e7eb;
+    border-radius: 14px;
+    text-align: center;
+    break-inside: avoid;
+    page-break-inside: avoid;
+}
+
+.poster-channel h3 {
+    margin: 0 0 0.75rem;
+    font-size: 1.6rem;
+    color: #111827;
+}
+
+.poster-scan {
+    margin: 0.7rem 0 0.2rem;
+    font-weight: 700;
+    font-size: 1.05rem;
+}
+
+.poster-url {
+    margin: 0;
+    color: #6b7280;
+    font-size: 0.72rem;
+    overflow-wrap: anywhere;
+}
+
+.poster-foot {
+    margin-top: 1.5rem;
+    text-align: center;
+    color: #374151;
+    font-weight: 600;
+}
+
+@media (max-width: 560px) {
+    .poster-sheet {
+        padding: 1rem;
+    }
+
+    .poster-grid,
+    .poster-grid.count-3 {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .poster-wifi {
+        flex-direction: column;
+        text-align: center;
+    }
+}
+
+@media print {
+    @page {
+        size: A4;
+        margin: 12mm;
+    }
+
+    html,
+    body {
+        background: #ffffff !important;
+    }
+
+    .app-header,
+    .poster-controls {
+        display: none !important;
+    }
+
+    .app-main {
+        overflow: visible !important;
+    }
+
+    .page-container.poster-page {
+        padding: 0;
+        max-width: none;
+        animation: none;
+    }
+
+    .poster-sheet {
+        margin: 0;
+        padding: 0;
+        border: none;
+        box-shadow: none;
+    }
+
+    /* Keep a 2-column grid on paper even if the window was narrow. */
+    .poster-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    }
+
+    .poster-grid.count-1 {
+        grid-template-columns: minmax(0, 90mm) !important;
+    }
+
+    .poster-grid.count-3 {
+        grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    }
+}

@@ -3,6 +3,8 @@ import { realtimeSocket } from './realtimeSocket';
 
 export const SYSTEM_AUDIO_DEVICE_ID = '__lingua_franca_system_audio__';
 type StatusCallback = (status: string) => void;
+/** What a broadcast carries, so recordings and the dashboard can label it. */
+export type BroadcastRole = 'original' | 'translation' | 'interpreter';
 /**
  * Listener connection states as codes, not sentences. Listener phones are the audience most
  * likely to use Russian, and English status text went straight onto their screens.
@@ -45,7 +47,10 @@ export class VoiceService {
     private sourceStream: MediaStream | null = null;
     private sendTransports = new Map<string, mediasoupClient.types.Transport>();
     private producers = new Map<string, mediasoupClient.types.Producer>();
-    private publishModes = new Map<string, 'human' | 'ai'>();
+    private publishModes = new Map<string, { mode: 'human' | 'ai'; role?: BroadcastRole }>();
+    // The original speech in AI mode, sent only to the server's recorder when it is not being
+    // broadcast on its own channel.
+    private recordOnly: { channelId: string; transport: mediasoupClient.types.Transport; producer: mediasoupClient.types.Producer } | null = null;
     private recvTransport: mediasoupClient.types.Transport | null = null;
     private consumer: mediasoupClient.types.Consumer | null = null;
     private currentListenerChannelId: string | null = null;
@@ -190,7 +195,7 @@ export class VoiceService {
         });
         realtimeSocket.on('sfuReady', () => {
             this.device = null;
-            if (this.producers.size) void this.republish();
+            if (this.producers.size || this.recordOnly) void this.republish();
             if (this.currentListenerChannelId) void this.reconnectListener();
         });
         // A dropped Wi-Fi link gives the reconnected socket a new id, so the server holds no
@@ -212,38 +217,45 @@ export class VoiceService {
         this.device = device;
     }
 
-    async publishTrack(
-        channelId: string,
-        track: MediaStreamTrack,
-        mode: 'human' | 'ai',
-        onStatus: StatusCallback = () => undefined,
-        onConnectionsChange: (count: number) => void = () => undefined,
-    ) {
-        await this.loadDevice();
-        this.onConnectionsChange = onConnectionsChange;
-        this.onPublishStatus = onStatus;
-        onStatus('Connecting…');
+    /** A send transport whose producer is announced to the server with `appData`. */
+    private async openSendTransport(appData: Record<string, unknown>) {
         const transportInfo = await realtimeSocket.request<TransportResponse>('createWebRtcTransport', { type: 'producer' });
         if (transportInfo.error) throw new Error(transportInfo.error);
         const transport = this.device!.createSendTransport(transportInfo);
-        this.sendTransports.set(channelId, transport);
         transport.on('connect', ({ dtlsParameters }, callback, errback) => {
             void realtimeSocket.request<{ error?: string } | undefined>('connectTransport', { transportId: transport.id, dtlsParameters })
                 .then((result) => result?.error ? errback(new Error(result.error)) : callback());
         });
         transport.on('produce', ({ kind, rtpParameters }, callback, errback) => {
             void realtimeSocket.request<{ id?: string; error?: string }>('produce', {
-                transportId: transport.id, kind, rtpParameters, appData: { channelId, mode },
+                transportId: transport.id, kind, rtpParameters, appData,
             }).then((result) => result.error || !result.id
                 ? errback(new Error(result.error || 'No producer ID returned.'))
                 : callback({ id: result.id }));
         });
+        return transport;
+    }
+
+    async publishTrack(
+        channelId: string,
+        track: MediaStreamTrack,
+        mode: 'human' | 'ai',
+        onStatus: StatusCallback = () => undefined,
+        onConnectionsChange: (count: number) => void = () => undefined,
+        role?: BroadcastRole,
+    ) {
+        await this.loadDevice();
+        this.onConnectionsChange = onConnectionsChange;
+        this.onPublishStatus = onStatus;
+        onStatus('Connecting…');
+        const transport = await this.openSendTransport({ channelId, mode, role });
+        this.sendTransports.set(channelId, transport);
         // The track belongs to the caller (the capture stream or the OpenAI leg), which stops
         // it. Letting the producer stop it on close would kill the track the moment the
         // channel is re-published after a media-engine restart.
         const producer = await transport.produce({ track, stopTracks: false });
         this.producers.set(channelId, producer);
-        this.publishModes.set(channelId, mode);
+        this.publishModes.set(channelId, { mode, role });
         producer.on('trackended', () => this.stopChannel(channelId));
         onStatus('Broadcasting');
     }
@@ -268,20 +280,55 @@ export class VoiceService {
      */
     private async republish() {
         const channels = [...this.producers].map(([channelId, producer]) => ({
-            channelId, track: producer.track, mode: this.publishModes.get(channelId) ?? 'human',
+            channelId, track: producer.track, ...(this.publishModes.get(channelId) ?? { mode: 'human' as const }),
         }));
         for (const { channelId } of channels) this.dropChannel(channelId);
-        for (const { channelId, track, mode } of channels) {
+        const recordOnly = this.recordOnly;
+        if (recordOnly) {
+            this.recordOnly = null;
+            recordOnly.transport.close();
+            const track = recordOnly.producer.track;
+            if (track?.readyState === 'live') {
+                await this.publishRecordOnly(recordOnly.channelId, track).catch((error) => console.warn('Could not resume recording the original:', error));
+            }
+        }
+        for (const { channelId, track, mode, role } of channels) {
             // An AI leg that is mid-reconnect has no track yet; it publishes on its own once
             // the new OpenAI connection delivers audio.
             if (!track || track.readyState !== 'live') continue;
             try {
-                await this.publishTrack(channelId, track, mode, this.onPublishStatus, this.onConnectionsChange);
+                await this.publishTrack(channelId, track, mode, this.onPublishStatus, this.onConnectionsChange, role);
             } catch (error) {
                 this.onPublishStatus(`Could not resume broadcasting after the media engine restarted: ${error instanceof Error ? error.message : String(error)}`);
             }
         }
         if (this.muted) this.setMuted(true);
+    }
+
+    /**
+     * Sends a track to the server's recorder only: listeners never receive it and the channel
+     * does not show as live. Used for the original speech in AI mode when it is not broadcast.
+     */
+    async publishRecordOnly(channelId: string, track: MediaStreamTrack) {
+        await this.loadDevice();
+        this.stopRecordOnly();
+        const transport = await this.openSendTransport({ channelId, recordOnly: true });
+        try {
+            const producer = await transport.produce({ track, stopTracks: false });
+            this.recordOnly = { channelId, transport, producer };
+        } catch (error) {
+            transport.close();
+            throw error;
+        }
+    }
+
+    stopRecordOnly() {
+        const current = this.recordOnly;
+        if (!current) return;
+        this.recordOnly = null;
+        realtimeSocket.emit('closeRecordOnly', { producerId: current.producer.id });
+        current.producer.close();
+        current.transport.close();
     }
 
     async startBroadcast(channelId: string, onStatus: StatusCallback, onConnectionsChange: (count: number) => void, deviceId?: string) {
@@ -340,6 +387,7 @@ export class VoiceService {
 
     stopBroadcast() {
         for (const channelId of [...this.producers.keys()]) this.stopChannel(channelId);
+        this.stopRecordOnly();
         this.sourceStream?.getTracks().forEach((track) => track.stop());
         this.sourceStream = null;
         this.listenerCounts.clear();

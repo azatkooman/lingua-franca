@@ -323,3 +323,165 @@ textarea.custom-input {
     margin: 0 0 1rem;
     line-height: 1.45;
 }
+
+/* Live dashboard */
+.live-card .card-header {
+    flex-wrap: wrap;
+}
+
+.live-total {
+    margin-left: auto;
+    font-weight: 700;
+    color: var(--accent);
+}
+
+.live-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.live-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.7rem 0.9rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface-2);
+}
+
+.live-state-dot {
+    flex-shrink: 0;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    opacity: 0.5;
+}
+
+.live-row.on .live-state-dot {
+    background: var(--accent);
+    opacity: 1;
+    box-shadow: 0 0 8px var(--accent-glow);
+}
+
+.live-main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+}
+
+.live-main .text-muted {
+    font-size: 0.85rem;
+}
+
+.live-muted {
+    color: var(--danger-text);
+}
+
+.live-stats {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.1rem;
+    text-align: right;
+    flex-shrink: 0;
+}
+
+.live-count {
+    font-weight: 700;
+}
+
+.live-peak {
+    font-size: 0.78rem;
+}
+
+.live-ai {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin: 1rem 0 0;
+    font-weight: 600;
+}
+
+.live-ai small {
+    font-weight: 400;
+    line-height: 1.4;
+}
+
+/* Recordings and transcripts */
+.recordings-message {
+    margin: 0 0 0.75rem;
+    padding: 0.6rem 0.8rem;
+    border-radius: var(--radius-md);
+    background: var(--tint);
+}
+
+.recordings-day h4 {
+    margin: 1rem 0 0.5rem;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.recordings-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.recording-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.65rem 0.8rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface-2);
+}
+
+.recording-icon {
+    display: flex;
+    color: var(--primary);
+    flex-shrink: 0;
+}
+
+.recording-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+    flex: 1;
+}
+
+.recording-text strong {
+    overflow-wrap: anywhere;
+}
+
+.recording-text .text-muted {
+    font-size: 0.82rem;
+}
+
+.recording-actions {
+    display: flex;
+    gap: 0.4rem;
+    flex-shrink: 0;
+}
+
+.btn-icon-small:disabled,
+.btn-icon-small:disabled:hover {
+    opacity: 0.4;
+    cursor: not-allowed;
+    background: var(--surface-2);
+    color: var(--text-muted);
+    border-color: var(--border);
+}

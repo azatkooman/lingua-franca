@@ -251,6 +251,49 @@ h1 {
   color: var(--text-main);
 }
 
+/* A checkbox with a wrapping label, used on several screens. */
+.checkbox-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    cursor: pointer;
+    line-height: 1.4;
+}
+
+.checkbox-row input {
+    margin-top: 0.2rem;
+    width: 1.1rem;
+    height: 1.1rem;
+    accent-color: var(--primary);
+}
+
+/* An explanation under a checkbox, lined up with its label. */
+.checkbox-hint {
+  margin: 0.25rem 0 0.9rem 1.7rem;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+/* A small red dot and word for something being recorded. */
+.rec-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: #ef4444;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.rec-badge svg {
+  animation: status-blink 1.6s ease-in-out infinite;
+}
+
+@keyframes status-blink {
+  50% { opacity: 0.3; }
+}
+
 @media (max-width: 480px) {
   .app-header {
     padding: 0.75rem 1rem;

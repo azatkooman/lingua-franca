@@ -1,4 +1,4 @@
-const { app, BrowserWindow, desktopCapturer, dialog, safeStorage, systemPreferences } = require('electron');
+const { app, BrowserWindow, desktopCapturer, dialog, safeStorage, shell, systemPreferences } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -14,6 +14,8 @@ const {
     selectLocalAddress,
 } = require('./lib/settings.cjs');
 const { TranscriptStore } = require('./lib/transcript.cjs');
+const { RecordingStore, ROLES, TranscriptLog } = require('./lib/recordings.cjs');
+const { startChannelRecording } = require('./lib/recorder.cjs');
 const { ExpiringMap, LoginThrottle, isValidPin, newAccessCode, newToken, setPin, verifyPin } = require('./lib/security.cjs');
 
 const HTTPS_PORT = 4173;
@@ -38,6 +40,9 @@ const CERTIFICATE_RENEWAL_DAYS = 30;
 const MAINTENANCE_INTERVAL_MS = 60 * 60 * 1000;
 const DYNAMIC_DNS_INTERVAL_MS = 5 * 60 * 1000;
 const WORKER_RESTART_DELAYS_MS = [1000, 2000, 5000, 10_000, 30_000];
+// OpenAI's price for gpt-realtime-translate, per minute of audio, per target language (2026).
+// Only used for the rough cost shown on the operator's dashboard.
+const AI_PRICE_PER_MINUTE = 0.034;
 
 let mainWindow;
 let httpsServer;
@@ -50,6 +55,8 @@ let media = { worker: null, router: null, webRtcServer: null, error: '', portMod
 let certificateState = { type: 'self-signed', hostname: '', expiresAt: '', error: '' };
 let secureStorageAvailable = true;
 let addressDrift = '';
+// Set once the server runs, so quitting can finish every open recording file properly.
+let stopAllRecordings = () => undefined;
 
 const settingsPath = () => path.join(app.getPath('userData'), 'lingua-franca-settings.json');
 const certificateDirectory = () => path.join(app.getPath('userData'), 'certificate');
@@ -510,6 +517,19 @@ async function startServers(isDev) {
     // Recent captions per channel, handed to phones that join or reconnect mid-talk.
     const transcripts = new TranscriptStore();
 
+    // Audio recordings and caption transcripts, kept on this computer for after the event.
+    const recordingStore = new RecordingStore(path.join(app.getPath('userData'), 'recordings'));
+    const transcriptLog = new TranscriptLog(recordingStore);
+    // producer id -> { channelId, name, handle, stopRequested } for each recording in progress.
+    const activeRecordings = new Map();
+    // channelId -> { role, since } for each live broadcast: what the dashboard shows.
+    const broadcastInfo = new Map();
+    // producer id -> { producer, channelId, socketId }: the original speech in AI mode when it
+    // is recorded but not broadcast. Never consumable, never shown as live.
+    const recordOnlyProducers = new Map();
+    const peakListeners = new Map();
+    const usage = { aiSeconds: 0, since: Date.now() };
+
     const adminSessions = new ExpiringMap();
     const interpreterSessions = new ExpiringMap();
     const interpreterCodes = new ExpiringMap();
@@ -541,11 +561,66 @@ async function startServers(isDev) {
         emitSettings();
     };
     const countListeners = (channelId) => [...listenerChannels.values()].filter((id) => id === channelId).length;
+    // Adds a finished AI broadcast's time to the running total before forgetting it.
+    const endBroadcast = (channelId) => {
+        const info = broadcastInfo.get(channelId);
+        if (info?.role === 'translation') usage.aiSeconds += (Date.now() - info.since) / 1000;
+        broadcastInfo.delete(channelId);
+    };
+
+    const startRecording = (channelId, producer, role) => {
+        if (!settings.recordingEnabled || !media.router || producer.closed || activeRecordings.has(producer.id)) return;
+        const startedAt = new Date();
+        let file;
+        try { file = recordingStore.newAudioFile(channelId, role, startedAt); }
+        catch (error) { console.error('Could not create the recordings folder:', error.message); return; }
+        const entry = { channelId, name: file.name, handle: null, stopRequested: false };
+        activeRecordings.set(producer.id, entry);
+        const channelName = findLanguage(settings.languages, channelId)?.name || channelId;
+        const meta = { channelId, channelName, role, eventName: settings.event?.name || '', startedAt: startedAt.toISOString() };
+        recordingStore.writeMeta(file.name, meta);
+        startChannelRecording({
+            router: media.router, producer, filePath: file.filePath,
+            tags: { title: `${channelName} (${role})`, album: meta.eventName, date: startedAt.toISOString().slice(0, 10) },
+            onEnded: ({ durationMs, packets }) => {
+                activeRecordings.delete(producer.id);
+                // Nothing was ever received (switched on and off at once): leave no empty file.
+                if (!packets) { recordingStore.remove(file.name); return; }
+                recordingStore.writeMeta(file.name, { ...meta, endedAt: new Date().toISOString(), durationMs });
+            },
+        }).then((handle) => {
+            entry.handle = handle;
+            if (entry.stopRequested || producer.closed) handle.stop();
+        }).catch((error) => {
+            activeRecordings.delete(producer.id);
+            fs.rmSync(recordingStore.metaPath(file.name), { force: true });
+            console.error(`Could not record ${channelId}:`, error.message);
+        });
+    };
+    const stopRecording = (producerId) => {
+        const entry = activeRecordings.get(producerId);
+        if (!entry) return;
+        entry.stopRequested = true;
+        entry.handle?.stop();
+    };
+    // Follows the Admin switch: starts recording everything already live, or stops it all.
+    const syncRecordings = () => {
+        if (!settings.recordingEnabled) {
+            for (const producerId of [...activeRecordings.keys()]) stopRecording(producerId);
+            return;
+        }
+        for (const [channelId, producer] of producers) startRecording(channelId, producer, broadcastInfo.get(channelId)?.role || 'interpreter');
+        for (const { channelId, producer } of recordOnlyProducers.values()) startRecording(channelId, producer, 'original');
+    };
+    stopAllRecordings = () => { for (const producerId of [...activeRecordings.keys()]) stopRecording(producerId); };
+
     const closeProducerFor = (channelId) => {
         const producer = producers.get(channelId);
         if (!producer) return false;
         producers.delete(channelId);
         producerOwners.delete(channelId);
+        endBroadcast(channelId);
+        stopRecording(producer.id);
         try { producer.close(); } catch { /* already closed */ }
         setChannelState(channelId);
         io.emit('producerClosed', { channelId });
@@ -586,6 +661,9 @@ async function startServers(isDev) {
             media.worker.on('died', () => {
                 console.error('The mediasoup worker died; restarting it.');
                 media = { worker: null, router: null, webRtcServer: null, error: 'The media worker stopped and is restarting.', portMode: media.portMode };
+                // Recordings end on their own as the router closes; the AI time still counts.
+                for (const channelId of [...broadcastInfo.keys()]) endBroadcast(channelId);
+                recordOnlyProducers.clear();
                 producers.clear(); producerOwners.clear(); liveChannels.clear(); listenerChannels.clear();
                 // Empty each socket's transport list but keep the entry. Those sockets stay
                 // connected and renegotiate on 'sfuReady'; deleting the entries left every
@@ -673,6 +751,19 @@ async function startServers(isDev) {
                 if (publisher.role === 'interpreter' && publisher.channelId !== channelId) {
                     throw new Error('This interpreter link is authorized for a different channel.');
                 }
+                // The original speech in AI mode, recorded without being broadcast. It goes
+                // nowhere but the recording, so it never touches the channel's live state.
+                if (appData?.recordOnly) {
+                    if (publisher.role !== 'admin') throw new Error('Only the operator can record without broadcasting.');
+                    const producer = await transport.produce({ kind, rtpParameters, appData: { channelId, recordOnly: true } });
+                    recordOnlyProducers.set(producer.id, { producer, channelId, socketId: socket.id });
+                    producer.observer.once('close', () => {
+                        recordOnlyProducers.delete(producer.id);
+                        stopRecording(producer.id);
+                    });
+                    startRecording(channelId, producer, 'original');
+                    return callback({ id: producer.id });
+                }
                 // Starting a second broadcast on a live channel used to cut the first one off
                 // without a word. Only the operator may take a channel over, and the broadcaster
                 // being replaced is told, instead of carrying on into a producer nobody hears.
@@ -688,6 +779,9 @@ async function startServers(isDev) {
                 producers.set(channelId, producer);
                 producerOwners.set(channelId, { socketId: socket.id, token: socketToken() || '' });
                 setChannelState(channelId, appData?.mode === 'ai' ? 'ai-active' : 'sfu-active');
+                const role = ROLES.includes(appData?.role) ? appData.role : appData?.mode === 'ai' ? 'translation' : 'interpreter';
+                broadcastInfo.set(channelId, { role, since: Date.now() });
+                startRecording(channelId, producer, role);
                 producer.on('transportclose', () => {
                     if (producers.get(channelId)?.id === producer.id) closeProducerFor(channelId);
                 });
@@ -710,6 +804,13 @@ async function startServers(isDev) {
             // the channel then would cut off whoever took it over, so only the owner may.
             if (!ownsChannel(id)) return callback?.({ ok: true, ignored: true });
             closeProducerFor(id);
+            callback?.({ ok: true });
+        });
+
+        socket.on('closeRecordOnly', ({ producerId } = {}, callback) => {
+            const entry = recordOnlyProducers.get(String(producerId || ''));
+            if (!entry || entry.socketId !== socket.id) return callback?.({ ok: true, ignored: true });
+            try { entry.producer.close(); } catch { /* already closed */ }
             callback?.({ ok: true });
         });
 
@@ -741,7 +842,9 @@ async function startServers(isDev) {
                 if (!transport) throw new Error('Consumer transport not found.');
                 const consumer = await transport.consume({ producerId: producer.id, rtpCapabilities, paused: false });
                 listenerChannels.set(socket.id, channelId);
-                io.emit('listenerCount', { channelId, count: countListeners(channelId) });
+                const count = countListeners(channelId);
+                peakListeners.set(channelId, Math.max(peakListeners.get(channelId) || 0, count));
+                io.emit('listenerCount', { channelId, count });
                 consumer.on('transportclose', () => consumer.close());
                 consumer.on('producerclose', () => consumer.close());
                 // Lets a listener distinguish "the interpreter muted themselves" from "the
@@ -760,10 +863,15 @@ async function startServers(isDev) {
         socket.on('sendTranslationText', ({ channelId, segmentId, text, originalText, final } = {}, callback) => {
             if (!socketIsAdmin()) return callback?.({ error: 'Administrator login required.' });
             const id = String(channelId || '').slice(0, 80);
-            if (!findLanguage(settings.languages, id)) return callback?.({ error: 'Unknown channel.' });
+            const language = findLanguage(settings.languages, id);
+            if (!language) return callback?.({ error: 'Unknown channel.' });
             const segment = transcripts.update(id, { segmentId, text, originalText, final });
             if (!segment) return callback?.({ error: 'A caption needs a segment id.' });
             io.emit('translationText', { channelId: id, ...segment });
+            if (segment.final && settings.transcriptsEnabled !== false) {
+                try { transcriptLog.append(id, language.name, segment, { eventName: settings.event?.name || '' }); }
+                catch (error) { console.error('Could not save the transcript:', error.message); }
+            }
             callback?.({ ok: true });
         });
 
@@ -966,6 +1074,7 @@ async function startServers(isDev) {
         if (patch.certificateMode === 'self-signed') settings.certificateMode = 'self-signed';
         if (typeof patch.preferredAddress === 'string') settings.preferredAddress = patch.preferredAddress.slice(0, 64);
         if (typeof patch.recordingEnabled === 'boolean') settings.recordingEnabled = patch.recordingEnabled;
+        if (typeof patch.transcriptsEnabled === 'boolean') settings.transcriptsEnabled = patch.transcriptsEnabled;
         try {
             if (typeof patch.openaiApiKey === 'string' && patch.openaiApiKey.trim()) settings.openaiApiKeyEncrypted = protectSecret(patch.openaiApiKey.trim());
         } catch (error) { return response.status(503).json({ error: error.message }); }
@@ -974,8 +1083,70 @@ async function startServers(isDev) {
         // A PIN change is usually a response to the old PIN leaking, so every other operator
         // session opened with it ends here. The session making the change stays signed in.
         if (pinChanged) revokeSessions(adminSessions, requestToken(request));
+        if (typeof patch.recordingEnabled === 'boolean') syncRecordings();
         emitSettings();
         response.json(adminSettings(settings, liveChannels));
+    });
+
+    // What the operator's dashboard shows: each channel's state and audience, recordings in
+    // progress, and AI time with a rough cost.
+    expressApp.get('/api/admin/live', requireAdmin, (_request, response) => {
+        const now = Date.now();
+        const recordingChannels = new Set([...activeRecordings.values()].map((entry) => entry.channelId));
+        let aiSeconds = usage.aiSeconds;
+        for (const info of broadcastInfo.values()) if (info.role === 'translation') aiSeconds += (now - info.since) / 1000;
+        response.json({
+            channels: settings.languages.map((language) => {
+                const producer = producers.get(language.id);
+                const info = broadcastInfo.get(language.id);
+                return {
+                    id: language.id, name: language.name, live: Boolean(producer), role: info?.role || null,
+                    since: info?.since || null, paused: Boolean(producer?.paused),
+                    listeners: countListeners(language.id), peakListeners: peakListeners.get(language.id) || 0,
+                    recording: recordingChannels.has(language.id),
+                };
+            }),
+            totalListeners: listenerChannels.size,
+            aiSeconds: Math.round(aiSeconds),
+            aiPricePerMinute: AI_PRICE_PER_MINUTE,
+            since: usage.since,
+            // The server's clock, so "on air" times are right on a phone whose clock differs.
+            now,
+        });
+    });
+
+    expressApp.get('/api/admin/recordings', requireAdmin, (_request, response) => {
+        const active = new Set([...activeRecordings.values()].map((entry) => entry.name));
+        response.json({
+            folder: recordingStore.directory,
+            items: recordingStore.list(settings.languages).map((item) => ({ ...item, active: active.has(item.name) })),
+        });
+    });
+
+    // A recording still in progress can be downloaded too: the file is valid up to the last
+    // second written.
+    expressApp.get('/api/admin/recordings/file/:name', requireAdmin, (request, response) => {
+        const filePath = recordingStore.resolve(request.params.name);
+        if (!filePath) return response.status(404).json({ error: 'That recording no longer exists.' });
+        response.download(filePath, request.params.name);
+    });
+
+    expressApp.delete('/api/admin/recordings/file/:name', requireAdmin, (request, response) => {
+        const name = String(request.params.name || '');
+        if ([...activeRecordings.values()].some((entry) => entry.name === name)) {
+            return response.status(409).json({ error: 'This recording is still running. Stop the broadcast or turn recording off first.' });
+        }
+        if (!recordingStore.remove(name)) return response.status(404).json({ error: 'That recording no longer exists.' });
+        response.json({ ok: true });
+    });
+
+    // Opens the folder on this computer, for copying everything at once after the event.
+    expressApp.post('/api/admin/recordings/open-folder', requireAdmin, async (_request, response) => {
+        try {
+            const error = await shell.openPath(recordingStore.ensure());
+            if (error) throw new Error(error);
+            response.json({ ok: true });
+        } catch (error) { response.status(500).json({ error: `Could not open the folder: ${error.message}` }); }
     });
 
     expressApp.post('/api/realtime/session', requireAdmin, async (request, response) => {
@@ -1119,6 +1290,7 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.on('before-quit', () => {
+    try { stopAllRecordings(); } catch (error) { console.error('Could not finish recordings:', error.message); }
     clearInterval(maintenanceTimer);
     clearInterval(dynamicDnsTimer);
     try { media.worker?.close(); } catch { /* already closed */ }

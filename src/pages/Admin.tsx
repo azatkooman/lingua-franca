@@ -1,36 +1,14 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeft, CalendarDays, Cpu, Edit2, Globe, Languages, LifeBuoy, LogOut, Mic, Monitor, Plus, QrCode, RotateCcw, Save, ShieldAlert, Trash2, X } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { ArrowLeft, CalendarDays, Cpu, Edit2, Globe, Languages, LifeBuoy, LogOut, Mic, Monitor, Plus, Printer, QrCode, RotateCcw, Save, ShieldAlert, Trash2, X } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { settingsService, type AdminSettings, type ContactInfo, type EventInfo, type Language } from '../lib/SettingsService';
 import { LOCALES, useTranslation, type Locale } from '../lib/i18n';
 import { useGoBack } from '../lib/navigation';
+import { fetchAdminHealth, listenerUrl, readPhoneLink, savePhoneLink, usesPlainLink, type HealthInfo, type PhoneLink } from '../lib/listenerLinks';
+import LiveDashboard from '../components/LiveDashboard';
+import RecordingsCard from '../components/RecordingsCard';
 import './Admin.css';
-
-interface HealthInfo {
-    ok: boolean;
-    localAddress: string;
-    addresses: { name: string; address: string }[];
-    sfu: string;
-    sfuError: string;
-    portMode: 'multiplexed' | 'range' | 'unknown';
-    addressDrift: string;
-    secureStorageAvailable: boolean;
-    certificatePath: string;
-    publicHost: string;
-    certificate: { type: 'trusted' | 'self-signed'; hostname: string; expiresAt: string; error: string };
-    ports: { https: number; local: number; listener: number | null; rtc: string };
-    listenerPortError: string;
-}
-
-type PhoneLink = 'plain' | 'secure';
-const PHONE_LINK_KEY = 'lingua_franca_phone_link';
-
-// Which address listener QR codes carry. Plain HTTP is the default because it opens with no
-// certificate warning and needs neither DuckDNS nor internet. Kept per operator device.
-function readPhoneLink(): PhoneLink {
-    try { return localStorage.getItem(PHONE_LINK_KEY) === 'secure' ? 'secure' : 'plain'; }
-    catch { return 'plain'; }
-}
 
 // Operators paste whatever DuckDNS showed them, which may be a full URL. Reduce it to the
 // bare label the server expects rather than rejecting it.
@@ -45,6 +23,7 @@ function normaliseDuckDomain(value: string) {
 
 export default function Admin() {
     const goBack = useGoBack();
+    const navigate = useNavigate();
     const { t, locale } = useTranslation();
     const [settings, setSettings] = useState<AdminSettings | null>(settingsService.getAdminSettings());
     const [health, setHealth] = useState<HealthInfo | null>(null);
@@ -73,10 +52,7 @@ export default function Admin() {
     const [message, setMessage] = useState('');
     const [busy, setBusy] = useState(false);
 
-    const refreshHealth = () => fetch('/api/admin/health', {
-        cache: 'no-store',
-        headers: { Authorization: `Bearer ${settingsService.getAdminToken()}` },
-    }).then((response) => response.ok ? response.json() : null).then(setHealth).catch(() => setHealth(null));
+    const refreshHealth = () => fetchAdminHealth(settingsService.getAdminToken()).then(setHealth);
 
     useEffect(() => settingsService.subscribeAdmin(setSettings), []);
     useEffect(() => { void refreshHealth(); }, []);
@@ -115,24 +91,13 @@ export default function Admin() {
 
     const host = health?.publicHost || health?.localAddress;
     const plainAvailable = Boolean(health?.ports.listener);
-    // Falls back to HTTPS when the plain port could not start, so a QR never points at a dead
-    // address.
-    const usePlainLink = phoneLink === 'plain' && plainAvailable;
+    const usePlainLink = usesPlainLink(health, phoneLink);
     const choosePhoneLink = (next: PhoneLink) => {
         setPhoneLink(next);
-        try { localStorage.setItem(PHONE_LINK_KEY, next); } catch { /* optional preference */ }
-    };
-    // Every channel gets its own link; the QR used to be hard-coded to a channel named
-    // "English", which broke as soon as the channel list was renamed. The plain link uses the
-    // LAN address directly: it needs no DNS, so it works on Wi-Fi without internet.
-    const listenerUrlFor = (channelId: string) => {
-        if (!health) return '';
-        const query = `/listener?channel=${encodeURIComponent(channelId)}`;
-        if (usePlainLink) return `http://${health.localAddress}:${health.ports.listener}${query}`;
-        return host ? `https://${host}:${health.ports.https}${query}` : '';
+        savePhoneLink(next);
     };
     const qrLanguage = settings?.languages.find((language) => language.id === qrChannelId) || null;
-    const qrUrl = listenerUrlFor(qrChannelId);
+    const qrUrl = listenerUrl(health, phoneLink, qrChannelId);
 
     const createInterpreterLink = async () => {
         await run(async () => {
@@ -210,6 +175,8 @@ export default function Admin() {
                 </div>
             )}
 
+            <LiveDashboard />
+
             <div className="card fade-in highlight-card">
                 <div className="card-header"><Monitor size={20} /><h3>{t('system_status')}</h3></div>
                 <div className="connection-info">
@@ -240,6 +207,7 @@ export default function Admin() {
                     <p className="text-muted"><code>{qrUrl || t('detecting_network')}</code></p>
                     <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
                         <button className="btn-primary" disabled={!qrUrl} onClick={() => setShowQr(true)}><QrCode size={18} /> {t('show_listener_qr')}</button>
+                        <button className="btn-secondary" disabled={!qrUrl} onClick={() => navigate('/admin/poster')}><Printer size={18} /> {t('poster_button')}</button>
                         <button className="btn-secondary" disabled={busy} onClick={() => void restartApp()}><RotateCcw size={18} /> {t('restart_app')}</button>
                     </div>
                 </div>
@@ -389,11 +357,9 @@ export default function Admin() {
                         <button className="btn-secondary mt-4" disabled={busy} onClick={() => void run(() => settingsService.clearOpenAiApiKey(), t('openai_key_removed'))}><Trash2 size={18} /> {t('remove_openai_key')}</button>
                     </div>
                 )}
-                <label className="mt-4" style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                    <input type="checkbox" checked={settings.recordingEnabled} onChange={(event) => void run(() => settingsService.setRecordingEnabled(event.target.checked), t('recording_saved'))} />
-                    {t('recording_label')}
-                </label>
             </div>
+
+            <RecordingsCard settings={settings} />
 
             <div className="card fade-in">
                 <div className="card-header"><Monitor size={20} /><h3>{t('network_adapter')}</h3></div>

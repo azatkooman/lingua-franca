@@ -48,9 +48,48 @@ export interface AdminSettings extends AppSettings {
     openaiConfigured: boolean;
     preferredAddress: string;
     recordingEnabled: boolean;
+    transcriptsEnabled: boolean;
     duckDnsConfigured: boolean;
     certificateHostname: string;
     certificateEmail: string;
+}
+
+/** One channel on the operator's live dashboard. */
+export interface LiveChannel {
+    id: string;
+    name: string;
+    live: boolean;
+    role: 'original' | 'translation' | 'interpreter' | null;
+    since: number | null;
+    paused: boolean;
+    listeners: number;
+    peakListeners: number;
+    recording: boolean;
+}
+
+export interface LiveStatus {
+    channels: LiveChannel[];
+    totalListeners: number;
+    aiSeconds: number;
+    aiPricePerMinute: number;
+    since: number;
+    now: number;
+}
+
+/** A saved audio recording or caption transcript on the operator's computer. */
+export interface RecordingItem {
+    name: string;
+    type: 'audio' | 'transcript';
+    size: number;
+    channelId: string;
+    channelName: string;
+    role?: 'original' | 'translation' | 'interpreter';
+    startedAt: string;
+    endedAt: string;
+    durationMs?: number;
+    lines?: number;
+    date?: string;
+    active: boolean;
 }
 
 type Listener<T> = (value: T) => void;
@@ -311,6 +350,28 @@ class SettingsService {
     async clearOpenAiApiKey() { await this.patchAdminSettings({ clearOpenaiApiKey: true }); }
     async setPreferredAddress(preferredAddress: string) { await this.patchAdminSettings({ preferredAddress }); }
     async setRecordingEnabled(recordingEnabled: boolean) { await this.patchAdminSettings({ recordingEnabled }); }
+    async setTranscriptsEnabled(transcriptsEnabled: boolean) { await this.patchAdminSettings({ transcriptsEnabled }); }
+
+    async getLiveStatus() {
+        return await (await this.adminRequest('/api/admin/live', { cache: 'no-store' })).json() as LiveStatus;
+    }
+
+    async listRecordings() {
+        return await (await this.adminRequest('/api/admin/recordings', { cache: 'no-store' })).json() as { folder: string; items: RecordingItem[] };
+    }
+
+    /** Fetched with the operator token, since a plain link cannot carry the Authorization header. */
+    async downloadRecording(name: string) {
+        return (await this.adminRequest(`/api/admin/recordings/file/${encodeURIComponent(name)}`, { cache: 'no-store' })).blob();
+    }
+
+    async deleteRecording(name: string) {
+        await this.adminRequest(`/api/admin/recordings/file/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    }
+
+    async openRecordingsFolder() {
+        await this.adminRequest('/api/admin/recordings/open-folder', { method: 'POST' });
+    }
     /** Reverts to the local self-signed certificate after the next restart. */
     async useSelfSignedCertificate() { await this.patchAdminSettings({ certificateMode: 'self-signed' }); }
 

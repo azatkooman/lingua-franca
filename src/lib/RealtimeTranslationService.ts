@@ -24,12 +24,6 @@ interface ActiveSession {
     segment: number;
 }
 
-interface Recording {
-    recorder: MediaRecorder;
-    chunks: Blob[];
-    label: string;
-}
-
 interface StartContext {
     sourceLanguage: Language;
     onStatus: (message: string) => void;
@@ -50,7 +44,6 @@ const DISCONNECT_GRACE_MS = 5000;
 
 class RealtimeTranslationService {
     private sessions = new Map<string, ActiveSession>();
-    private recordings: Recording[] = [];
     private sourceStream: MediaStream | null = null;
     private stopping = false;
     private muted = false;
@@ -95,9 +88,15 @@ class RealtimeTranslationService {
             const [floorTrack] = this.sourceStream.getAudioTracks();
             // Published as 'ai' because the channel carries live captions, which tells phones
             // to show the transcript rather than the audio-only notice.
-            if (floorTrack) await voiceService.publishTrack(this.floorChannel.id, floorTrack, 'ai', onStatus, onListeners);
+            if (floorTrack) await voiceService.publishTrack(this.floorChannel.id, floorTrack, 'ai', onStatus, onListeners, 'original');
+        } else if (settingsService.getAdminSettings()?.recordingEnabled) {
+            // Not broadcast, but still kept: the server records the original speech so the
+            // translation can be checked against it afterwards.
+            const [sourceTrack] = this.sourceStream.getAudioTracks();
+            if (sourceTrack) await voiceService.publishRecordOnly(sourceLanguage.id, sourceTrack).catch((error) => {
+                onStatus(`The original speech will not be recorded: ${error instanceof Error ? error.message : String(error)}`);
+            });
         }
-        if (settingsService.getAdminSettings()?.recordingEnabled) this.recordStream(this.sourceStream, 'source');
         await Promise.all(targets.map((target) => this.startTarget(target)));
     }
 
@@ -122,17 +121,15 @@ class RealtimeTranslationService {
         this.sessions.set(target.id, session);
         const isCurrent = () => !this.stopping && this.sessions.get(target.id) === session;
 
-        peer.ontrack = ({ track, streams }) => {
+        peer.ontrack = ({ track }) => {
             if (!isCurrent()) return;
             session.outputTrack = track;
             session.firstOutputAt ||= performance.now();
-            const outputStream = streams[0] || new MediaStream([track]);
-            if (settingsService.getAdminSettings()?.recordingEnabled) this.recordStream(outputStream, `translated-${target.code}`);
             // After a reconnect the channel is still published, so swap the audio in place and
             // keep every listener attached instead of making them all renegotiate.
             void voiceService.replaceTrack(target.id, track).then((replaced) => {
                 if (replaced) { context.onStatus(`OpenAI ${target.name} reconnected`); return; }
-                return voiceService.publishTrack(target.id, track, 'ai', context.onStatus, context.onListeners);
+                return voiceService.publishTrack(target.id, track, 'ai', context.onStatus, context.onListeners, 'translation');
             }).catch((error) => {
                 context.onStatus(`Could not publish ${target.name}: ${error instanceof Error ? error.message : String(error)}`);
             });
@@ -284,7 +281,7 @@ class RealtimeTranslationService {
 
     isMuted() { return this.muted; }
 
-    async stop(downloadRecordings = true) {
+    stop() {
         this.stopping = true;
         this.stopReplacedWatch?.();
         this.stopReplacedWatch = null;
@@ -297,6 +294,7 @@ class RealtimeTranslationService {
         this.floorChannel = null;
         this.captionLead = null;
         for (const targetId of channelIds) voiceService.stopChannel(targetId);
+        voiceService.stopRecordOnly();
         for (const session of this.sessions.values()) this.closeSession(session);
         this.sessions.clear();
         this.targets.clear();
@@ -304,40 +302,6 @@ class RealtimeTranslationService {
         this.sourceStream?.getTracks().forEach((track) => track.stop());
         this.sourceStream = null;
         this.muted = false;
-        await this.finishRecordings(downloadRecordings);
-    }
-
-    private recordStream(stream: MediaStream, label: string) {
-        if (typeof MediaRecorder === 'undefined') return;
-        const mimeType = ['audio/webm;codecs=opus', 'audio/webm'].find((type) => MediaRecorder.isTypeSupported(type));
-        const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-        const recording: Recording = { recorder, chunks: [], label };
-        recorder.ondataavailable = (event) => { if (event.data.size) recording.chunks.push(event.data); };
-        recorder.start(1000);
-        this.recordings.push(recording);
-    }
-
-    private async finishRecordings(download: boolean) {
-        const recordings = [...this.recordings];
-        this.recordings = [];
-        const finished = await Promise.all(recordings.map((recording) => new Promise<Recording | null>((resolve) => {
-            recording.recorder.onstop = () => resolve(recording.chunks.length ? recording : null);
-            if (recording.recorder.state === 'inactive') resolve(recording.chunks.length ? recording : null);
-            else recording.recorder.stop();
-        })));
-        if (!download) return;
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        // Saved one at a time: Chromium blocks a burst of simultaneous downloads from one page.
-        for (const recording of finished.filter((entry): entry is Recording => entry !== null)) {
-            const blob = new Blob(recording.chunks, { type: recording.recorder.mimeType || 'audio/webm' });
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = `lingua-franca-${recording.label}-${stamp}.webm`;
-            link.click();
-            await new Promise((resolve) => window.setTimeout(resolve, 400));
-            URL.revokeObjectURL(url);
-        }
     }
 }
 

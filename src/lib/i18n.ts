@@ -126,7 +126,7 @@ const en = {
     openai_test_passed: 'OpenAI Realtime credential test passed.',
     remove_openai_key: 'Remove OpenAI key',
     openai_key_removed: 'OpenAI key removed.',
-    recording_label: 'Download original and translated recordings when a session stops',
+    recording_label: 'Record the audio of every live channel',
     recording_saved: 'Recording preference saved.',
     network_adapter: 'Network adapter',
     automatic: 'Automatic',
@@ -235,6 +235,51 @@ const en = {
     sound_settings: 'Sound',
     ai_active: 'AI Translation Active 🤖',
     original_text: 'Original',
+    live_title: 'Live now',
+    live_off: 'Off air',
+    role_original: 'Original',
+    role_translation: 'AI translation',
+    role_interpreter: 'Interpreter',
+    live_muted: 'Muted',
+    live_listeners: '{count} listening',
+    live_peak: 'peak {count}',
+    live_on_air: 'on air {time}',
+    live_recording: 'Recording',
+    live_total: 'Listening now: {count}',
+    live_ai_usage: 'AI translation so far: {time}, about {cost}',
+    live_ai_hint: 'Estimated at {price} per minute for each translated language, since the app started. Your OpenAI bill has the exact amount.',
+    live_unavailable: 'Live status is not available right now.',
+    recordings_title: 'Recordings and transcripts',
+    recordings_hint: 'Saved on this computer. You can download them here during or after the event.',
+    record_audio_hint: 'Interpreters, AI translations and, in AI mode, the original speech. In Human mode only the interpreter is recorded, because the original speech does not go through this app. About 10 to 30 MB per hour for each channel.',
+    record_transcripts_label: 'Save the captions as text',
+    record_transcripts_hint: 'One file per language per day, with the time of each sentence and the original under it. Captions exist only on AI channels.',
+    recordings_empty: 'Nothing saved yet.',
+    recording_in_progress: 'Recording now',
+    transcript_lines: '{count} sentences',
+    audio_label: 'Audio',
+    transcript_label: 'Transcript',
+    download: 'Download',
+    delete: 'Delete',
+    deleted: 'Deleted.',
+    delete_confirm: 'Delete {name}? This cannot be undone.',
+    open_folder: 'Open folder',
+    poster_button: 'Print a QR poster',
+    poster_title: 'QR poster',
+    poster_hint: 'One page with a QR code for each language. Add the Wi-Fi details so people can join the network first.',
+    poster_wifi_name: 'Wi-Fi name',
+    poster_wifi_password: 'Wi-Fi password (optional)',
+    poster_wifi_hint: 'Kept only on this device, and printed on the poster.',
+    poster_channels: 'Languages on the poster',
+    poster_print: 'Print',
+    poster_heading: 'Live translation',
+    poster_step_wifi: '1. Join the Wi-Fi',
+    poster_step_listen: '2. Scan your language',
+    poster_scan: 'Scan to listen',
+    poster_network: 'Network: {name}',
+    poster_password: 'Password: {password}',
+    poster_headphones: 'Use headphones, and keep your screen on.',
+    poster_print_hint: 'To save a PDF, choose "Microsoft Print to PDF" as the printer.',
 };
 
 export type TranslationKey = keyof typeof en;
@@ -358,7 +403,7 @@ const ru: Record<TranslationKey, string> = {
     openai_test_passed: 'Проверка ключа OpenAI Realtime прошла успешно.',
     remove_openai_key: 'Удалить ключ OpenAI',
     openai_key_removed: 'Ключ OpenAI удалён.',
-    recording_label: 'Скачивать оригинальную и переведённую запись после остановки',
+    recording_label: 'Записывать звук каждого канала в эфире',
     recording_saved: 'Настройка записи сохранена.',
     network_adapter: 'Сетевой адаптер',
     automatic: 'Автоматически',
@@ -467,6 +512,51 @@ const ru: Record<TranslationKey, string> = {
     sound_settings: 'Звук',
     ai_active: 'Активен перевод ИИ 🤖',
     original_text: 'Оригинал',
+    live_title: 'Сейчас в эфире',
+    live_off: 'Не в эфире',
+    role_original: 'Оригинал',
+    role_translation: 'ИИ-перевод',
+    role_interpreter: 'Переводчик',
+    live_muted: 'Звук выключен',
+    live_listeners: 'Слушают: {count}',
+    live_peak: 'максимум {count}',
+    live_on_air: 'в эфире {time}',
+    live_recording: 'Запись',
+    live_total: 'Сейчас слушают: {count}',
+    live_ai_usage: 'ИИ-перевод за это время: {time}, примерно {cost}',
+    live_ai_hint: 'Оценка по {price} за минуту для каждого языка перевода с момента запуска приложения. Точная сумма указана в счёте OpenAI.',
+    live_unavailable: 'Состояние эфира сейчас недоступно.',
+    recordings_title: 'Записи и стенограммы',
+    recordings_hint: 'Сохраняются на этом компьютере. Скачать их можно здесь во время или после мероприятия.',
+    record_audio_hint: 'Переводчики, ИИ-перевод и, в режиме ИИ, оригинальная речь. В режиме «Человек» записывается только переводчик, потому что оригинальная речь не проходит через приложение. Примерно 10–30 МБ в час на каждый канал.',
+    record_transcripts_label: 'Сохранять субтитры как текст',
+    record_transcripts_hint: 'Один файл на язык в день, со временем каждой фразы и оригиналом под ней. Субтитры есть только на каналах ИИ.',
+    recordings_empty: 'Пока ничего не сохранено.',
+    recording_in_progress: 'Идёт запись',
+    transcript_lines: 'Фраз: {count}',
+    audio_label: 'Звук',
+    transcript_label: 'Стенограмма',
+    download: 'Скачать',
+    delete: 'Удалить',
+    deleted: 'Удалено.',
+    delete_confirm: 'Удалить {name}? Это нельзя отменить.',
+    open_folder: 'Открыть папку',
+    poster_button: 'Напечатать плакат с QR-кодами',
+    poster_title: 'Плакат с QR-кодами',
+    poster_hint: 'Одна страница с QR-кодом для каждого языка. Добавьте данные Wi-Fi, чтобы люди сначала подключились к сети.',
+    poster_wifi_name: 'Название Wi-Fi',
+    poster_wifi_password: 'Пароль Wi-Fi (необязательно)',
+    poster_wifi_hint: 'Хранится только на этом устройстве и печатается на плакате.',
+    poster_channels: 'Языки на плакате',
+    poster_print: 'Печать',
+    poster_heading: 'Синхронный перевод',
+    poster_step_wifi: '1. Подключитесь к Wi-Fi',
+    poster_step_listen: '2. Отсканируйте свой язык',
+    poster_scan: 'Сканируйте, чтобы слушать',
+    poster_network: 'Сеть: {name}',
+    poster_password: 'Пароль: {password}',
+    poster_headphones: 'Используйте наушники и не гасите экран.',
+    poster_print_hint: 'Чтобы сохранить PDF, выберите принтер «Microsoft Print to PDF».',
 };
 
 // Kazakh. Written for this release; worth a read-through by a native speaker before an event.
@@ -587,7 +677,7 @@ const kk: Record<TranslationKey, string> = {
     openai_test_passed: 'OpenAI Realtime кілтін тексеру сәтті өтті.',
     remove_openai_key: 'OpenAI кілтін жою',
     openai_key_removed: 'OpenAI кілті жойылды.',
-    recording_label: 'Сеанс тоқтағанда түпнұсқа мен аударма жазбаларын жүктеп алу',
+    recording_label: 'Эфирдегі әр арнаның дыбысын жазу',
     recording_saved: 'Жазба баптауы сақталды.',
     network_adapter: 'Желілік адаптер',
     automatic: 'Автоматты түрде',
@@ -696,6 +786,51 @@ const kk: Record<TranslationKey, string> = {
     sound_settings: 'Дыбыс',
     ai_active: 'ЖИ аудармасы қосулы 🤖',
     original_text: 'Түпнұсқа',
+    live_title: 'Қазір эфирде',
+    live_off: 'Эфирде емес',
+    role_original: 'Түпнұсқа',
+    role_translation: 'ЖИ аудармасы',
+    role_interpreter: 'Аудармашы',
+    live_muted: 'Дыбыс өшірулі',
+    live_listeners: 'Тыңдап отыр: {count}',
+    live_peak: 'ең көбі {count}',
+    live_on_air: 'эфирде {time}',
+    live_recording: 'Жазылуда',
+    live_total: 'Қазір тыңдап отыр: {count}',
+    live_ai_usage: 'Осы уақытқа дейінгі ЖИ аудармасы: {time}, шамамен {cost}',
+    live_ai_hint: 'Бағалау: қолданба іске қосылғаннан бері әр аударма тілі үшін минутына {price}. Нақты сома OpenAI шотыңызда.',
+    live_unavailable: 'Эфир күйі қазір қолжетімсіз.',
+    recordings_title: 'Жазбалар мен стенограммалар',
+    recordings_hint: 'Осы компьютерде сақталады. Оларды іс-шара кезінде немесе одан кейін осы жерден жүктеп алуға болады.',
+    record_audio_hint: 'Аудармашылар, ЖИ аудармасы және ЖИ режимінде түпнұсқа сөз. «Адам» режимінде тек аудармашы жазылады, себебі түпнұсқа сөз бұл қолданба арқылы өтпейді. Әр арнаға сағатына шамамен 10–30 МБ.',
+    record_transcripts_label: 'Субтитрлерді мәтін ретінде сақтау',
+    record_transcripts_hint: 'Күніне әр тілге бір файл, әр сөйлемнің уақытымен және астында түпнұсқасымен. Субтитрлер тек ЖИ арналарында болады.',
+    recordings_empty: 'Әзірге ештеңе сақталмаған.',
+    recording_in_progress: 'Қазір жазылуда',
+    transcript_lines: 'Сөйлем саны: {count}',
+    audio_label: 'Дыбыс',
+    transcript_label: 'Стенограмма',
+    download: 'Жүктеп алу',
+    delete: 'Жою',
+    deleted: 'Жойылды.',
+    delete_confirm: '{name} жойылсын ба? Мұны қайтару мүмкін емес.',
+    open_folder: 'Қалтаны ашу',
+    poster_button: 'QR-кодтары бар плакатты басып шығару',
+    poster_title: 'QR-кодтары бар плакат',
+    poster_hint: 'Әр тілге арналған QR-коды бар бір бет. Адамдар алдымен желіге қосылуы үшін Wi-Fi деректерін қосыңыз.',
+    poster_wifi_name: 'Wi-Fi атауы',
+    poster_wifi_password: 'Wi-Fi құпиясөзі (міндетті емес)',
+    poster_wifi_hint: 'Тек осы құрылғыда сақталады және плакатта басылады.',
+    poster_channels: 'Плакаттағы тілдер',
+    poster_print: 'Басып шығару',
+    poster_heading: 'Ілеспе аударма',
+    poster_step_wifi: '1. Wi-Fi желісіне қосылыңыз',
+    poster_step_listen: '2. Өз тіліңізді сканерлеңіз',
+    poster_scan: 'Тыңдау үшін сканерлеңіз',
+    poster_network: 'Желі: {name}',
+    poster_password: 'Құпиясөз: {password}',
+    poster_headphones: 'Құлаққап киіп, экранды өшірмеңіз.',
+    poster_print_hint: 'PDF сақтау үшін «Microsoft Print to PDF» принтерін таңдаңыз.',
 };
 
 export const translations = { en, ru, kk };
@@ -703,6 +838,8 @@ export const translations = { en, ru, kk };
 const LOCALE_KEY = 'lingua_franca_locale';
 const LOCALE_CODES = LOCALES.map((locale) => locale.code);
 const INTL_LOCALE: Record<Locale, string> = { en: 'en-GB', ru: 'ru-RU', kk: 'kk-KZ' };
+/** The locale for Intl date, time and number formats (English uses the 24-hour en-GB style). */
+export const intlLocale = (locale: Locale) => INTL_LOCALE[locale];
 
 const readStoredLocale = (): Locale | null => {
     try {
@@ -785,6 +922,28 @@ export function formatEventDates(startDate: string, endDate: string, locale: Loc
     const format = new Intl.DateTimeFormat(INTL_LOCALE[locale], { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
     if (!endDate) return format.format(toDate(startDate));
     return format.formatRange(toDate(startDate), toDate(endDate));
+}
+
+const DURATION_UNITS: Record<Locale, [string, string, string]> = {
+    en: ['h', 'min', 's'],
+    ru: ['ч', 'мин', 'с'],
+    kk: ['сағ', 'мин', 'с'],
+};
+
+/** "1 h 05 min", "12 min", "40 s": short, for the dashboard and the recordings list. */
+export function formatDuration(totalSeconds: number, locale: Locale) {
+    const [hours, minutes, seconds] = DURATION_UNITS[locale];
+    const value = Math.max(0, Math.round(totalSeconds));
+    const h = Math.floor(value / 3600);
+    const m = Math.floor((value % 3600) / 60);
+    if (h) return `${h} ${hours} ${String(m).padStart(2, '0')} ${minutes}`;
+    if (m) return `${m} ${minutes}`;
+    return `${value} ${seconds}`;
+}
+
+/** A sentence in a given interface language, for pages that mix languages (the QR poster). */
+export function translateFor(locale: Locale, key: TranslationKey) {
+    return translations[locale][key] || en[key];
 }
 
 export function useTranslation() {

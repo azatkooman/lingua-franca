@@ -24,9 +24,23 @@ Listeners scan the QR code, see the event name and dates, pick a language and ta
 - **Switch language** with the tabs at the top, without going back.
 - **Status**: Live, Waiting for the speaker, Connecting, or Reconnecting.
 - **Sound**: mute, volume, a level meter, and Phone / Speaker output, under **Sound**.
-- The screen is kept on where the browser allows it (HTTPS pages). Text size, the original-text choice and the volume are remembered on each phone.
+- The screen is kept on while listening, on both links: the browser's wake lock on HTTPS, and on the plain link a tiny muted video that phones treat as playing ([NoSleep.js](https://github.com/richtr/NoSleep.js)). Text size, the original-text choice and the volume are remembered on each phone.
 
 Every screen has a phone button with the organiser's contacts (set in Admin, hidden when empty), the **RU / KK / EN** interface switch, and a light / dark / system theme switch. The Kazakh text has not yet been reviewed by a native speaker.
+
+## Operator tools
+
+**Live now** (top of Admin) refreshes every few seconds: each channel's state (off air, interpreter, AI translation or original, and for how long), whether it is muted or being recorded, how many phones are listening now and the most at once, and the total. When AI translation has run it also shows the time used and a rough cost, at OpenAI's price of $0.034 per minute of audio for each translated language. Your OpenAI bill has the exact amount.
+
+**Recordings and transcripts** (in Admin):
+
+- **Record the audio of every live channel** saves each broadcast as an `.opus` file on this computer: phone and desktop interpreters, every AI translation, and in AI mode the original speech, even when it is not broadcast on its own channel. In Human mode only the interpreter can be recorded, because the original speech does not go through the app. To record an unbroadcast original in AI mode, switch recording on before starting the broadcast. The server writes the audio as it arrives, so a crash or power cut loses at most a second, and a recording can be downloaded while it is still running. Pauses (a muted microphone) are kept as silence, so the file keeps real time. Expect about 10 to 30 MB per hour for each channel (about 11 MB for one hour of speech in testing). Off by default.
+- **Save the captions as text** (on by default) writes every finished caption sentence to a text file per language per day, with the time of each sentence and the original under it.
+- Files are listed by day with **Download** and **Delete**, and **Open folder** opens them in Explorer. They live in `%APPDATA%\lingua-franca\recordings`.
+
+`.opus` files play in Windows Media Player, VLC, browsers, and on phones.
+
+**Print a QR poster** (next to **Show listener QR**) makes one printable A4 page: the event name and dates, a heading in each language on the poster, an optional Wi-Fi QR code that joins the network when scanned, and a QR code for each language with "Scan to listen" in that language. The Wi-Fi name and password stay on the operator's device. Choose **Microsoft Print to PDF** to save it as a PDF.
 
 ## Windows x64 setup
 
@@ -88,7 +102,7 @@ Every WebRTC transport needs an ICE port. Lingua Franca puts all transports on a
 6. Under **Default language for phones**, choose the language phones start in (English, Russian or Kazakh). Each phone can still switch with RU / KK / EN.
    Under **Event**, enter the event name and dates; they are shown at the top of the home and listener screens. Under **Contact for listeners**, enter a name, phone, WhatsApp, Telegram or email for people who have no sound or a question. Leave every contact field empty to hide the phone button.
 7. Optional: listener phones need no certificate (see step 8), but interpreter phones and Admin on other devices use HTTPS. To remove the warning there too, create a free subdomain at [DuckDNS](https://www.duckdns.org), then enter the subdomain, DuckDNS token, and contact email under **Trusted phone certificate**. The app obtains a free Let's Encrypt certificate and renews it automatically once it has fewer than 30 days remaining. A still-valid certificate is reused rather than reissued, which keeps you clear of the CA's weekly duplicate-certificate limit.
-8. Pick a channel under **Listener QR channel** and show its QR. Each channel has its own link. By default the QR carries the **plain listener link** (`http://<computer address>:4175/listener?...`), which phones open straight away with no certificate warning, no DuckDNS and no internet. See [Listener link](#listener-link).
+8. Print a poster with **Print a QR poster**, or pick a channel under **Listener QR channel** and show its QR. Each channel has its own link. By default the QR carries the **plain listener link** (`http://<computer address>:4175/listener?...`), which phones open straight away with no certificate warning, no DuckDNS and no internet. See [Listener link](#listener-link).
 9. On the home screen, choose **Be an Interpreter** and sign in with the operator PIN (an interpreter phone uses its QR code instead). Select the mixer's USB interface or a microphone input. The desktop app also offers **System output / loopback** to capture whatever Windows is currently playing. Choose **Human**, or **AI** with the source and target languages (Russian to English is preselected when those channels exist), then start the broadcast.
 10. Press **Sign out** in Admin when the service is over, so the next person at the computer needs the PIN.
 
@@ -107,11 +121,13 @@ A phone only trusts certificates for public domain names, and a `192.168.x.x` ad
 - It opens with no warning, needs no DuckDNS and works on Wi-Fi without internet.
 - The audio is still encrypted: WebRTC always encrypts media (DTLS-SRTP). Only the page and the connection setup travel unencrypted on the venue Wi-Fi.
 - It serves listening only. Every sign-in, interpreter-code and operator request is refused on that port, sockets from it can never broadcast, and `/admin` and `/interpreter` redirect to HTTPS before anything can be typed.
-- The **Phone / Speaker** switch may not work there, and the phone cannot be kept awake automatically, because browsers keep audio-output selection and the screen wake lock for secure pages. Normal playback and volume are unaffected; the listener screen asks people to keep the screen on.
+- The **Phone / Speaker** switch may not work there, because browsers keep audio-output selection for secure pages. Normal playback and volume are unaffected. The screen still stays on, using a silent video instead of the wake lock.
 
 Interpreter phones and Admin stay on HTTPS (they need the microphone or a PIN). They show the certificate warning once per phone unless the DuckDNS certificate in step 7 is set up. Admin can switch listener QR codes back to HTTPS under **Link for listener phones**. If TCP 4175 is taken by another program, the app still starts and Admin says so, and QR codes fall back to HTTPS.
 
 ## Pre-service checks
+
+- If you want the audio afterwards, **Record the audio of every live channel** is on, and **Live now** shows **Recording** next to each live channel once it starts.
 
 - SFU status reads **ready** in Admin, with no capacity warning.
 - The selected IP belongs to the venue Wi-Fi adapter, not VPN/VMware/Hyper-V.

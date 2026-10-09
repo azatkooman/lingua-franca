@@ -1,6 +1,6 @@
 /* ------------------------------------------------------------ page frame */
 
-.listen-page {
+.page-container.listen-page {
     max-width: 720px;
 }
 
@@ -357,9 +357,6 @@
     background: rgba(217, 119, 6, 0.14);
 }
 
-@keyframes status-blink {
-    50% { opacity: 0.3; }
-}
 
 .transcript-shell {
     position: relative;

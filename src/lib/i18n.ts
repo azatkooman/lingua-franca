@@ -283,6 +283,8 @@ const en = {
     poster_save_pdf: 'Save as PDF',
     poster_pdf_saved: 'Saved: {path}',
     original_speech_label: 'Original speech',
+    input_missing_option: 'Selected input (not connected)',
+    input_missing_hint: 'The selected input is not connected. Reconnect it and press refresh, or choose another input. Starting will not switch to a different microphone on its own.',
     original_waiting: 'The speaker’s own words will appear here.',
 };
 
@@ -564,6 +566,8 @@ const ru: Record<TranslationKey, string> = {
     poster_save_pdf: 'Сохранить как PDF',
     poster_pdf_saved: 'Сохранено: {path}',
     original_speech_label: 'Оригинальная речь',
+    input_missing_option: 'Выбранный вход (не подключён)',
+    input_missing_hint: 'Выбранный вход не подключён. Подключите его и нажмите «Обновить» или выберите другой вход. Приложение не переключится на другой микрофон само.',
     original_waiting: 'Здесь появятся слова спикера на языке оригинала.',
 };
 
@@ -842,6 +846,8 @@ const kk: Record<TranslationKey, string> = {
     poster_save_pdf: 'PDF ретінде сақтау',
     poster_pdf_saved: 'Сақталды: {path}',
     original_speech_label: 'Түпнұсқа сөз',
+    input_missing_option: 'Таңдалған кіріс (қосылмаған)',
+    input_missing_hint: 'Таңдалған кіріс қосылмаған. Оны қосып, жаңартуды басыңыз немесе басқа кірісті таңдаңыз. Қолданба басқа микрофонға өздігінен ауыспайды.',
     original_waiting: 'Мұнда спикердің түпнұсқа тілдегі сөздері шығады.',
 };
 

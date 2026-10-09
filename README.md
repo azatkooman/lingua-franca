@@ -51,7 +51,7 @@ npm ci
 npm run electron:build:win
 ```
 
-The build preflight rejects ARM builds and non-Windows `mediasoup-worker` binaries. The installer is written to `release` and adds private-network firewall rules for **TCP 4173** (the secure web UI), **TCP 4175** (the plain listener link) and **UDP and TCP 10000** (media).
+The build preflight rejects ARM builds and non-Windows `mediasoup-worker` binaries. The installer is written to `release` and adds private-network firewall rules: **TCP 4173** (the secure web UI) and **TCP 4175** (the plain listener link) for `Lingua Franca.exe`, and **UDP and TCP 10000-10100** (the audio) for `resources\bin\mediasoup-worker.exe`, the separate program that actually carries the audio. (Before 1.5.4 the audio rules named the wrong program, so on a fresh computer phones could open the page but hear nothing unless someone answered a Windows prompt.)
 
 No local toolchain? Every push and pull request also builds the installer on GitHub Actions (see [Releases](#releases)).
 
@@ -168,10 +168,10 @@ Each simulated client connects and allocates a real listener transport, so this 
 
 - **The app will not start:** it now reports the reason in the window and in an error dialog instead of failing silently. The usual cause is a second copy already running, or something else holding TCP 4173 or 4174. Only one instance can run at a time; launching again focuses the existing window.
 - **Worker missing or wrong format:** remove only `node_modules`, then run `npm ci` locally on Windows.
-- **Phones cannot connect:** confirm the Windows network is Private, the firewall rules exist for TCP 4173, TCP 4175 and UDP/TCP 10000, and the displayed IP is correct.
+- **Phones cannot connect:** confirm the Windows network is Private, the firewall rules exist for TCP 4173 and 4175 (Lingua Franca.exe) and UDP/TCP 10000-10100 (mediasoup-worker.exe), and the displayed IP is correct.
 - **Certificate warning on listener phones:** make sure **Link for listener phones** in Admin is set to the plain link, then show the QR again.
 - **Certificate warning on interpreter phones or Admin:** the app is still using its self-signed fallback. Complete **Trusted phone certificate** setup in Admin; a public CA cannot issue a trusted certificate directly for a private `192.168.x.x`/`10.x.x.x` address. To rehearse the setup without consuming the CA's weekly issuance budget, start the app with `LINGUA_FRANCA_ACME_STAGING=1` — staging certificates still show a warning on phones.
-- **Trusted hostname does not open:** confirm the phone is on the same Wi-Fi, DuckDNS resolves to the computer's current LAN address, and TCP 4173 is allowed through Windows Firewall. The app re-points DuckDNS automatically if the computer's address changes while it is running.
+- **Trusted hostname does not open:** confirm the phone is on the same Wi-Fi, DuckDNS resolves to the computer's current LAN address, and TCP 4173 is allowed through Windows Firewall. The app re-points DuckDNS at every start and whenever the computer's address changes while it is running.
 - **No microphone labels:** tap the refresh button next to the input selector and allow microphone access. Some phones expose only the system-default input.
 - **A speaker or virtual-cable playback endpoint is missing:** Windows exposes playback and recording endpoints separately. Select **System output / loopback** for the current Windows playback mix, or select the virtual cable's recording endpoint (usually named "Output") as the microphone input.
 - **Human interpreter cannot start:** create a new interpreter QR; links are single-use and expire after eight hours. Confirm the certificate status says **trusted** on phones and the SFU status says **ready**. If the phone says the channel is already being broadcast, stop the other broadcast first.

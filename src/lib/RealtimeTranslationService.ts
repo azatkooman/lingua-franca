@@ -26,6 +26,8 @@ interface ActiveSession {
     segment: number;
     /** Finishes the current caption sentence now (sends it as final). */
     flush: () => void;
+    /** Cancels the OpenAI connection setup if it is still in progress. */
+    abort: AbortController;
 }
 
 interface StartContext {
@@ -49,6 +51,12 @@ const DISCONNECT_GRACE_MS = 5000;
 // caption line is finished after this much quiet, or early at a sentence end once it is long.
 const SEGMENT_IDLE_MS = 1400;
 const SEGMENT_MAX_CHARS = 280;
+// The original speech is transcribed ahead of its translation. A line that has the original but
+// no translation yet waits up to this long for it, so the two stay on one line.
+const TRANSLATION_WAIT_MS = 8000;
+// The OpenAI connection setup (the SDP exchange) gives up after this, so a stalled request
+// cannot hold up the start or the reconnect sequence.
+const SDP_TIMEOUT_MS = 20_000;
 const SENTENCE_END = /[.!?…。！？]["»”')\]]*\s*$/;
 // The original speech is transcribed only when asked for (input transcription). Without it the
 // Original box and the original channel's captions stayed empty.
@@ -96,6 +104,12 @@ class RealtimeTranslationService {
         this.floorChannel = options.floorChannel ? sourceLanguage : null;
         this.captionLead = targets[0]?.id ?? null;
         this.sourceStream = await voiceService.getInputStream(deviceId);
+        // Stopped (or the page left) while the input was opening: release it and go no further.
+        if (this.stopping) {
+            this.sourceStream.getTracks().forEach((track) => track.stop());
+            this.sourceStream = null;
+            throw new Error('The broadcast was stopped.');
+        }
         if (this.floorChannel) {
             const [floorTrack] = this.sourceStream.getAudioTracks();
             // Published as 'ai' because the channel carries live captions, which tells phones
@@ -118,6 +132,8 @@ class RealtimeTranslationService {
         context.onStatus(`Connecting OpenAI ${target.name}…`);
         const { value: clientSecret } = await settingsService.createRealtimeSession(context.sourceLanguage.code, target.code);
         if (!clientSecret) throw new Error(`OpenAI did not return a client secret for ${target.name}.`);
+        // Stopped meanwhile: opening an OpenAI connection now would keep billing with nobody to stop it.
+        if (this.stopping || this.context !== context) throw new Error('The broadcast was stopped.');
         const [inputTrack] = this.sourceStream?.getAudioTracks() ?? [];
         if (!inputTrack) throw new Error('The selected input produced no audio track.');
         const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -129,6 +145,7 @@ class RealtimeTranslationService {
         const session: ActiveSession = {
             peer, target, sourceTrack, translatedText: '', originalText: '', startedAt: performance.now(),
             segmentKey: `${target.id}-${Date.now().toString(36)}`, segment: 1, flush: () => undefined,
+            abort: new AbortController(),
         };
         this.sessions.set(target.id, session);
         const isCurrent = () => !this.stopping && this.sessions.get(target.id) === session;
@@ -168,11 +185,13 @@ class RealtimeTranslationService {
         };
 
         let idleTimer = 0;
+        let segmentOpenedAt = 0;
         // Sends the current sentence as final (so phones close the line and the transcript file
         // gets it), then starts a new one.
         const finishSegment = () => {
             window.clearTimeout(idleTimer);
             idleTimer = 0;
+            segmentOpenedAt = 0;
             if (session.translatedText || session.originalText) sendCaptions(true);
             session.translatedText = ''; session.originalText = '';
             session.startedAt = performance.now(); session.firstOutputAt = undefined;
@@ -208,8 +227,20 @@ class RealtimeTranslationService {
                     context.onUpdate(update);
                     sendCaptions(false);
                     window.clearTimeout(idleTimer);
+                    segmentOpenedAt ||= performance.now();
+                    // Quiet for a moment: finish the line, unless the original is there but its
+                    // translation has not started yet. Finishing then split them onto two lines.
+                    const onIdle = () => {
+                        if (!isCurrent()) return;
+                        const awaitingTranslation = session.originalText.trim() && !session.translatedText.trim();
+                        if (awaitingTranslation && performance.now() - segmentOpenedAt < TRANSLATION_WAIT_MS) {
+                            idleTimer = window.setTimeout(onIdle, SEGMENT_IDLE_MS);
+                            return;
+                        }
+                        finishSegment();
+                    };
                     if (session.translatedText.length > SEGMENT_MAX_CHARS && SENTENCE_END.test(session.translatedText)) finishSegment();
-                    else idleTimer = window.setTimeout(() => { if (isCurrent()) finishSegment(); }, SEGMENT_IDLE_MS);
+                    else idleTimer = window.setTimeout(onIdle, SEGMENT_IDLE_MS);
                 }
                 if (event.type === 'error') context.onStatus(`OpenAI ${target.name}: ${event.error?.message || 'unknown error'}`);
             } catch (error) { console.error('Invalid OpenAI realtime event:', error); }
@@ -218,13 +249,21 @@ class RealtimeTranslationService {
         try {
             const offer = await peer.createOffer();
             await peer.setLocalDescription(offer);
-            const answer = await fetch('https://api.openai.com/v1/realtime/translations/calls', {
-                method: 'POST',
-                headers: { Authorization: `Bearer ${clientSecret}`, 'Content-Type': 'application/sdp' },
-                body: offer.sdp,
-            });
-            if (!answer.ok) throw new Error(`OpenAI ${target.name} session failed: ${await answer.text()}`);
-            await peer.setRemoteDescription({ type: 'answer', sdp: await answer.text() });
+            const deadline = window.setTimeout(() => session.abort.abort(new Error(`OpenAI ${target.name} did not answer in time.`)), SDP_TIMEOUT_MS);
+            try {
+                const answer = await fetch('https://api.openai.com/v1/realtime/translations/calls', {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${clientSecret}`, 'Content-Type': 'application/sdp' },
+                    body: offer.sdp,
+                    signal: session.abort.signal,
+                });
+                if (!answer.ok) throw new Error(`OpenAI ${target.name} session failed: ${await answer.text()}`);
+                const sdp = await answer.text();
+                if (!isCurrent()) throw new Error('The broadcast was stopped.');
+                await peer.setRemoteDescription({ type: 'answer', sdp });
+            } finally {
+                window.clearTimeout(deadline);
+            }
         } catch (error) {
             // Leave nothing half-negotiated behind if the exchange fails.
             this.closeSession(session);
@@ -237,6 +276,7 @@ class RealtimeTranslationService {
         // Whatever was being said is kept as a finished line rather than lost.
         session.flush();
         session.flush = () => undefined;
+        session.abort.abort();
         session.peer.ontrack = null;
         session.peer.onconnectionstatechange = null;
         session.sourceTrack.stop();

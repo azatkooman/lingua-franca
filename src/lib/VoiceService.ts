@@ -47,7 +47,17 @@ export class VoiceService {
     private sourceStream: MediaStream | null = null;
     private sendTransports = new Map<string, mediasoupClient.types.Transport>();
     private producers = new Map<string, mediasoupClient.types.Producer>();
-    private publishModes = new Map<string, { mode: 'human' | 'ai'; role?: BroadcastRole }>();
+    // What should be on air from this device, kept apart from the current producers and
+    // transports: those are rebuilt after a dropped link, and a failed rebuild must not forget
+    // the broadcast it was rebuilding.
+    private intended = new Map<string, { track: MediaStreamTrack; mode: 'human' | 'ai'; role?: BroadcastRole }>();
+    private recordOnlyIntent: { channelId: string; track: MediaStreamTrack } | null = null;
+    // Bumped by stopBroadcast, so a start still waiting for the microphone or the server is
+    // abandoned instead of going live after the operator stopped or left the page.
+    private broadcastGeneration = 0;
+    private republishAttempt = 0;
+    private republishing = false;
+    private republishAgain = false;
     // The original speech in AI mode, sent only to the server's recorder when it is not being
     // broadcast on its own channel.
     private recordOnly: { channelId: string; transport: mediasoupClient.types.Transport; producer: mediasoupClient.types.Producer } | null = null;
@@ -176,6 +186,7 @@ export class VoiceService {
             if (!this.producers.has(channelId)) return;
             // The server already closed this producer when the operator took the channel
             // over, so tear down locally without asking it to close the channel again.
+            this.intended.delete(channelId);
             this.dropChannel(channelId);
             this.onConnectionsChange?.(this.totalListeners());
             this.replacedHandlers.forEach((handler) => handler(channelId));
@@ -202,7 +213,7 @@ export class VoiceService {
         });
         realtimeSocket.on('sfuReady', () => {
             this.device = null;
-            if (this.producers.size || this.recordOnly) void this.republish();
+            if (this.intended.size || this.recordOnlyIntent) void this.republish();
             if (this.currentListenerChannelId) void this.reconnectListener();
         });
         // A dropped Wi-Fi link gives the reconnected socket a new id, so the server holds no
@@ -219,18 +230,25 @@ export class VoiceService {
             this.socketDropped = false;
             // After a drop the server has already closed this device's producers and consumer,
             // even if the objects here still look alive, so rebuild both.
-            if (recovering && (this.producers.size || this.recordOnly)) void this.republish();
+            if (recovering && (this.intended.size || this.recordOnlyIntent)) void this.republish();
             if (this.currentListenerChannelId && (recovering || !this.consumer)) void this.reconnectListener();
         });
     }
 
-    /** Rebuilds every published channel once, after its media link failed. */
-    private scheduleRepublish() {
-        if (this.republishTimer || (!this.producers.size && !this.recordOnly)) return;
+    /** Rebuilds the broadcasts after a media link failed, or retries a rebuild that failed. */
+    private scheduleRepublish(delayMs = 1000) {
+        if (this.republishTimer || (!this.intended.size && !this.recordOnlyIntent)) return;
         this.republishTimer = window.setTimeout(() => {
             this.republishTimer = 0;
-            if (this.producers.size || this.recordOnly) void this.republish();
-        }, 1000);
+            if (this.intended.size || this.recordOnlyIntent) void this.republish();
+        }, delayMs);
+    }
+
+    /** Closes a transport here and on the server; the server otherwise kept it until the phone left. */
+    private closeTransport(transport: mediasoupClient.types.Transport | null | undefined) {
+        if (!transport) return;
+        realtimeSocket.emit('closeTransport', { transportId: transport.id });
+        if (!transport.closed) transport.close();
     }
 
     private async loadDevice() {
@@ -273,18 +291,36 @@ export class VoiceService {
         onConnectionsChange: (count: number) => void = () => undefined,
         role?: BroadcastRole,
     ) {
+        const generation = this.broadcastGeneration;
         await this.loadDevice();
         this.onConnectionsChange = onConnectionsChange;
         this.onPublishStatus = onStatus;
         onStatus('Connecting…');
+        this.intended.set(channelId, { track, mode, role });
+        // Abandoned when the broadcast was stopped meanwhile, or this channel was handed a
+        // newer track (an OpenAI reconnect) by a later call.
+        const superseded = () => generation !== this.broadcastGeneration || this.intended.get(channelId)?.track !== track;
         const transport = await this.openSendTransport({ channelId, mode, role });
+        if (superseded()) { this.closeTransport(transport); throw new Error('The broadcast was stopped.'); }
         this.sendTransports.set(channelId, transport);
-        // The track belongs to the caller (the capture stream or the OpenAI leg), which stops
-        // it. Letting the producer stop it on close would kill the track the moment the
-        // channel is re-published after a media-engine restart.
-        const producer = await transport.produce({ track, stopTracks: false });
+        let producer: mediasoupClient.types.Producer;
+        try {
+            // The track belongs to the caller (the capture stream or the OpenAI leg), which
+            // stops it. Letting the producer stop it on close would kill the track the moment
+            // the channel is re-published after a media-engine restart.
+            producer = await transport.produce({ track, stopTracks: false });
+        } catch (error) {
+            if (this.sendTransports.get(channelId) === transport) this.sendTransports.delete(channelId);
+            this.closeTransport(transport);
+            throw error;
+        }
+        if (superseded()) {
+            producer.close();
+            if (this.sendTransports.get(channelId) === transport) this.sendTransports.delete(channelId);
+            this.closeTransport(transport);
+            throw new Error('The broadcast was stopped.');
+        }
         this.producers.set(channelId, producer);
-        this.publishModes.set(channelId, { mode, role });
         // The input itself stopped (a USB interface unplugged, the device switched off). The
         // channel ends; say so, since the screen otherwise still looked live.
         producer.on('trackended', () => {
@@ -303,6 +339,8 @@ export class VoiceService {
         const producer = this.producers.get(channelId);
         if (!producer || producer.closed) return false;
         await producer.replaceTrack({ track });
+        const intent = this.intended.get(channelId);
+        if (intent && track) this.intended.set(channelId, { ...intent, track });
         return true;
     }
 
@@ -313,30 +351,50 @@ export class VoiceService {
      * and Start again.
      */
     private async republish() {
-        const channels = [...this.producers].map(([channelId, producer]) => ({
-            channelId, track: producer.track, ...(this.publishModes.get(channelId) ?? { mode: 'human' as const }),
-        }));
-        for (const { channelId } of channels) this.dropChannel(channelId);
-        const recordOnly = this.recordOnly;
-        if (recordOnly) {
-            this.recordOnly = null;
-            recordOnly.transport.close();
-            const track = recordOnly.producer.track;
-            if (track?.readyState === 'live') {
-                await this.publishRecordOnly(recordOnly.channelId, track).catch((error) => console.warn('Could not resume recording the original:', error));
+        // One rebuild at a time; a request arriving meanwhile runs once more afterwards.
+        if (this.republishing) { this.republishAgain = true; return; }
+        this.republishing = true;
+        window.clearTimeout(this.republishTimer);
+        this.republishTimer = 0;
+        const generation = this.broadcastGeneration;
+        let failed = false;
+        try {
+            const recordOnly = this.recordOnlyIntent;
+            if (recordOnly) {
+                this.dropRecordOnly();
+                if (recordOnly.track.readyState === 'live') {
+                    try { await this.publishRecordOnly(recordOnly.channelId, recordOnly.track); }
+                    catch (error) { failed = true; console.warn('Could not resume recording the original:', error); }
+                }
             }
-        }
-        for (const { channelId, track, mode, role } of channels) {
-            // An AI leg that is mid-reconnect has no track yet; it publishes on its own once
-            // the new OpenAI connection delivers audio.
-            if (!track || track.readyState !== 'live') continue;
-            try {
-                await this.publishTrack(channelId, track, mode, this.onPublishStatus, this.onConnectionsChange, role);
-            } catch (error) {
-                this.onPublishStatus(`Could not resume broadcasting after the media engine restarted: ${error instanceof Error ? error.message : String(error)}`);
+            for (const [channelId, { track, mode, role }] of [...this.intended]) {
+                if (generation !== this.broadcastGeneration) return;
+                this.dropChannel(channelId);
+                // An AI leg that is mid-reconnect has no live track yet; it publishes on its own
+                // once the new OpenAI connection delivers audio.
+                if (track.readyState !== 'live') continue;
+                try {
+                    await this.publishTrack(channelId, track, mode, this.onPublishStatus, this.onConnectionsChange, role);
+                } catch (error) {
+                    if (generation !== this.broadcastGeneration) return;
+                    failed = true;
+                    this.onPublishStatus(`Could not resume broadcasting yet (${error instanceof Error ? error.message : String(error)}). Trying again…`);
+                }
             }
+            if (this.muted) this.setMuted(true);
+        } finally {
+            this.republishing = false;
         }
-        if (this.muted) this.setMuted(true);
+        if (generation !== this.broadcastGeneration) return;
+        if (failed) {
+            // Keep trying with growing pauses: the channels stay in `intended` until it works
+            // or the operator stops. One failed attempt used to end recovery for good.
+            this.republishAttempt += 1;
+            this.scheduleRepublish(Math.min(30_000, 1000 * 2 ** this.republishAttempt));
+        } else {
+            this.republishAttempt = 0;
+        }
+        if (this.republishAgain) { this.republishAgain = false; void this.republish(); }
     }
 
     /**
@@ -344,30 +402,49 @@ export class VoiceService {
      * does not show as live. Used for the original speech in AI mode when it is not broadcast.
      */
     async publishRecordOnly(channelId: string, track: MediaStreamTrack) {
+        const generation = this.broadcastGeneration;
         await this.loadDevice();
-        this.stopRecordOnly();
+        this.dropRecordOnly();
+        this.recordOnlyIntent = { channelId, track };
+        const superseded = () => generation !== this.broadcastGeneration || this.recordOnlyIntent?.track !== track;
         const transport = await this.openSendTransport({ channelId, recordOnly: true });
         try {
+            if (superseded()) throw new Error('The broadcast was stopped.');
             const producer = await transport.produce({ track, stopTracks: false });
+            if (superseded()) { producer.close(); throw new Error('The broadcast was stopped.'); }
             this.recordOnly = { channelId, transport, producer };
         } catch (error) {
-            transport.close();
+            this.closeTransport(transport);
             throw error;
         }
     }
 
-    stopRecordOnly() {
+    /** The record-only producer's local objects, keeping the intent to record. */
+    private dropRecordOnly() {
         const current = this.recordOnly;
         if (!current) return;
         this.recordOnly = null;
         realtimeSocket.emit('closeRecordOnly', { producerId: current.producer.id });
         current.producer.close();
-        current.transport.close();
+        this.closeTransport(current.transport);
+    }
+
+    stopRecordOnly() {
+        this.recordOnlyIntent = null;
+        this.dropRecordOnly();
     }
 
     async startBroadcast(channelId: string, onStatus: StatusCallback, onConnectionsChange: (count: number) => void, deviceId?: string) {
+        const generation = this.broadcastGeneration;
         try {
             const stream = await this.getInputStream(deviceId);
+            // Stopped (or the page left) while Windows was opening the input: let it go again
+            // instead of broadcasting a microphone nobody asked for any more.
+            if (generation !== this.broadcastGeneration) {
+                stream.getTracks().forEach((track) => track.stop());
+                if (this.sourceStream === stream) this.sourceStream = null;
+                throw new Error('The broadcast was stopped.');
+            }
             const [track] = stream.getAudioTracks();
             if (!track) throw new Error('That input opened but produced no audio track. Choose a different device and try again.');
             await this.publishTrack(channelId, track, 'human', onStatus, onConnectionsChange);
@@ -402,10 +479,9 @@ export class VoiceService {
     /** Closes a channel's local objects only, for when the server side is already gone. */
     private dropChannel(channelId: string) {
         this.producers.get(channelId)?.close();
-        this.sendTransports.get(channelId)?.close();
+        this.closeTransport(this.sendTransports.get(channelId));
         this.producers.delete(channelId);
         this.sendTransports.delete(channelId);
-        this.publishModes.delete(channelId);
         this.listenerCounts.delete(channelId);
     }
 
@@ -415,12 +491,17 @@ export class VoiceService {
      * listener can "successfully" subscribe to silence.
      */
     stopChannel(channelId: string) {
-        this.dropChannel(channelId);
+        this.intended.delete(channelId);
         realtimeSocket.emit('closeProducer', { channelId });
+        this.dropChannel(channelId);
     }
 
     stopBroadcast() {
-        for (const channelId of [...this.producers.keys()]) this.stopChannel(channelId);
+        this.broadcastGeneration += 1;
+        window.clearTimeout(this.republishTimer);
+        this.republishTimer = 0;
+        this.republishAttempt = 0;
+        for (const channelId of new Set([...this.producers.keys(), ...this.intended.keys()])) this.stopChannel(channelId);
         this.stopRecordOnly();
         this.sourceStream?.getTracks().forEach((track) => track.stop());
         this.sourceStream = null;
@@ -458,9 +539,8 @@ export class VoiceService {
         const stale = () => attempt !== this.listenAttempt;
         try {
             this.consumer?.close();
-            this.recvTransport?.close();
             this.consumer = null;
-            this.recvTransport = null;
+            this.closeRecvTransport();
             onStatus('connecting');
             await this.loadDevice();
             const transportInfo = await realtimeSocket.request<TransportResponse>('createWebRtcTransport', { type: 'consumer' });
@@ -484,10 +564,11 @@ export class VoiceService {
             const consumeInfo = await realtimeSocket.request<ConsumeResponse>('consume', {
                 transportId: recvTransport.id, rtpCapabilities: this.device!.rtpCapabilities, channelId,
             });
-            if (stale()) { recvTransport.close(); return; }
-            if (consumeInfo.error) { onStatus('waiting'); return; }
+            if (stale()) { this.closeTransport(recvTransport); return; }
+            // No broadcast yet: give the transport back now; a fresh one is made on retry.
+            if (consumeInfo.error) { this.closeRecvTransport(); onStatus('waiting'); return; }
             const consumer = await recvTransport.consume(consumeInfo);
-            if (stale()) { consumer.close(); recvTransport.close(); return; }
+            if (stale()) { consumer.close(); this.closeTransport(recvTransport); return; }
             this.consumer = consumer;
             this.consumer.on('transportclose', () => this.handleStreamLoss());
             this.consumer.on('trackended', () => this.handleStreamLoss());
@@ -507,14 +588,20 @@ export class VoiceService {
         if (this.currentListenerChannelId) this.onListenerStatus?.('waiting');
     }
 
+    /** The listening transport, closed here and on the server, so the phone stops counting as a listener. */
+    private closeRecvTransport() {
+        const transport = this.recvTransport;
+        this.recvTransport = null;
+        this.closeTransport(transport);
+    }
+
     stopListening() {
         this.listenAttempt += 1;
         this.currentListenerChannelId = null;
         this.onMuteStatusChange = undefined;
         this.consumer?.close();
-        this.recvTransport?.close();
         this.consumer = null;
-        this.recvTransport = null;
+        this.closeRecvTransport();
         if (!this.producers.size) this.device = null;
     }
 

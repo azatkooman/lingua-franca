@@ -314,6 +314,23 @@ async function run() {
         return '302 to https://…:4173';
     });
 
+    await check('malformed signalling from any phone never throws inside the server', async () => {
+        const phone = await connect('', LISTENER_BASE);
+        // No acknowledgement, a null payload, a string payload, an array: each used to be able
+        // to raise inside a handler, and a missing callback crashed the process.
+        phone.emit('getRouterRtpCapabilities');
+        phone.emit('consume', null);
+        phone.emit('produce', 'not an object');
+        phone.emit('createWebRtcTransport', [1, 2, 3]);
+        phone.emit('closeTransport');
+        phone.emit('getTranscript', null);
+        await sleep(300);
+        assert.equal((await json('/api/health')).status, 200, 'the server is still up');
+        const reply = await ask(phone, 'getTranscript', { channelId: 'english' });
+        assert.ok(Array.isArray(reply.segments), 'the same socket still works');
+        return 'six malformed events, server and socket fine';
+    });
+
     await check('a socket on the plain listener port can listen but never broadcast, even with a token', async () => {
         const socket = await connect(token, LISTENER_BASE);
         const producer = await ask(socket, 'createWebRtcTransport', { type: 'producer' });
@@ -434,6 +451,8 @@ async function run() {
     });
 
     let interpreterToken;
+    // A second interpreter, on the other channel, signed in before the lockout check below.
+    let spareInterpreterToken;
     let channelId;
     await check('an interpreter link works once and only once', async () => {
         const { body: settings } = await json('/api/admin/settings', { headers: authed(token) });
@@ -447,6 +466,12 @@ async function run() {
         });
         assert.equal(first.status, 200);
         interpreterToken = first.body.token;
+        const { body: spareLink } = await json('/api/admin/interpreter-link', {
+            method: 'POST', headers: authed(token), body: JSON.stringify({ channelId: settings.languages[1].id }),
+        });
+        spareInterpreterToken = (await json('/api/interpreter/login', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: spareLink.code }),
+        })).body.token;
         const replay = await json('/api/interpreter/login', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: link.code }),
         });
@@ -520,6 +545,48 @@ async function run() {
             await ask(operator, 'closeProducer', { channelId: second });
         }
         return 'both channels told their current count';
+    });
+
+    await check('listening to a channel with no broadcast leaves no transport behind', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const phone = await connect('', LISTENER_BASE);
+        const capabilities = await new Promise((resolve) => phone.emit('getRouterRtpCapabilities', resolve));
+        const { body: settings } = await json('/api/settings');
+        const offline = settings.languages.find((language) => !language.activePeerId);
+        assert.ok(offline, 'a channel that is off air');
+        const transport = await ask(phone, 'createWebRtcTransport', { type: 'consumer' });
+        const reply = await ask(phone, 'consume', { transportId: transport.id, rtpCapabilities: capabilities, channelId: offline.id });
+        assert.match(reply.error || '', /Waiting/);
+        assert.equal(reply.transportClosed, true);
+        const reuse = await ask(phone, 'connectTransport', { transportId: transport.id, dtlsParameters: FAKE_DTLS });
+        assert.match(reuse.error || '', /not found/, 'the server closed it');
+        phone.close();
+        return 'transport closed on the server';
+    });
+
+    await check('a phone that stops listening is no longer counted', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const { body: settings } = await json('/api/settings');
+        const channel = settings.languages[1].id;
+        const operator = await connect(token);
+        assert.ok((await produce(operator, channel, 4545)).id);
+        const phone = await connect('', LISTENER_BASE);
+        const count = async () => (await json('/api/admin/live', { headers: authed(token) })).body.channels.find((entry) => entry.id === channel).listeners;
+        try {
+            const capabilities = await new Promise((resolve) => phone.emit('getRouterRtpCapabilities', resolve));
+            const transport = await ask(phone, 'createWebRtcTransport', { type: 'consumer' });
+            assert.ok((await ask(phone, 'consume', { transportId: transport.id, rtpCapabilities: capabilities, channelId: channel })).id);
+            const listening = await count();
+            // Stop, with the socket still connected (it carries settings and captions too).
+            assert.equal((await ask(phone, 'closeTransport', { transportId: transport.id })).ok, true);
+            await sleep(200);
+            assert.equal(await count(), listening - 1, 'one fewer listener while the phone stays connected');
+            assert.equal(phone.connected, true);
+        } finally {
+            phone.close();
+            await ask(operator, 'closeProducer', { channelId: channel });
+        }
+        return 'counted, then not counted';
     });
 
     await check('the dashboard shows each live channel with its listeners and peak', async () => {
@@ -656,13 +723,29 @@ async function run() {
         const phone = await connect(interpreterToken);
         const notified = waitFor(phone, 'sessionRevoked', 5000);
         const disconnected = waitFor(phone, 'disconnect', 5000);
+        // The spare interpreter is on air: ending access must take it off air too, not only
+        // end its session.
+        const spareChannel = (await json('/api/settings')).body.languages[1].id;
+        let onAir = 'skipped (no media worker)';
+        if (sfuReady) {
+            const spare = await connect(spareInterpreterToken);
+            const produced = await produce(spare, spareChannel, 5656);
+            assert.ok(produced.id, `the spare interpreter is on air: ${produced.error}`);
+            assert.equal(await channelMode(spareChannel), 'sfu-active');
+        }
         const { status, body } = await json('/api/admin/interpreter-sessions/revoke', { method: 'POST', headers: authed(token) });
         assert.equal(status, 200);
         assert.ok(body.sessions >= 1, `revoked ${body.sessions}`);
         await notified;
         await disconnected;
         assert.equal((await json('/api/diagnostics', { headers: authed(interpreterToken) })).status, 401);
-        return `${body.sessions} session(s) ended`;
+        if (sfuReady) {
+            assert.ok(body.broadcasts >= 1, `broadcasts ended: ${body.broadcasts}`);
+            await sleep(300);
+            assert.equal(await channelMode(spareChannel), undefined, 'the interpreter broadcast is off air');
+            onAir = 'broadcast off air';
+        }
+        return `${body.sessions} session(s) ended, ${onAir}`;
     });
 
     await check('ending interpreter access requires an operator session', async () => {

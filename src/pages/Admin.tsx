@@ -56,7 +56,13 @@ export default function Admin() {
     const refreshHealth = () => fetchAdminHealth(settingsService.getAdminToken()).then(setHealth);
 
     useEffect(() => settingsService.subscribeAdmin(setSettings), []);
-    useEffect(() => { void refreshHealth(); }, []);
+    // Kept current while Admin is open: a changed network address, a media engine that restarted
+    // or a failed renewal used to show only after reopening the page.
+    useEffect(() => {
+        void refreshHealth();
+        const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refreshHealth(); }, 15_000);
+        return () => window.clearInterval(timer);
+    }, []);
 
     // A choice for a channel that has since been removed falls back to the first channel.
     const existingChannel = (id: string) => (settings?.languages.some((language) => language.id === id) ? id : settings?.languages[0]?.id ?? '');

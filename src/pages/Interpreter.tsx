@@ -20,6 +20,11 @@ export default function Interpreter() {
     const isDesktopApp = voiceService.isDesktopApp();
     const [mode, setMode] = useState<'human' | 'ai'>('human');
     const [isLive, setIsLive] = useState(false);
+    // A start in progress: the button waits for it rather than starting a second broadcast.
+    // The ref is the guard (state only updates on the next render, so quick clicks got past
+    // it); the state greys the button out.
+    const [starting, setStarting] = useState(false);
+    const startingRef = useRef(false);
     const [status, setStatus] = useState(t('offline'));
     const [humanChannelId, setHumanChannelId] = useState(authorizedChannelId);
     const [sourceChannelId, setSourceChannelId] = useState('');
@@ -64,6 +69,12 @@ export default function Interpreter() {
         setTargetIds((current) => (current.size || !target ? current : new Set([target.id])));
     }, [languages, authorizedChannelId]);
 
+    // The chosen input is not connected right now. It stays chosen and is shown as missing,
+    // so starting fails visibly instead of picking another microphone.
+    const selectedMissing = Boolean(selectedMic) && (selectedMic === SYSTEM_AUDIO_DEVICE_ID
+        ? !isDesktopApp
+        : !microphones.some((microphone) => microphone.deviceId === selectedMic));
+
     const targetCandidates = useMemo(
         () => languages.filter((language) => language.id !== sourceChannelId),
         [languages, sourceChannelId],
@@ -87,10 +98,10 @@ export default function Interpreter() {
             const devices = await voiceService.getMicrophones(requestPermission);
             setMicrophones(devices);
             const remembered = localStorage.getItem('lingua_franca_microphone') || '';
-            setSelectedMic((current) => {
-                const preferred = current || remembered;
-                return devices.some((device) => device.deviceId === preferred) ? preferred : '';
-            });
+            // Keep the operator's choice even when that input is not in the list: switching to
+            // the default microphone here quietly undid the "no silent fallback" rule, and
+            // reset "System output", which is never in the list at all.
+            setSelectedMic((current) => current || remembered);
             if (!devices.length && !liveRef.current) setStatus(t('no_input_detected'));
         } catch (error) {
             setMicrophones([]);
@@ -149,6 +160,9 @@ export default function Interpreter() {
     };
 
     const startBroadcast = async () => {
+        if (startingRef.current) return;
+        startingRef.current = true;
+        setStarting(true);
         setStatus(t('starting'));
         try {
             if (mode === 'human') {
@@ -175,6 +189,9 @@ export default function Interpreter() {
             setStatus(error instanceof Error ? error.message : String(error));
             realtimeTranslationService.stop();
             voiceService.stopBroadcast();
+        } finally {
+            startingRef.current = false;
+            setStarting(false);
         }
     };
 
@@ -198,13 +215,15 @@ export default function Interpreter() {
 
                 <label>{t('select_mic')}</label>
                 <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                    <select className="custom-select" value={selectedMic} disabled={isLive} onChange={(event) => { setSelectedMic(event.target.value); localStorage.setItem('lingua_franca_microphone', event.target.value); }}>
+                    <select className="custom-select" value={selectedMic} disabled={isLive || starting} onChange={(event) => { setSelectedMic(event.target.value); localStorage.setItem('lingua_franca_microphone', event.target.value); }}>
                         <option value="">{t('default_input')}</option>
                         {isDesktopApp && <option value={SYSTEM_AUDIO_DEVICE_ID}>{t('system_output_input')}</option>}
+                        {selectedMissing && <option value={selectedMic}>{t('input_missing_option')}</option>}
                         {microphones.map((microphone, index) => <option key={microphone.deviceId || `input-${index}`} value={microphone.deviceId}>{microphone.label || `Audio input ${index + 1}`}</option>)}
                     </select>
                     <button className="btn-secondary" disabled={isLive} onClick={() => void refreshMicrophones(true)} title={t('refresh_inputs')} aria-label={t('refresh_inputs')}><RefreshCw size={18} /></button>
                 </div>
+                {selectedMissing && <p className="text-danger">{t('input_missing_hint')}</p>}
                 <p className="text-muted">{t('inputs_detected', { count: microphones.length })}</p>
                 {isDesktopApp && <p className="text-muted">{t('mic_privacy_status')} <strong>{microphoneAccess}</strong></p>}
 
@@ -259,7 +278,7 @@ export default function Interpreter() {
                 </div>
 
                 <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
-                    <button className={isLive ? 'btn-danger' : 'btn-primary'} onClick={() => void (isLive ? stopBroadcast() : startBroadcast())}>{isLive ? <><Square size={18} /> {t('stop_audio')}</> : <><Radio size={18} /> {t('start_broadcast')}</>}</button>
+                    <button className={isLive ? 'btn-danger' : 'btn-primary'} disabled={starting} onClick={() => void (isLive ? stopBroadcast() : startBroadcast())}>{isLive ? <><Square size={18} /> {t('stop_audio')}</> : <><Radio size={18} /> {t('start_broadcast')}</>}</button>
                     {isLive && <button className="btn-secondary" onClick={toggleMute}>{isMuted ? t('unmute_source') : t('mute_source')}</button>}
                 </div>
             </div>

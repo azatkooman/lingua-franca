@@ -24,6 +24,8 @@ export default function Interpreter() {
     const [humanChannelId, setHumanChannelId] = useState(authorizedChannelId);
     const [sourceChannelId, setSourceChannelId] = useState('');
     const [targetIds, setTargetIds] = useState<Set<string>>(new Set());
+    // AI mode can also put the speaker's own audio and captions on the source channel.
+    const [floorChannel, setFloorChannel] = useState(true);
     const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([]);
     const [selectedMic, setSelectedMic] = useState('');
     const [isMuted, setIsMuted] = useState(false);
@@ -170,7 +172,7 @@ export default function Interpreter() {
                 const source = languages.find((language) => language.id === sourceChannelId);
                 const targetLanguages = languages.filter((language) => targetIds.has(language.id) && language.id !== sourceChannelId);
                 if (!source || !targetLanguages.length) throw new Error(t('choose_source_target'));
-                await realtimeTranslationService.start(source, targetLanguages, selectedMic, setStatus, updateTranscript, setListeners);
+                await realtimeTranslationService.start(source, targetLanguages, selectedMic, setStatus, updateTranscript, setListeners, { floorChannel });
                 const stream = voiceService.getBroadcastStream();
                 if (stream) meterCleanup.current = voiceService.createLevelMeter(stream, setSignalLevel);
                 setStatus(t('openai_live'));
@@ -249,6 +251,10 @@ export default function Interpreter() {
                                 })}>{language.name}</button>
                             ))}
                         </div>
+                        <label className="checkbox-row mt-4">
+                            <input type="checkbox" checked={floorChannel} disabled={isLive} onChange={(event) => setFloorChannel(event.target.checked)} />
+                            <span>{t('floor_channel_option', { channel: languageName(sourceChannelId) })}</span>
+                        </label>
                     </>
                 )}
 

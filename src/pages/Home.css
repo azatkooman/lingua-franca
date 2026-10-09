@@ -1,55 +1,38 @@
 .home-container {
-    height: 100vh;
+    flex: 1;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 2rem;
+    padding: 2rem 1rem 1.5rem;
     position: relative;
     background: radial-gradient(circle at top right, rgba(139, 92, 246, 0.1), transparent 40%),
         radial-gradient(circle at bottom left, rgba(16, 185, 129, 0.05), transparent 40%);
 }
 
-.language-toggle {
-    position: fixed;
-    top: 1.5rem;
-    right: 1.5rem;
-    display: flex;
-    align-items: center;
+.home-event {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    margin: -1.5rem auto 2.5rem;
+    padding: 0.75rem 1.5rem;
+    border-radius: var(--radius-md);
     background: var(--surface-1);
-    padding: 4px;
-    border-radius: 20px;
     border: 1px solid var(--border);
-    z-index: 1000;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
 }
 
-.lang-btn {
-    background: none;
-    border: none;
+.home-event strong {
+    font-size: 1.15rem;
+}
+
+.home-event span {
     color: var(--text-muted);
-    padding: 4px 12px;
-    cursor: pointer;
-    font-size: 0.8rem;
-    font-weight: 600;
-    transition: all 0.2s;
-    border-radius: 16px;
+    font-size: 0.95rem;
 }
 
-.lang-btn.active {
-    background: var(--primary);
-    color: white;
-}
-
-.lang-btn:hover:not(.active) {
-    color: var(--text-main);
-}
-
-.language-toggle .divider {
-    width: 1px;
-    height: 12px;
-    background: var(--border);
-    margin: 0 4px;
+.mode-card {
+    font: inherit;
+    color: inherit;
 }
 
 .hero {
@@ -72,7 +55,7 @@
     font-weight: 800;
     letter-spacing: -2px;
     margin-bottom: 1rem;
-    background: linear-gradient(to bottom right, #fff, #94a3b8);
+    background: linear-gradient(to bottom right, var(--title-from), var(--title-to));
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
 }
@@ -114,7 +97,7 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, transparent 100%);
+    background: linear-gradient(135deg, var(--tint) 0%, transparent 100%);
     opacity: 0;
     transition: opacity 0.4s;
 }
@@ -122,7 +105,7 @@
 .mode-card:hover {
     transform: translateY(-8px);
     border-color: var(--primary);
-    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 20px 40px var(--shadow-strong);
 }
 
 .mode-card:hover::before {
@@ -161,8 +144,7 @@
 }
 
 .admin-footer {
-    position: absolute;
-    bottom: 2rem;
+    margin-top: 2rem;
 }
 
 .btn-icon-text {
@@ -178,7 +160,7 @@
 
 .btn-icon-text:hover {
     color: var(--text-main);
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--tint);
 }
 
 @media (max-width: 640px) {
@@ -186,7 +168,49 @@
         font-size: 2.5rem;
     }
 
+    .hero-mark {
+        width: 4.5rem;
+        height: 4.5rem;
+    }
+
+    .subtitle {
+        font-size: 1.05rem;
+        margin-bottom: 2rem;
+    }
+
+    .home-event {
+        margin: -0.75rem auto 1.75rem;
+    }
+
+    /* Compact rows on a phone, so both choices fit on the first screen. */
     .action-grid {
         grid-template-columns: 1fr;
+        gap: 0.9rem;
+    }
+
+    .mode-card {
+        flex-direction: row;
+        gap: 1rem;
+        padding: 1.1rem 1.25rem;
+        text-align: left;
+    }
+
+    .mode-card:hover {
+        transform: none;
+    }
+
+    .icon-circle {
+        width: 56px;
+        height: 56px;
+        flex-shrink: 0;
+    }
+
+    .icon-circle svg {
+        width: 28px;
+        height: 28px;
+    }
+
+    .mode-card h3 {
+        font-size: 1.15rem;
     }
 }

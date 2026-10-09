@@ -18,6 +18,10 @@ interface ActiveSession {
     originalText: string;
     startedAt: number;
     firstOutputAt?: number;
+    // Caption sentence ids: a key per OpenAI connection plus a running number, so listeners
+    // update one line while it grows and start a new line after each finished sentence.
+    segmentKey: string;
+    segment: number;
 }
 
 interface Recording {
@@ -55,6 +59,12 @@ class RealtimeTranslationService {
     private reconnectAttempts = new Map<string, number>();
     private reconnectTimers = new Map<string, number>();
     private stopReplacedWatch: (() => void) | null = null;
+    // When set, the speaker's own audio and original-language captions also go out on the
+    // source language's channel, for people outside the room or who are hard of hearing.
+    private floorChannel: Language | null = null;
+    // The one target whose input transcript feeds those captions; every target hears the same
+    // speech, so using them all would print each sentence once per language.
+    private captionLead: string | null = null;
 
     async start(
         sourceLanguage: Language,
@@ -63,6 +73,7 @@ class RealtimeTranslationService {
         onStatus: (message: string) => void,
         onUpdate: (update: TranslationUpdate) => void,
         onListeners: (count: number) => void,
+        options: { floorChannel?: boolean } = {},
     ) {
         if (!targets.length) throw new Error('Select at least one target language.');
         if (!settingsService.getAdminSettings()?.openaiConfigured) throw new Error('Add an OpenAI API key in Admin settings first.');
@@ -73,8 +84,19 @@ class RealtimeTranslationService {
         // If the operator hands one of these channels to another broadcaster, stop paying for
         // its OpenAI leg, and stop it from reconnecting and taking the channel back.
         this.stopReplacedWatch?.();
-        this.stopReplacedWatch = voiceService.onProducerReplaced((channelId) => this.dropTarget(channelId));
+        this.stopReplacedWatch = voiceService.onProducerReplaced((channelId) => {
+            if (channelId === this.floorChannel?.id) this.floorChannel = null;
+            else this.dropTarget(channelId);
+        });
+        this.floorChannel = options.floorChannel ? sourceLanguage : null;
+        this.captionLead = targets[0]?.id ?? null;
         this.sourceStream = await voiceService.getInputStream(deviceId);
+        if (this.floorChannel) {
+            const [floorTrack] = this.sourceStream.getAudioTracks();
+            // Published as 'ai' because the channel carries live captions, which tells phones
+            // to show the transcript rather than the audio-only notice.
+            if (floorTrack) await voiceService.publishTrack(this.floorChannel.id, floorTrack, 'ai', onStatus, onListeners);
+        }
         if (settingsService.getAdminSettings()?.recordingEnabled) this.recordStream(this.sourceStream, 'source');
         await Promise.all(targets.map((target) => this.startTarget(target)));
     }
@@ -95,6 +117,7 @@ class RealtimeTranslationService {
         peer.addTrack(sourceTrack, new MediaStream([sourceTrack]));
         const session: ActiveSession = {
             peer, target, sourceTrack, translatedText: '', originalText: '', startedAt: performance.now(),
+            segmentKey: `${target.id}-${Date.now().toString(36)}`, segment: 1,
         };
         this.sessions.set(target.id, session);
         const isCurrent = () => !this.stopping && this.sessions.get(target.id) === session;
@@ -123,6 +146,18 @@ class RealtimeTranslationService {
             }
         };
 
+        const sendCaptions = (final: boolean) => {
+            const segmentId = `${session.segmentKey}-${session.segment}`;
+            voiceService.sendTranslationText(target.id, {
+                segmentId, text: session.translatedText, originalText: session.originalText, final,
+            });
+            if (this.floorChannel && this.captionLead === target.id && session.originalText) {
+                voiceService.sendTranslationText(this.floorChannel.id, {
+                    segmentId: `${segmentId}-original`, text: session.originalText, originalText: '', final,
+                });
+            }
+        };
+
         const events = peer.createDataChannel('oai-events');
         events.onmessage = ({ data }) => {
             try {
@@ -142,11 +177,14 @@ class RealtimeTranslationService {
                         latencyMs: session.firstOutputAt ? Math.round(session.firstOutputAt - session.startedAt) : undefined,
                     };
                     context.onUpdate(update);
-                    voiceService.sendTranslationText(target.id, update.translatedText, update.originalText);
+                    sendCaptions(false);
                 }
                 if (event.type === 'session.output_transcript.done') {
+                    // Mark the sentence finished on every phone, then start a new line.
+                    if (session.translatedText || session.originalText) sendCaptions(true);
                     session.translatedText = ''; session.originalText = '';
                     session.startedAt = performance.now(); session.firstOutputAt = undefined;
+                    session.segment += 1;
                 }
                 if (event.type === 'error') context.onStatus(`OpenAI ${target.name}: ${event.error?.message || 'unknown error'}`);
             } catch (error) { console.error('Invalid OpenAI realtime event:', error); }
@@ -222,6 +260,7 @@ class RealtimeTranslationService {
         this.reconnectTimers.delete(targetId);
         this.reconnectAttempts.delete(targetId);
         this.targets.delete(targetId);
+        if (this.captionLead === targetId) this.captionLead = [...this.targets.keys()][0] ?? null;
         const session = this.sessions.get(targetId);
         this.sessions.delete(targetId);
         if (session) this.closeSession(session);
@@ -254,6 +293,9 @@ class RealtimeTranslationService {
         this.reconnectAttempts.clear();
         // A target that is between reconnect attempts has no session but is still published.
         const channelIds = new Set([...this.sessions.keys(), ...this.targets.keys()]);
+        if (this.floorChannel) channelIds.add(this.floorChannel.id);
+        this.floorChannel = null;
+        this.captionLead = null;
         for (const targetId of channelIds) voiceService.stopChannel(targetId);
         for (const session of this.sessions.values()) this.closeSession(session);
         this.sessions.clear();

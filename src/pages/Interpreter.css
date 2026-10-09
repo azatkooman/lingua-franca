@@ -18,7 +18,7 @@
 }
 
 .btn-icon:hover {
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--tint-strong);
     transform: scale(1.05);
 }
 
@@ -89,7 +89,7 @@
     width: 100%;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    color: white;
+    color: var(--text-main);
     padding: 1rem;
     border-radius: var(--radius-md);
     font-size: 1.1rem;
@@ -129,7 +129,7 @@
 }
 
 .mic-inactive:hover {
-    background: #2d3247;
+    background: var(--surface-hover);
     transform: scale(1.05);
 }
 
@@ -157,7 +157,7 @@
     height: 32px !important;
     width: auto !important;
     padding: 0 1rem !important;
-    border-right: 1px solid rgba(255, 255, 255, 0.1);
+    border-right: 1px solid var(--border);
 }
 
 .stat-value {
@@ -190,7 +190,7 @@
 }
 
 .tab-btn:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.08) !important;
+    background: var(--tint-strong) !important;
 }
 
 .tab-btn.active {
@@ -216,7 +216,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     color: var(--text-muted);
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--tint-weak);
     cursor: pointer;
 }
 
@@ -224,4 +224,50 @@
     color: white;
     border-color: var(--primary);
     background: var(--primary);
+}
+
+.checkbox-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    cursor: pointer;
+    line-height: 1.4;
+}
+
+.checkbox-row input {
+    margin-top: 0.2rem;
+    width: 1.1rem;
+    height: 1.1rem;
+    accent-color: var(--primary);
+}
+
+/* Target channel picker. */
+.channel-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.channel-btn {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    padding: 1rem;
+    border-radius: var(--radius-md);
+    color: var(--text-main);
+    font-size: 1.1rem;
+    text-align: left;
+    transition: all var(--transition-fast);
+}
+
+.channel-btn:hover {
+    background: var(--tint);
+}
+
+.channel-btn.selected {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: white;
+    box-shadow: 0 4px 15px var(--primary-glow);
 }

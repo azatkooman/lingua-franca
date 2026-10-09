@@ -1,5 +1,5 @@
-import { BrowserRouter, Link, Navigate, Routes, Route } from 'react-router-dom';
-import LogoMark from './components/LogoMark';
+import { BrowserRouter, Navigate, Routes, Route } from 'react-router-dom';
+import AppHeader from './components/AppHeader';
 import Home from './pages/Home';
 import Admin from './pages/Admin';
 import Interpreter from './pages/Interpreter';
@@ -12,12 +12,7 @@ function App() {
   return (
     <BrowserRouter>
       <div className="app-container">
-        <header className="app-header">
-          <Link to="/" className="logo-container" aria-label="Lingua Franca home">
-            <LogoMark className="logo-icon" />
-            <h1>Lingua<span className="logo-accent">Franca</span></h1>
-          </Link>
-        </header>
+        <AppHeader />
 
         <main className="app-main">
           <Routes>

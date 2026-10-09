@@ -10,6 +10,19 @@ type StatusCallback = (status: string) => void;
 export type ListenerStatus = 'connecting' | 'receiving' | 'waiting' | 'restarting' | 'error';
 type ListenerStatusCallback = (status: ListenerStatus) => void;
 
+/**
+ * One caption sentence. The broadcaster sends the same id repeatedly while the sentence
+ * grows, then once more with `final` set, so the screen updates a line in place.
+ */
+export interface CaptionSegment {
+    id: string;
+    text: string;
+    originalText: string;
+    final: boolean;
+    at: number;
+}
+type CaptionCallback = (segment: CaptionSegment) => void;
+
 interface TransportResponse {
     id: string;
     iceParameters: mediasoupClient.types.IceParameters;
@@ -36,9 +49,12 @@ export class VoiceService {
     private recvTransport: mediasoupClient.types.Transport | null = null;
     private consumer: mediasoupClient.types.Consumer | null = null;
     private currentListenerChannelId: string | null = null;
+    // Bumped on every listen attempt, so a slow handshake for a channel the listener has
+    // already switched away from cannot finish last and take over.
+    private listenAttempt = 0;
     private onListenerStatus?: ListenerStatusCallback;
     private onListenerStreamReceived?: (stream: MediaStream) => void;
-    private onTranslationTextReceived?: (text: string, originalText: string) => void;
+    private onTranslationTextReceived?: CaptionCallback;
     private onMuteStatusChange?: (muted: boolean) => void;
     private onConnectionsChange?: (count: number) => void;
     private onPublishStatus: StatusCallback = () => undefined;
@@ -152,8 +168,8 @@ export class VoiceService {
             this.onConnectionsChange?.(this.totalListeners());
             this.replacedHandlers.forEach((handler) => handler(channelId));
         });
-        realtimeSocket.on<{ channelId: string; text: string; originalText: string }>('translationText', ({ channelId, text, originalText }) => {
-            if (this.currentListenerChannelId === channelId) this.onTranslationTextReceived?.(text, originalText);
+        realtimeSocket.on<CaptionSegment & { channelId: string }>('translationText', ({ channelId, ...segment }) => {
+            if (this.currentListenerChannelId === channelId) this.onTranslationTextReceived?.(segment);
         });
         realtimeSocket.on<{ channelId: string; muted: boolean }>('channelMuted', ({ channelId, muted }) => {
             if (this.currentListenerChannelId === channelId) this.onMuteStatusChange?.(muted);
@@ -292,8 +308,14 @@ export class VoiceService {
         for (const track of this.sourceStream?.getAudioTracks() || []) track.enabled = !muted;
     }
 
-    sendTranslationText(channelId: string, text: string, originalText: string) {
-        realtimeSocket.emit('sendTranslationText', { channelId, text, originalText });
+    sendTranslationText(channelId: string, segment: { segmentId: string; text: string; originalText: string; final: boolean }) {
+        realtimeSocket.emit('sendTranslationText', { channelId, ...segment });
+    }
+
+    /** The channel's recent captions, so a phone joining mid-talk does not start blank. */
+    async getTranscript(channelId: string) {
+        const result = await realtimeSocket.request<{ segments?: CaptionSegment[]; error?: string }>('getTranscript', { channelId });
+        return result?.segments ?? [];
     }
 
     /** Closes a channel's local objects only, for when the server side is already gone. */
@@ -331,7 +353,7 @@ export class VoiceService {
         onStatus: ListenerStatusCallback,
         onStreamReceived: (stream: MediaStream) => void,
         onMuteStatusChange?: (muted: boolean) => void,
-        onTranslationTextReceived?: (text: string, originalText: string) => void,
+        onTranslationTextReceived?: CaptionCallback,
     ) {
         this.currentListenerChannelId = channelId;
         this.onListenerStatus = onStatus;
@@ -350,6 +372,8 @@ export class VoiceService {
         const channelId = this.currentListenerChannelId;
         if (!channelId) return;
         const onStatus = this.onListenerStatus ?? (() => undefined);
+        const attempt = ++this.listenAttempt;
+        const stale = () => attempt !== this.listenAttempt;
         try {
             this.consumer?.close();
             this.recvTransport?.close();
@@ -359,6 +383,7 @@ export class VoiceService {
             await this.loadDevice();
             const transportInfo = await realtimeSocket.request<TransportResponse>('createWebRtcTransport', { type: 'consumer' });
             if (transportInfo.error) throw new Error(transportInfo.error);
+            if (stale()) return;
             const recvTransport = this.device!.createRecvTransport(transportInfo);
             this.recvTransport = recvTransport;
             recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
@@ -368,14 +393,18 @@ export class VoiceService {
             const consumeInfo = await realtimeSocket.request<ConsumeResponse>('consume', {
                 transportId: recvTransport.id, rtpCapabilities: this.device!.rtpCapabilities, channelId,
             });
+            if (stale()) { recvTransport.close(); return; }
             if (consumeInfo.error) { onStatus('waiting'); return; }
-            this.consumer = await recvTransport.consume(consumeInfo);
+            const consumer = await recvTransport.consume(consumeInfo);
+            if (stale()) { consumer.close(); recvTransport.close(); return; }
+            this.consumer = consumer;
             this.consumer.on('transportclose', () => this.handleStreamLoss());
             this.consumer.on('trackended', () => this.handleStreamLoss());
             this.onMuteStatusChange?.(Boolean(consumeInfo.producerPaused));
             onStatus('receiving');
             this.onListenerStreamReceived?.(new MediaStream([this.consumer.track]));
         } catch (error) {
+            if (stale()) return;
             console.error('Listen failed:', error);
             onStatus(error instanceof Error && /waiting/i.test(error.message) ? 'waiting' : 'error');
         }
@@ -388,6 +417,7 @@ export class VoiceService {
     }
 
     stopListening() {
+        this.listenAttempt += 1;
         this.currentListenerChannelId = null;
         this.onMuteStatusChange = undefined;
         this.consumer?.close();

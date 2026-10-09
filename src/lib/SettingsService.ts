@@ -8,11 +8,40 @@ export interface Language {
     activePeerId?: 'sfu-active' | 'ai-active';
 }
 
+export type InterfaceLanguage = 'en' | 'ru' | 'kk';
+
+/** Shown on every listener screen. Dates are calendar days, YYYY-MM-DD, or empty. */
+export interface EventInfo {
+    name: string;
+    startDate: string;
+    endDate: string;
+}
+
+/** Who listeners can reach behind the header's phone button. Empty fields are hidden. */
+export interface ContactInfo {
+    name: string;
+    phone: string;
+    whatsapp: string;
+    telegram: string;
+    email: string;
+}
+
 /** What every listener device is allowed to see. Deliberately small. */
 export interface AppSettings {
     languages: Language[];
-    interfaceLanguage?: 'en' | 'ru';
+    interfaceLanguage?: InterfaceLanguage;
+    event?: EventInfo;
+    contact?: ContactInfo;
 }
+
+// The listener-visible part of the operator payload. Rebuilding it by hand dropped any field
+// added later, so it is picked in one place.
+const publicPart = (settings: AppSettings): AppSettings => ({
+    languages: settings.languages,
+    interfaceLanguage: settings.interfaceLanguage,
+    event: settings.event,
+    contact: settings.contact,
+});
 
 /** Operator-only configuration, fetched separately once an admin session exists. */
 export interface AdminSettings extends AppSettings {
@@ -118,7 +147,7 @@ class SettingsService {
     private async loadAdminSettings() {
         const response = await this.adminRequest('/api/admin/settings');
         this.admin = await response.json() as AdminSettings;
-        this.settings = { languages: this.admin.languages, interfaceLanguage: this.admin.interfaceLanguage };
+        this.settings = publicPart(this.admin);
         this.notifyAdmin();
         this.notify();
         return this.admin;
@@ -151,7 +180,7 @@ class SettingsService {
     private async patchAdminSettings(patch: Record<string, unknown>) {
         const response = await this.adminRequest('/api/admin/settings', { method: 'PATCH', body: JSON.stringify(patch) });
         this.admin = await response.json() as AdminSettings;
-        this.settings = { languages: this.admin.languages, interfaceLanguage: this.admin.interfaceLanguage };
+        this.settings = publicPart(this.admin);
         this.cache();
         this.notifyAdmin();
         this.notify();
@@ -275,7 +304,9 @@ class SettingsService {
 
     async setAdminPin(adminPin: string) { await this.patchAdminSettings({ adminPin }); }
     /** The interface language a phone uses until it picks EN or RU itself. */
-    async setInterfaceLanguage(interfaceLanguage: 'en' | 'ru') { await this.patchAdminSettings({ interfaceLanguage }); }
+    async setInterfaceLanguage(interfaceLanguage: InterfaceLanguage) { await this.patchAdminSettings({ interfaceLanguage }); }
+    async setEvent(event: EventInfo) { await this.patchAdminSettings({ event }); }
+    async setContact(contact: ContactInfo) { await this.patchAdminSettings({ contact }); }
     async setOpenAiApiKey(openaiApiKey: string) { await this.patchAdminSettings({ openaiApiKey }); }
     async clearOpenAiApiKey() { await this.patchAdminSettings({ clearOpenaiApiKey: true }); }
     async setPreferredAddress(preferredAddress: string) { await this.patchAdminSettings({ preferredAddress }); }

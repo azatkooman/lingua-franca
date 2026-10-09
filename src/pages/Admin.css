@@ -69,7 +69,7 @@
     /* Force white background for QR contrast */
     padding: 2rem;
     border-radius: var(--radius-lg);
-    box-shadow: 0 15px 40px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 15px 40px var(--shadow-strong);
 }
 
 /* Language Editor */
@@ -247,7 +247,7 @@ textarea.custom-input {
 }
 
 .text-danger:hover {
-    color: #ef4444;
+    color: var(--danger);
 }
 
 .mt-2 {
@@ -289,7 +289,7 @@ textarea.custom-input {
     padding: 1rem;
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
-    background: rgba(255, 255, 255, 0.025);
+    background: var(--tint-weak);
 }
 
 .language-actions {
@@ -305,4 +305,21 @@ textarea.custom-input {
 @media (max-width: 640px) {
     .add-language-form { flex-direction: column; align-items: stretch; }
     .language-item { align-items: flex-start; }
+}
+
+/* Two fields side by side on wide screens, stacked on phones. */
+.form-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+}
+
+.admin-sign-out {
+    width: auto;
+    padding: 0.6rem 1rem;
+}
+
+.card-hint {
+    margin: 0 0 1rem;
+    line-height: 1.45;
 }

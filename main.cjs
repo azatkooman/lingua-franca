@@ -9,9 +9,11 @@ const http = require('http');
 const forge = require('node-forge');
 
 const {
-    DEFAULT_SETTINGS, adminSettings, dropRetiredSettings, findLanguage, isValidDuckDnsDomain,
-    isValidEmail, normalizeDuckDnsDomain, normalizeLanguages, publicSettings, selectLocalAddress,
+    DEFAULT_SETTINGS, INTERFACE_LANGUAGES, adminSettings, dropRetiredSettings, findLanguage, isValidDuckDnsDomain,
+    isValidEmail, normalizeContact, normalizeDuckDnsDomain, normalizeEvent, normalizeLanguages, publicSettings,
+    selectLocalAddress,
 } = require('./lib/settings.cjs');
+const { TranscriptStore } = require('./lib/transcript.cjs');
 const { ExpiringMap, LoginThrottle, isValidPin, newAccessCode, newToken, setPin, verifyPin } = require('./lib/security.cjs');
 
 const HTTPS_PORT = 4173;
@@ -505,6 +507,9 @@ async function startServers(isDev) {
     // silently cut off, mute or end another's live channel.
     const producerOwners = new Map();
 
+    // Recent captions per channel, handed to phones that join or reconnect mid-talk.
+    const transcripts = new TranscriptStore();
+
     const adminSessions = new ExpiringMap();
     const interpreterSessions = new ExpiringMap();
     const interpreterCodes = new ExpiringMap();
@@ -750,14 +755,22 @@ async function startServers(isDev) {
             } catch (error) { callback({ error: error.message }); }
         });
 
-        socket.on('sendTranslationText', ({ channelId, text, originalText } = {}, callback) => {
+        // Captions arrive as segments: one id per sentence, sent repeatedly while it grows and
+        // once more with `final` set. Each is kept for late joiners and relayed to everyone.
+        socket.on('sendTranslationText', ({ channelId, segmentId, text, originalText, final } = {}, callback) => {
             if (!socketIsAdmin()) return callback?.({ error: 'Administrator login required.' });
-            io.emit('translationText', {
-                channelId: String(channelId || '').slice(0, 80),
-                text: String(text || '').slice(0, 8000),
-                originalText: String(originalText || '').slice(0, 8000),
-            });
+            const id = String(channelId || '').slice(0, 80);
+            if (!findLanguage(settings.languages, id)) return callback?.({ error: 'Unknown channel.' });
+            const segment = transcripts.update(id, { segmentId, text, originalText, final });
+            if (!segment) return callback?.({ error: 'A caption needs a segment id.' });
+            io.emit('translationText', { channelId: id, ...segment });
             callback?.({ ok: true });
+        });
+
+        // What was said recently on a channel. Captions are public to every listener anyway,
+        // so this needs no session, and it works on the plain listener port.
+        socket.on('getTranscript', ({ channelId } = {}, callback) => {
+            callback?.({ segments: transcripts.recent(String(channelId || '').slice(0, 80)) });
         });
 
         socket.on('disconnect', () => {
@@ -936,15 +949,18 @@ async function startServers(isDev) {
             const keptIds = new Set(next.map((language) => language.id));
             for (const channelId of [...producers.keys()]) if (!keptIds.has(channelId)) closeProducerFor(channelId);
             for (const channelId of [...liveChannels.keys()]) if (!keptIds.has(channelId)) liveChannels.delete(channelId);
+            transcripts.retain(keptIds);
             settings.languages = next;
         }
+        if (patch.event && typeof patch.event === 'object') settings.event = normalizeEvent(patch.event);
+        if (patch.contact && typeof patch.contact === 'object') settings.contact = normalizeContact(patch.contact);
         let pinChanged = false;
         if (patch.adminPin !== undefined) {
             if (!isValidPin(patch.adminPin)) return response.status(400).json({ error: 'The PIN must be 4 to 12 digits.' });
             setPin(settings, String(patch.adminPin));
             pinChanged = true;
         }
-        if (['en', 'ru'].includes(patch.interfaceLanguage)) settings.interfaceLanguage = patch.interfaceLanguage;
+        if (INTERFACE_LANGUAGES.includes(patch.interfaceLanguage)) settings.interfaceLanguage = patch.interfaceLanguage;
         // Lets an operator go back to the local certificate. The trusted key and cert are
         // left on disk so re-enabling does not need a fresh issuance from the CA.
         if (patch.certificateMode === 'self-signed') settings.certificateMode = 'self-signed';

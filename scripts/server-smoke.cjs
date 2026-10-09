@@ -295,6 +295,52 @@ async function run() {
         return 'producer refused, consumer allowed';
     });
 
+    await check('the event, contact and Kazakh phone language reach listeners', async () => {
+        const { status } = await json('/api/admin/settings', {
+            method: 'PATCH', headers: authed(token), body: JSON.stringify({
+                interfaceLanguage: 'kk',
+                event: { name: 'Smoke Congress', startDate: '2026-10-06', endDate: '2026-10-05' },
+                contact: { name: 'Help desk', phone: '+7 701 000 00 00', email: 'help@example.com', telegram: 'https://t.me/help_desk' },
+            }),
+        });
+        assert.equal(status, 200);
+        const listener = await (await fetch(`${LISTENER_BASE}/api/settings`)).json();
+        assert.equal(listener.interfaceLanguage, 'kk');
+        assert.deepEqual(listener.event, { name: 'Smoke Congress', startDate: '2026-10-05', endDate: '2026-10-06' });
+        assert.equal(listener.contact.telegram, 'help_desk');
+        assert.equal(listener.contact.phone, '+7 701 000 00 00');
+        return 'event, contact and kk on the plain listener link';
+    });
+
+    await check('captions are relayed live and kept for phones that join late', async () => {
+        const { body: settings } = await json('/api/settings');
+        const english = settings.languages[0].id;
+        const operator = await connect(token);
+        const early = await connect('', LISTENER_BASE);
+        const relayed = waitFor(early, 'translationText', 5000);
+        assert.equal((await ask(operator, 'sendTranslationText', { channelId: english, segmentId: 'smoke-1', text: 'Good', originalText: 'Доброе' })).ok, true);
+        assert.equal((await relayed).text, 'Good');
+        await ask(operator, 'sendTranslationText', { channelId: english, segmentId: 'smoke-1', text: 'Good morning', originalText: 'Доброе утро', final: true });
+        await ask(operator, 'sendTranslationText', { channelId: english, segmentId: 'smoke-2', text: 'Welcome', originalText: 'Добро пожаловать' });
+        const late = await connect('', LISTENER_BASE);
+        const { segments } = await ask(late, 'getTranscript', { channelId: english });
+        assert.deepEqual(segments.map((segment) => [segment.id, segment.text, segment.final]),
+            [['smoke-1', 'Good morning', true], ['smoke-2', 'Welcome', false]]);
+        return `${segments.length} segments for a late joiner`;
+    });
+
+    await check('only an operator can send captions, and never from the plain listener port', async () => {
+        const { body: settings } = await json('/api/settings');
+        const english = settings.languages[0].id;
+        const anonymous = await connect('', LISTENER_BASE);
+        assert.match((await ask(anonymous, 'sendTranslationText', { channelId: english, segmentId: 'x', text: 'spoof' })).error || '', /Administrator/);
+        const tokenOnPlainPort = await connect(token, LISTENER_BASE);
+        assert.match((await ask(tokenOnPlainPort, 'sendTranslationText', { channelId: english, segmentId: 'x', text: 'spoof' })).error || '', /Administrator/);
+        const operator = await connect(token);
+        assert.match((await ask(operator, 'sendTranslationText', { channelId: 'no-such-channel', segmentId: 'x', text: 'lost' })).error || '', /Unknown channel/);
+        return 'refused, refused, unknown channel';
+    });
+
     await check('renaming a channel preserves its id, so a live broadcast survives', async () => {
         const { body: before } = await json('/api/admin/settings', { headers: authed(token) });
         const target = before.languages[0];

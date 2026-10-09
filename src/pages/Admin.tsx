@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeft, Cpu, Edit2, Globe, Languages, LogOut, Mic, Monitor, Plus, QrCode, RotateCcw, Save, ShieldAlert, Trash2, X } from 'lucide-react';
+import { ArrowLeft, CalendarDays, Cpu, Edit2, Globe, Languages, LifeBuoy, LogOut, Mic, Monitor, Plus, QrCode, RotateCcw, Save, ShieldAlert, Trash2, X } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
-import { settingsService, type AdminSettings, type Language } from '../lib/SettingsService';
-import { useTranslation, type Locale } from '../lib/i18n';
+import { settingsService, type AdminSettings, type ContactInfo, type EventInfo, type Language } from '../lib/SettingsService';
+import { LOCALES, useTranslation, type Locale } from '../lib/i18n';
 import { useGoBack } from '../lib/navigation';
 import './Admin.css';
 
@@ -45,7 +45,7 @@ function normaliseDuckDomain(value: string) {
 
 export default function Admin() {
     const goBack = useGoBack();
-    const { t, locale, setLocale } = useTranslation();
+    const { t, locale } = useTranslation();
     const [settings, setSettings] = useState<AdminSettings | null>(settingsService.getAdminSettings());
     const [health, setHealth] = useState<HealthInfo | null>(null);
     const [qrChannelId, setQrChannelId] = useState('');
@@ -67,6 +67,9 @@ export default function Admin() {
     // Set after a change that only takes effect on restart, so the button sits right there
     // instead of a message telling the operator to go and find the window's close button.
     const [restartNeeded, setRestartNeeded] = useState(false);
+    // Drafts until saved, so a settings push from the server does not wipe what is being typed.
+    const [eventDraft, setEventDraft] = useState<EventInfo | null>(null);
+    const [contactDraft, setContactDraft] = useState<ContactInfo | null>(null);
     const [message, setMessage] = useState('');
     const [busy, setBusy] = useState(false);
 
@@ -166,6 +169,9 @@ export default function Admin() {
 
     if (!settings) return <div className="page-container admin-page">{t('loading')}</div>;
 
+    const event: EventInfo = eventDraft ?? settings.event ?? { name: '', startDate: '', endDate: '' };
+    const contact: ContactInfo = contactDraft ?? settings.contact ?? { name: '', phone: '', whatsapp: '', telegram: '', email: '' };
+
     const sfuText = health ? (health.sfu === 'ready' ? t('status_ready') : t('status_unavailable')) : t('status_checking');
     const showRestart = restartNeeded || health?.portMode === 'range' || Boolean(health?.addressDrift);
 
@@ -176,15 +182,8 @@ export default function Admin() {
                     <button className="btn-icon" onClick={goBack} title={t('back')}><ArrowLeft size={24} /></button>
                     <h2>{t('admin_title')}</h2>
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                    <div className="language-toggle" style={{ position: 'static' }}>
-                        <button className={`lang-btn ${locale === 'en' ? 'active' : ''}`} onClick={() => setLocale('en')}>EN</button>
-                        <div className="divider" />
-                        <button className={`lang-btn ${locale === 'ru' ? 'active' : ''}`} onClick={() => setLocale('ru')}>RU</button>
-                    </div>
-                    {/* There was no way to sign out, so a shared computer at the venue stayed signed in. */}
-                    <button className="btn-secondary" onClick={() => void settingsService.logout()}><LogOut size={18} /> {t('sign_out')}</button>
-                </div>
+                {/* There was no way to sign out, so a shared computer at the venue stayed signed in. */}
+                <button className="btn-secondary admin-sign-out" onClick={() => void settingsService.logout()}><LogOut size={18} /> {t('sign_out')}</button>
             </header>
 
             {message && <div className="glass-panel" style={{ padding: '0.8rem 1rem', marginBottom: '1rem' }}>{message}</div>}
@@ -304,15 +303,74 @@ export default function Admin() {
                 </div>
             </div>
 
-            {/* Phones fall back to this until they tap EN or RU themselves. It existed on the
+            <div className="card fade-in">
+                <div className="card-header"><CalendarDays size={20} /><h3>{t('event_title')}</h3></div>
+                <p className="text-muted card-hint">{t('event_hint')}</p>
+                <label>{t('event_name')}</label>
+                <input className="custom-input" maxLength={120} value={event.name}
+                    onChange={(change) => setEventDraft({ ...event, name: change.target.value })} />
+                <div className="form-row mt-4">
+                    <div>
+                        <label>{t('event_start')}</label>
+                        <input className="custom-input" type="date" value={event.startDate}
+                            onChange={(change) => setEventDraft({ ...event, startDate: change.target.value })} />
+                    </div>
+                    <div>
+                        <label>{t('event_end')}</label>
+                        <input className="custom-input" type="date" value={event.endDate} min={event.startDate || undefined}
+                            onChange={(change) => setEventDraft({ ...event, endDate: change.target.value })} />
+                    </div>
+                </div>
+                <button className="btn-primary mt-4" disabled={busy || eventDraft === null} onClick={() => void run(async () => {
+                    await settingsService.setEvent(event);
+                    setEventDraft(null);
+                }, t('event_saved'))}><Save size={18} /> {t('save')}</button>
+            </div>
+
+            <div className="card fade-in">
+                <div className="card-header"><LifeBuoy size={20} /><h3>{t('contact_title')}</h3></div>
+                <p className="text-muted card-hint">{t('contact_hint')}</p>
+                <label>{t('contact_name')}</label>
+                <input className="custom-input" maxLength={80} value={contact.name}
+                    onChange={(change) => setContactDraft({ ...contact, name: change.target.value })} />
+                <div className="form-row mt-4">
+                    <div>
+                        <label>{t('contact_phone')}</label>
+                        <input className="custom-input" type="tel" maxLength={32} placeholder="+7 700 000 00 00" value={contact.phone}
+                            onChange={(change) => setContactDraft({ ...contact, phone: change.target.value })} />
+                    </div>
+                    <div>
+                        <label>{t('contact_whatsapp')}</label>
+                        <input className="custom-input" type="tel" maxLength={32} placeholder="+7 700 000 00 00" value={contact.whatsapp}
+                            onChange={(change) => setContactDraft({ ...contact, whatsapp: change.target.value })} />
+                    </div>
+                </div>
+                <div className="form-row mt-4">
+                    <div>
+                        <label>{t('contact_telegram')}</label>
+                        <input className="custom-input" maxLength={64} placeholder="@username" value={contact.telegram}
+                            onChange={(change) => setContactDraft({ ...contact, telegram: change.target.value })} />
+                    </div>
+                    <div>
+                        <label>{t('contact_email')}</label>
+                        <input className="custom-input" type="email" maxLength={120} value={contact.email}
+                            onChange={(change) => setContactDraft({ ...contact, email: change.target.value })} />
+                    </div>
+                </div>
+                <button className="btn-primary mt-4" disabled={busy || contactDraft === null} onClick={() => void run(async () => {
+                    await settingsService.setContact(contact);
+                    setContactDraft(null);
+                }, t('contact_saved'))}><Save size={18} /> {t('save')}</button>
+            </div>
+
+            {/* Phones fall back to this until they pick a language themselves. It existed on the
                 server but nothing could set it, so every phone started in English. */}
             <div className="card fade-in">
                 <div className="card-header"><Globe size={20} /><h3>{t('phone_language')}</h3></div>
                 <p className="text-muted">{t('phone_language_hint')}</p>
                 <select className="custom-select" value={settings.interfaceLanguage || 'en'} disabled={busy}
                     onChange={(event) => void run(() => settingsService.setInterfaceLanguage(event.target.value as Locale), t('phone_language_saved'))}>
-                    <option value="en">English</option>
-                    <option value="ru">Русский</option>
+                    {LOCALES.map((option) => <option key={option.code} value={option.code}>{option.name}</option>)}
                 </select>
             </div>
 

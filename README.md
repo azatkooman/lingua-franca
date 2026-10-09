@@ -9,7 +9,24 @@ Local-network simultaneous interpretation for any kind of event: conferences, me
 - **Human:** publishes an interpreter's microphone directly over the local WebRTC SFU.
 - **OpenAI Realtime (AI):** sends the source track to `gpt-realtime-translate`, republishes the translated audio track through the local SFU, and sends synchronized captions. If the OpenAI connection drops, the app rebuilds it on its own for about two minutes; listeners hear silence instead of being disconnected while it does.
 
+In AI mode the operator can also broadcast the original speech, with captions in the original language, on the source language's channel (**Also broadcast the original speech** on the broadcast screen, on by default). Listeners who speak that language can then follow along on their phones too.
+
 OpenAI is the only translation provider. Human mode is the fallback if the internet or OpenAI is unavailable. (An earlier text fallback built on browser speech recognition plus Gemini or MyMemory was removed: speech recognition does not work inside the desktop app, and it needed the internet anyway. Settings from it, including any saved Gemini key, are deleted from the settings file on first launch.)
+
+## Listener screen
+
+Listeners scan the QR code, see the event name and dates, pick a language and tap **Tap to listen**. While listening:
+
+- **Live captions** (AI channels): a scrolling transcript that follows the newest line and highlights it. Scrolling up to reread pauses it, and **Jump to latest** brings it back. A phone that joins late gets the last few sentences straight away.
+- **Original text**: a second card with the speaker's own words, which the listener can hide.
+- **Text size**: the **A** button cycles medium, large and small.
+- **Full screen**: a reading view with large text and a small bar for status, text size, mute and exit.
+- **Switch language** with the tabs at the top, without going back.
+- **Status**: Live, Waiting for the speaker, Connecting, or Reconnecting.
+- **Sound**: mute, volume, a level meter, and Phone / Speaker output, under **Sound**.
+- The screen is kept on where the browser allows it (HTTPS pages). Text size, the original-text choice and the volume are remembered on each phone.
+
+Every screen has a phone button with the organiser's contacts (set in Admin, hidden when empty), the **RU / KK / EN** interface switch, and a light / dark / system theme switch. The Kazakh text has not yet been reviewed by a native speaker.
 
 ## Windows x64 setup
 
@@ -68,7 +85,8 @@ Every WebRTC transport needs an ICE port. Lingua Franca puts all transports on a
 3. Launch Lingua Franca and sign in as operator. The initial PIN is `1234`; change it immediately. A PIN may be 4 to 12 digits, and longer is meaningfully harder to guess. Repeated wrong entries lock the app out for progressively longer. Changing the PIN signs out every other operator session.
 4. In Admin, select the physical network adapter if the automatic address is wrong, then press **Restart app**.
 5. Add an OpenAI API key if using AI translation. ChatGPT subscriptions do not include API usage. OpenAI's realtime translation model does not accept a custom glossary, so check names and Bible books by ear before the service.
-6. Under **Default language for phones**, choose the language phones start in. Each phone can still switch with EN/RU.
+6. Under **Default language for phones**, choose the language phones start in (English, Russian or Kazakh). Each phone can still switch with RU / KK / EN.
+   Under **Event**, enter the event name and dates; they are shown at the top of the home and listener screens. Under **Contact for listeners**, enter a name, phone, WhatsApp, Telegram or email for people who have no sound or a question. Leave every contact field empty to hide the phone button.
 7. Optional: listener phones need no certificate (see step 8), but interpreter phones and Admin on other devices use HTTPS. To remove the warning there too, create a free subdomain at [DuckDNS](https://www.duckdns.org), then enter the subdomain, DuckDNS token, and contact email under **Trusted phone certificate**. The app obtains a free Let's Encrypt certificate and renews it automatically once it has fewer than 30 days remaining. A still-valid certificate is reused rather than reissued, which keeps you clear of the CA's weekly duplicate-certificate limit.
 8. Pick a channel under **Listener QR channel** and show its QR. Each channel has its own link. By default the QR carries the **plain listener link** (`http://<computer address>:4175/listener?...`), which phones open straight away with no certificate warning, no DuckDNS and no internet. See [Listener link](#listener-link).
 9. On the home screen, choose **Be an Interpreter** and sign in with the operator PIN (an interpreter phone uses its QR code instead). Select the mixer's USB interface or a microphone input. The desktop app also offers **System output / loopback** to capture whatever Windows is currently playing. Choose **Human**, or **AI** with the source and target languages (Russian to English is preselected when those channels exist), then start the broadcast.
@@ -89,7 +107,7 @@ A phone only trusts certificates for public domain names, and a `192.168.x.x` ad
 - It opens with no warning, needs no DuckDNS and works on Wi-Fi without internet.
 - The audio is still encrypted: WebRTC always encrypts media (DTLS-SRTP). Only the page and the connection setup travel unencrypted on the venue Wi-Fi.
 - It serves listening only. Every sign-in, interpreter-code and operator request is refused on that port, sockets from it can never broadcast, and `/admin` and `/interpreter` redirect to HTTPS before anything can be typed.
-- The **Phone / Speaker** switch may not work there, because browsers keep audio-output selection for secure pages. Normal playback and volume are unaffected.
+- The **Phone / Speaker** switch may not work there, and the phone cannot be kept awake automatically, because browsers keep audio-output selection and the screen wake lock for secure pages. Normal playback and volume are unaffected; the listener screen asks people to keep the screen on.
 
 Interpreter phones and Admin stay on HTTPS (they need the microphone or a PIN). They show the certificate warning once per phone unless the DuckDNS certificate in step 7 is set up. Admin can switch listener QR codes back to HTTPS under **Link for listener phones**. If TCP 4175 is taken by another program, the app still starts and Admin says so, and QR codes fall back to HTTPS.
 

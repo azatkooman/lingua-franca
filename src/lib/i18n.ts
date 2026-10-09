@@ -1,7 +1,13 @@
 import { useCallback, useSyncExternalStore } from 'react';
 import { settingsService } from './SettingsService';
 
-export type Locale = 'en' | 'ru';
+export type Locale = 'en' | 'ru' | 'kk';
+
+export const LOCALES: { code: Locale; label: string; name: string }[] = [
+    { code: 'ru', label: 'RU', name: 'Русский' },
+    { code: 'kk', label: 'KK', name: 'Қазақша' },
+    { code: 'en', label: 'EN', name: 'English' },
+];
 
 const en = {
     // Common
@@ -16,12 +22,23 @@ const en = {
     yes: 'yes',
     no: 'no',
     sign_out: 'Sign out',
+    interface_language: 'Interface language',
 
     welcome_title: 'Lingua Franca',
     welcome_subtitle: 'Real-time high-quality audio interpretation for any event.',
     be_interpreter: 'Be an Interpreter',
     be_listener: 'Be a Listener',
     scan_to_join: 'Scan to join as a listener or interpreter',
+
+    // Header
+    contact_us: 'Contact us',
+    contacts_title: 'Contacts',
+    contacts_hint: 'Questions about the translation, or no sound? Call or write.',
+    contact_call: 'Call',
+    contact_email_label: 'Email',
+    theme_system: 'System theme. Tap to change.',
+    theme_light: 'Light theme. Tap to change.',
+    theme_dark: 'Dark theme. Tap to change.',
 
     // Sign-in screens
     admin_access: 'Admin Access',
@@ -115,8 +132,22 @@ const en = {
     automatic: 'Automatic',
     network_saved: 'Network saved. Restart the app to apply it.',
     phone_language: 'Default language for phones',
-    phone_language_hint: 'Phones that have not picked EN or RU themselves use this.',
+    phone_language_hint: 'Phones that have not picked a language themselves use this.',
     phone_language_saved: 'Default phone language saved.',
+    event_title: 'Event',
+    event_hint: 'Shown at the top of every listener’s screen.',
+    event_name: 'Event name',
+    event_start: 'Start date',
+    event_end: 'End date (optional)',
+    event_saved: 'Event saved.',
+    contact_title: 'Contact for listeners',
+    contact_hint: 'Shown behind the phone button on every screen, for listeners with no sound or a question. Leave every field empty to hide the button.',
+    contact_name: 'Name',
+    contact_phone: 'Phone',
+    contact_whatsapp: 'WhatsApp number',
+    contact_telegram: 'Telegram username or number',
+    contact_email: 'Email',
+    contact_saved: 'Contact saved.',
     security: 'Security',
     security_hint: 'Set a new administrator PIN of 4 to 12 digits. A longer PIN is harder to guess. Changing it signs out every other operator session.',
     new_pin: 'New PIN',
@@ -145,6 +176,7 @@ const en = {
     ai_mode_hint: 'OpenAI translates the source and broadcasts one translated voice with captions on each target channel. It needs internet.',
     source_lang: 'Source language',
     target_channels: 'Target channels',
+    floor_channel_option: 'Also broadcast the original speech, with captions, on the {channel} channel',
     listeners_connected: 'Listeners connected: {count}',
     start_broadcast: 'Start broadcast',
     stop_audio: 'Stop / kill audio',
@@ -161,13 +193,19 @@ const en = {
 
     // Listener
     listener_mode: 'Listening Mode',
-    select_channel: 'Select a language to listen',
-    connecting: 'Connecting...',
+    select_channel: 'Choose your language',
+    tap_to_listen: 'Tap to listen',
+    lobby_hint: 'Your browser will not play sound until you tap. Keep the screen on, and if you are sitting near the speaker, wear headphones.',
+    connecting: 'Connecting…',
     connected_receiving: 'Connected & Receiving',
     waiting_interpreter: 'Waiting for interpreter...',
     waiting_broadcast: 'Waiting for the broadcast to start…',
     media_restarting: 'Media engine restarting…',
     connection_error_waiting: 'Connection problem. Retrying…',
+    status_live: 'On air',
+    status_waiting: 'Waiting for the speaker',
+    status_connecting: 'Connecting…',
+    status_reconnecting: 'Reconnecting…',
     interpreter_muted: 'Interpreter is Muted',
     audio_output: 'Audio output',
     audio_level: 'Incoming audio level',
@@ -181,17 +219,28 @@ const en = {
     earpiece_fallback: 'This browser does not expose the earpiece directly. Use the phone audio/output control, or headphones for private listening.',
     connect: 'Connect to',
     disconnect: 'Disconnect',
-    no_sound_hint: 'Click "Connect" to start listening to the translation.',
+    stop_listening: 'Stop listening',
+    no_sound_hint: 'Sound is blocked. Tap here to turn it on.',
     channel_not_found: 'That channel is no longer available. Choose one from the list below.',
     waiting_for_speech: 'Waiting for speech…',
+    speaker_not_started: 'The speaker has not started yet. You will hear the translation as soon as they do.',
+    audio_only: 'A person interprets this channel, so there are no captions. Just listen.',
+    translation_label: 'Translation',
+    original_label: 'Original',
+    show_original: 'Show the original',
+    text_size: 'Text size',
+    fullscreen: 'Full screen',
+    exit_fullscreen: 'Exit full screen',
+    jump_latest: 'Jump to latest',
+    sound_settings: 'Sound',
     ai_active: 'AI Translation Active 🤖',
     original_text: 'Original',
 };
 
 export type TranslationKey = keyof typeof en;
 
-// Typed against the English keys, so a missing Russian string is a compile error rather than
-// an English word appearing in the middle of a Russian screen.
+// Typed against the English keys, so a missing translation is a compile error rather than
+// an English word appearing in the middle of a Russian or Kazakh screen.
 const ru: Record<TranslationKey, string> = {
     // Common
     back: 'Назад',
@@ -205,12 +254,23 @@ const ru: Record<TranslationKey, string> = {
     yes: 'да',
     no: 'нет',
     sign_out: 'Выйти',
+    interface_language: 'Язык интерфейса',
 
     welcome_title: 'Lingua Franca',
     welcome_subtitle: 'Высококачественный перевод аудио в реальном времени для любых мероприятий.',
     be_interpreter: 'Я - переводчик',
     be_listener: 'Слушать перевод',
     scan_to_join: 'Отсканируйте, чтобы присоединиться как слушатель или переводчик',
+
+    // Header
+    contact_us: 'Связаться с нами',
+    contacts_title: 'Контакты',
+    contacts_hint: 'Вопросы по переводу или нет звука? Позвоните или напишите.',
+    contact_call: 'Позвонить',
+    contact_email_label: 'Эл. почта',
+    theme_system: 'Системная тема. Нажмите, чтобы сменить.',
+    theme_light: 'Светлая тема. Нажмите, чтобы сменить.',
+    theme_dark: 'Тёмная тема. Нажмите, чтобы сменить.',
 
     // Sign-in screens
     admin_access: 'Доступ Администратора',
@@ -304,8 +364,22 @@ const ru: Record<TranslationKey, string> = {
     automatic: 'Автоматически',
     network_saved: 'Сеть сохранена. Перезапустите приложение, чтобы применить.',
     phone_language: 'Язык телефонов по умолчанию',
-    phone_language_hint: 'Используется на телефонах, где не выбрали EN или RU вручную.',
+    phone_language_hint: 'Используется на телефонах, где язык не выбрали вручную.',
     phone_language_saved: 'Язык телефонов по умолчанию сохранён.',
+    event_title: 'Мероприятие',
+    event_hint: 'Показывается вверху экрана у каждого слушателя.',
+    event_name: 'Название мероприятия',
+    event_start: 'Дата начала',
+    event_end: 'Дата окончания (необязательно)',
+    event_saved: 'Мероприятие сохранено.',
+    contact_title: 'Контакты для слушателей',
+    contact_hint: 'Открываются по кнопке с телефоном на каждом экране, для слушателей без звука или с вопросом. Оставьте все поля пустыми, чтобы скрыть кнопку.',
+    contact_name: 'Имя',
+    contact_phone: 'Телефон',
+    contact_whatsapp: 'Номер WhatsApp',
+    contact_telegram: 'Имя пользователя или номер в Telegram',
+    contact_email: 'Эл. почта',
+    contact_saved: 'Контакты сохранены.',
     security: 'Безопасность',
     security_hint: 'Задайте новый PIN администратора от 4 до 12 цифр. Длинный PIN сложнее угадать. После смены все остальные сеансы оператора завершатся.',
     new_pin: 'Новый PIN',
@@ -334,6 +408,7 @@ const ru: Record<TranslationKey, string> = {
     ai_mode_hint: 'OpenAI переводит речь и транслирует переведённый голос с субтитрами на каждый выбранный канал. Нужен интернет.',
     source_lang: 'Исходный язык',
     target_channels: 'Каналы перевода',
+    floor_channel_option: 'Также транслировать оригинальную речь с субтитрами на канале {channel}',
     listeners_connected: 'Подключено слушателей: {count}',
     start_broadcast: 'Начать трансляцию',
     stop_audio: 'Остановить звук',
@@ -350,19 +425,25 @@ const ru: Record<TranslationKey, string> = {
 
     // Listener
     listener_mode: 'Режим Слушателя',
-    select_channel: 'Выберите язык для прослушивания',
-    connecting: 'Подключение...',
+    select_channel: 'Выберите язык',
+    tap_to_listen: 'Нажмите, чтобы слушать',
+    lobby_hint: 'Браузер не включит звук, пока вы не нажмёте. Не гасите экран, а если сидите рядом со спикером, наденьте наушники.',
+    connecting: 'Подключение…',
     connected_receiving: 'Подключено, звук идёт',
     waiting_interpreter: 'Ожидание переводчика...',
     waiting_broadcast: 'Ожидание начала трансляции…',
     media_restarting: 'Медиасервер перезапускается…',
     connection_error_waiting: 'Проблема со связью. Повторяем попытку…',
+    status_live: 'В эфире',
+    status_waiting: 'Ждём спикера',
+    status_connecting: 'Подключение…',
+    status_reconnecting: 'Переподключение…',
     interpreter_muted: 'Голос переводчика выключен',
     audio_output: 'Вывод звука',
     audio_level: 'Уровень входящего звука',
     speaker: 'Динамик',
     earpiece: 'Телефон / ухо',
-    mute_audio: 'Без звука',
+    mute_audio: 'Выключить звук',
     unmute_audio: 'Включить звук',
     speaker_active: 'Включён режим громкого динамика.',
     earpiece_active: 'Включён разговорный динамик. Поднесите телефон к уху.',
@@ -370,22 +451,263 @@ const ru: Record<TranslationKey, string> = {
     earpiece_fallback: 'Этот браузер не даёт прямого доступа к разговорному динамику. Используйте системный выбор аудиовыхода или наушники.',
     connect: 'Подключиться к',
     disconnect: 'Отключиться',
-    no_sound_hint: 'Нажмите "Подключиться", чтобы начать слушать перевод.',
+    stop_listening: 'Перестать слушать',
+    no_sound_hint: 'Звук заблокирован. Нажмите здесь, чтобы включить.',
     channel_not_found: 'Этот канал больше недоступен. Выберите канал из списка ниже.',
     waiting_for_speech: 'Ожидание речи…',
+    speaker_not_started: 'Спикер ещё не начал. Вы услышите перевод сразу, как только он начнёт.',
+    audio_only: 'На этом канале переводит человек, поэтому субтитров нет. Просто слушайте.',
+    translation_label: 'Перевод',
+    original_label: 'Оригинал',
+    show_original: 'Показать оригинал',
+    text_size: 'Размер текста',
+    fullscreen: 'Во весь экран',
+    exit_fullscreen: 'Выйти из полноэкранного режима',
+    jump_latest: 'К последнему',
+    sound_settings: 'Звук',
     ai_active: 'Активен перевод ИИ 🤖',
     original_text: 'Оригинал',
 };
 
-export const translations = { en, ru };
+// Kazakh. Written for this release; worth a read-through by a native speaker before an event.
+const kk: Record<TranslationKey, string> = {
+    // Common
+    back: 'Артқа',
+    back_home: 'Басты бетке',
+    home: 'Басты бет',
+    loading: 'Жүктелуде...',
+    error: 'Қате',
+    checking: 'Тексерілуде…',
+    show: 'Көрсету',
+    hide: 'Жасыру',
+    yes: 'иә',
+    no: 'жоқ',
+    sign_out: 'Шығу',
+    interface_language: 'Интерфейс тілі',
+
+    welcome_title: 'Lingua Franca',
+    welcome_subtitle: 'Кез келген іс-шараға арналған жоғары сапалы ілеспе аударма.',
+    be_interpreter: 'Аудармашы болу',
+    be_listener: 'Аударманы тыңдау',
+    scan_to_join: 'Тыңдаушы немесе аудармашы ретінде қосылу үшін сканерлеңіз',
+
+    // Header
+    contact_us: 'Бізбен байланыс',
+    contacts_title: 'Байланыс',
+    contacts_hint: 'Аударма бойынша сұрақ бар ма, әлде дыбыс жоқ па? Қоңырау шалыңыз немесе жазыңыз.',
+    contact_call: 'Қоңырау шалу',
+    contact_email_label: 'Эл. пошта',
+    theme_system: 'Жүйелік тақырып. Ауыстыру үшін басыңыз.',
+    theme_light: 'Ашық тақырып. Ауыстыру үшін басыңыз.',
+    theme_dark: 'Қараңғы тақырып. Ауыстыру үшін басыңыз.',
+
+    // Sign-in screens
+    admin_access: 'Әкімші кіруі',
+    enter_pin_to_manage: 'Арна баптауларын басқару үшін PIN енгізіңіз',
+    enter_pin: 'Әкімші PIN кодын енгізіңіз',
+    incorrect_pin: 'PIN қате. Қайталап көріңіз.',
+    interpreter_access: 'Аудармашы кіруі',
+    interpreter_access_hint: 'Компьютердегі әкімші бетіндегі аудармашы QR кодын сканерлеңіз немесе алты таңбалы кодты енгізіңіз.',
+    operator_sign_in: 'Оператор кіруі',
+    operator_sign_in_hint: 'Осы құрылғыдан тарату үшін әкімші PIN кодын енгізіңіз.',
+    code_placeholder: 'Алты таңбалы код',
+    pin_placeholder: 'Әкімші PIN коды',
+    continue_interpreter: 'Аудармашы ретінде жалғастыру',
+    sign_in_operator: 'Оператор ретінде кіру',
+    use_pin_instead: 'Оператор болсаңыз, PIN кодпен кіріңіз',
+    use_code_instead: 'Менде аудармашы коды бар',
+    session_ended: 'Аудармашы сеансы аяқталды. Оператордан жаңа аудармашы QR кодын сұраңыз.',
+
+    // Admin
+    admin_title: 'Әкімші панелі',
+    languages_title: 'Аударма арналары',
+    lang_name: 'Тіл атауы',
+    lang_desc: 'Сипаттама',
+    iso_code_placeholder: 'ISO коды (en, ru)',
+    save: 'Сақтау',
+    cancel: 'Бас тарту',
+    no_languages: 'Тіл арналары әлі жоқ. Бастау үшін біреуін қосыңыз.',
+    language_saved: 'Тіл сақталды.',
+    language_removed: 'Тіл жойылды.',
+    network_not_ready: 'Желі мекенжайы әлі анықталмады.',
+    system_status: 'Жүйе күйі',
+    media_engine: 'Медиасервер:',
+    status_ready: 'дайын',
+    status_unavailable: 'қолжетімсіз',
+    status_checking: 'тексерілуде',
+    port_range_warning: 'Ортақ медиапорт қолжетімсіз: әр тыңдаушыға жеке порт беріледі, сондықтан шамамен 45 телефон ғана қосыла алады. Қайта көру үшін қолданбаны қайта іске қосыңыз.',
+    secure_storage_missing: 'Windows қорғалған қоймасы қолжетімсіз, сондықтан API кілттерін сақтау мүмкін емес. Қойма жұмыс істегенде оларды қайта енгізіңіз.',
+    certificate_label: 'Сертификат:',
+    certificate_trusted: 'сенімді (ескертусіз)',
+    certificate_local: 'жергілікті (браузер ескерту көрсетеді)',
+    expires: 'Жарамдылық мерзімі: {date}',
+    firewall_hint: 'Windows брандмауэрі TCP {https} және {listener}, сондай-ақ {rtc} рұқсат етуі керек.',
+    phone_link_type: 'Тыңдаушы телефондарына арналған сілтеме',
+    phone_link_plain: 'Қарапайым сілтеме, сертификат ескертуінсіз (ұсынылады)',
+    phone_link_secure: 'Қорғалған HTTPS сілтемесі',
+    phone_link_plain_hint: 'Телефондар оны бірден ашады, ескертусіз және интернетсіз. Дыбыс бәрібір шифрланады. Бұл сілтемеде «Телефон / Динамик» ауыстырғышы жұмыс істемеуі мүмкін.',
+    phone_link_secure_hint: 'Төменде сенімді сертификат бапталмаса, телефондар сертификат туралы ескерту көрсетеді.',
+    listener_port_unavailable: 'Тыңдаушыларға арналған қарапайым сілтеме қолжетімсіз, сондықтан QR кодтар HTTPS пайдаланады: {error}',
+    redirecting_secure: 'Қорғалған бет ашылуда…',
+    listener_qr_channel: 'Тыңдаушылар QR кодының арнасы',
+    detecting_network: 'желі анықталуда',
+    show_listener_qr: 'Тыңдаушыларға QR кодын көрсету',
+    listener_qr_title: 'Тыңдаушы: {channel}',
+    interpreter_qr_title: 'Аудармашы: {channel}',
+    code_label: 'Код: {code}',
+    restart_app: 'Қолданбаны қайта іске қосу',
+    restart_needed: 'Өзгерісті қолдану үшін Lingua Franca қолданбасын қайта іске қосыңыз.',
+    restart_confirm: 'Lingua Franca қазір қайта іске қосылсын ба? Барлық тарату бірнеше секундқа тоқтайды, тыңдаушылар өздері қайта қосылады.',
+    restarting: 'Қайта іске қосылуда…',
+    phone_interpreter: 'Телефондағы аудармашы',
+    phone_interpreter_hint: 'Шектеулі бір реттік сілтеме жасаңыз. Телефон тек таңдалған тілде тарата алады және баптауларды аша алмайды. Телефон эфирдегі арнаны үзе алмайды; арнаны тек осы оператор экраны ғана өзіне ала алады.',
+    create_interpreter_qr: 'Аудармашы QR кодын жасау',
+    interpreter_link_created: 'Аудармашы сілтемесі жасалды. Ол сегіз сағат жарамды және бір рет қана қолданылады.',
+    end_access_hint: 'Телефон жоғалды ма, әлде сілтеме бөгде адамдарға тарап кетті ме? Бұл батырма аудармашылардың барлық сеансын бірден аяқтап, пайдаланылмаған кодтарды жояды.',
+    end_interpreter_access: 'Барлық аудармашы кіруін аяқтау',
+    interpreter_access_ended: 'Барлық аудармашы кіруі аяқталды. Тарату жүргізіп тұрған телефондар ажыратылды, пайдаланылмаған кодтар енді жұмыс істемейді.',
+    trusted_certificate: 'Телефондарға арналған сенімді сертификат',
+    trusted_certificate_hint: 'Тегін нұсқа: DuckDNS сайтында ішкі домен жасап, оның атауы мен токенін осында енгізіңіз. Lingua Franca Let’s Encrypt сертификатын алады, атауды жергілікті желідегі осы компьютерге бағыттайды және сертификатты автоматты түрде жаңартып отырады.',
+    duckdns_subdomain: 'DuckDNS ішкі домені',
+    duckdns_token: 'DuckDNS токені',
+    token_saved: '(сақталған, өзгертпеу үшін бос қалдырыңыз)',
+    duckdns_token_placeholder: 'duckdns.org токені',
+    certificate_email: 'Сертификатқа арналған байланыс email',
+    install_certificate: 'Тегін сертификатты орнату немесе жаңарту',
+    certificate_ready: 'Сенімді сертификат дайын. Жаңа QR кодтар ескертусіз атауды пайдаланады.',
+    stop_trusted_certificate: 'Сенімді сертификатты өшіру',
+    certificate_reverted: 'Жергілікті сертификат қосылды. Қолдану үшін қолданбаны қайта іске қосыңыз; телефондар қайтадан ескерту көрсетеді.',
+    openai_translation: 'OpenAI аудармасы',
+    openai_billing_hint: 'Қолданылған көлемге қарай ақы алынатын OpenAI API пайдаланылады. ChatGPT жазылымы оны қамтымайды.',
+    openai_configured: 'OpenAI кілті сақталған: {state}',
+    openai_key_placeholder: 'OpenAI API кілті',
+    save_openai_key: 'OpenAI кілтін сақтау',
+    openai_key_saved: 'OpenAI кілті шифрланып, сақталды.',
+    test_openai: 'OpenAI тексеру',
+    openai_test_passed: 'OpenAI Realtime кілтін тексеру сәтті өтті.',
+    remove_openai_key: 'OpenAI кілтін жою',
+    openai_key_removed: 'OpenAI кілті жойылды.',
+    recording_label: 'Сеанс тоқтағанда түпнұсқа мен аударма жазбаларын жүктеп алу',
+    recording_saved: 'Жазба баптауы сақталды.',
+    network_adapter: 'Желілік адаптер',
+    automatic: 'Автоматты түрде',
+    network_saved: 'Желі сақталды. Қолдану үшін қолданбаны қайта іске қосыңыз.',
+    phone_language: 'Телефондардың әдепкі тілі',
+    phone_language_hint: 'Тілді өздері таңдамаған телефондарда қолданылады.',
+    phone_language_saved: 'Телефондардың әдепкі тілі сақталды.',
+    event_title: 'Іс-шара',
+    event_hint: 'Әр тыңдаушы экранының жоғарғы жағында көрсетіледі.',
+    event_name: 'Іс-шара атауы',
+    event_start: 'Басталу күні',
+    event_end: 'Аяқталу күні (міндетті емес)',
+    event_saved: 'Іс-шара сақталды.',
+    contact_title: 'Тыңдаушыларға арналған байланыс',
+    contact_hint: 'Әр экрандағы телефон батырмасы арқылы ашылады: дыбысы жоқ немесе сұрағы бар тыңдаушыларға арналған. Батырманы жасыру үшін барлық өрісті бос қалдырыңыз.',
+    contact_name: 'Аты',
+    contact_phone: 'Телефон',
+    contact_whatsapp: 'WhatsApp нөмірі',
+    contact_telegram: 'Telegram пайдаланушы аты немесе нөмірі',
+    contact_email: 'Эл. пошта',
+    contact_saved: 'Байланыс сақталды.',
+    security: 'Қауіпсіздік',
+    security_hint: 'Әкімшінің 4-тен 12-ге дейін цифрдан тұратын жаңа PIN кодын орнатыңыз. Ұзын PIN кодты табу қиынырақ. Ауыстырғаннан кейін оператордың басқа барлық сеансы аяқталады.',
+    new_pin: 'Жаңа PIN',
+    confirm_pin: 'PIN кодты қайталаңыз',
+    pins_mismatch: 'PIN кодтар сәйкес келмейді.',
+    pin_length: 'PIN коды 4-тен 12-ге дейін цифрдан тұруы керек.',
+    pin_changed: 'PIN өзгертілді. Оператордың басқа барлық сеансы аяқталды.',
+
+    // Interpreter
+    on_air: 'ЭФИРДЕ',
+    offline: 'Желіден тыс',
+    starting: 'Іске қосылуда...',
+    select_mic: 'Микрофонды таңдаңыз:',
+    mute_warning: 'Микрофоныңыз өшірулі!',
+    mode_human: 'Адам',
+    mode_ai: 'ЖИ',
+    default_input: 'Жүйедегі әдепкі аудиокіріс',
+    system_output_input: 'Жүйелік дыбыс (компьютерде ойнап тұрған дыбыс)',
+    refresh_inputs: 'Микрофонға рұқсат беріп, тізімді жаңарту',
+    inputs_detected: 'Табылған дыбыс жазу құрылғылары: {count}. Микрофонды немесе USB интерфейсін таңдаңыз, не болмаса Windows-та ойнап тұрған дыбысты алу үшін жүйелік дыбысты таңдаңыз. Жаңа құрылғыны қосқаннан кейін жаңарту батырмасын басыңыз.',
+    no_input_detected: 'Микрофон немесе аудиокіріс табылмады.',
+    mic_privacy_status: 'Windows-тағы микрофонға рұқсат:',
+    broadcast_channel: 'Тарату арнасы',
+    interpreter_link_only: 'Бұл аудармашы сілтемесі тек {channel} арнасына арналған.',
+    openai_key_missing: 'Әкімші баптауларында OpenAI API кілтін қосыңыз.',
+    ai_mode_hint: 'OpenAI сөзді аударып, әр таңдалған арнаға субтитрі бар аударма дауысын таратады. Интернет қажет.',
+    source_lang: 'Бастапқы тіл',
+    target_channels: 'Аударма арналары',
+    floor_channel_option: 'Түпнұсқа сөзді субтитрімен бірге {channel} арнасында да тарату',
+    listeners_connected: 'Қосылған тыңдаушылар: {count}',
+    start_broadcast: 'Таратуды бастау',
+    stop_audio: 'Дыбысты тоқтату',
+    mute_source: 'Дереккөз дыбысын өшіру',
+    unmute_source: 'Дереккөз дыбысын қосу',
+    live_transcript: 'Тікелей транскрипт',
+    listening: 'Тыңдауда…',
+    first_audio_latency: 'Алғашқы дыбыстың кідірісі: {seconds} с',
+    choose_channel_first: 'Алдымен тіл арнасын таңдаңыз.',
+    choose_source_target: 'Бастапқы тілді және одан өзге кемінде бір аударма тілін таңдаңыз.',
+    openai_live: 'OpenAI тікелей эфирде аударып жатыр',
+    operator_took_over: 'Оператор {channel} арнасын өзіне алды.',
+    broadcast_stopped: 'Таратуыңыз тоқтатылды.',
+
+    // Listener
+    listener_mode: 'Тыңдау режимі',
+    select_channel: 'Тілді таңдаңыз',
+    tap_to_listen: 'Тыңдау үшін басыңыз',
+    lobby_hint: 'Сіз баспайынша браузер дыбысты қоспайды. Экранды өшірмеңіз, ал спикерге жақын отырсаңыз, құлаққап киіңіз.',
+    connecting: 'Қосылуда…',
+    connected_receiving: 'Қосылды, дыбыс келіп жатыр',
+    waiting_interpreter: 'Аудармашыны күтудеміз...',
+    waiting_broadcast: 'Тарату басталуын күтудеміз…',
+    media_restarting: 'Медиасервер қайта іске қосылуда…',
+    connection_error_waiting: 'Байланыс ақауы. Қайта қосылуда…',
+    status_live: 'Эфирде',
+    status_waiting: 'Спикерді күтудеміз',
+    status_connecting: 'Қосылуда…',
+    status_reconnecting: 'Қайта қосылуда…',
+    interpreter_muted: 'Аудармашының дауысы өшірулі',
+    audio_output: 'Дыбыс шығысы',
+    audio_level: 'Кіріс дыбыс деңгейі',
+    speaker: 'Динамик',
+    earpiece: 'Телефон / құлақ',
+    mute_audio: 'Дыбысты өшіру',
+    unmute_audio: 'Дыбысты қосу',
+    speaker_active: 'Үнді динамик режимі қосулы.',
+    earpiece_active: 'Сөйлесу динамигі қосулы. Телефонды құлағыңызға жақындатыңыз.',
+    earpiece_requested: 'Сөйлесу динамигі қосылуда…',
+    earpiece_fallback: 'Бұл браузер сөйлесу динамигіне тікелей қол жеткізбейді. Жүйелік дыбыс шығысын таңдаңыз немесе құлаққап пайдаланыңыз.',
+    connect: 'Қосылу:',
+    disconnect: 'Ажырату',
+    stop_listening: 'Тыңдауды тоқтату',
+    no_sound_hint: 'Дыбыс бұғатталған. Қосу үшін осы жерді басыңыз.',
+    channel_not_found: 'Бұл арна енді қолжетімсіз. Төмендегі тізімнен арна таңдаңыз.',
+    waiting_for_speech: 'Сөйлеуді күтудеміз…',
+    speaker_not_started: 'Спикер әлі бастаған жоқ. Ол бастай салысымен аударманы естисіз.',
+    audio_only: 'Бұл арнада адам аударады, сондықтан субтитр жоқ. Жай тыңдаңыз.',
+    translation_label: 'Аударма',
+    original_label: 'Түпнұсқа',
+    show_original: 'Түпнұсқаны көрсету',
+    text_size: 'Мәтін өлшемі',
+    fullscreen: 'Толық экран',
+    exit_fullscreen: 'Толық экраннан шығу',
+    jump_latest: 'Соңғысына өту',
+    sound_settings: 'Дыбыс',
+    ai_active: 'ЖИ аудармасы қосулы 🤖',
+    original_text: 'Түпнұсқа',
+};
+
+export const translations = { en, ru, kk };
 
 const LOCALE_KEY = 'lingua_franca_locale';
-const LOCALES: Locale[] = ['en', 'ru'];
+const LOCALE_CODES = LOCALES.map((locale) => locale.code);
+const INTL_LOCALE: Record<Locale, string> = { en: 'en-GB', ru: 'ru-RU', kk: 'kk-KZ' };
 
 const readStoredLocale = (): Locale | null => {
     try {
         const saved = localStorage.getItem(LOCALE_KEY);
-        return LOCALES.includes(saved as Locale) ? saved as Locale : null;
+        return LOCALE_CODES.includes(saved as Locale) ? saved as Locale : null;
     } catch { return null; }
 };
 
@@ -406,13 +728,15 @@ let hasDeviceChoice = readStoredLocale() !== null;
 const localeListeners = new Set<() => void>();
 
 const applyLocale = (next: Locale) => {
+    document.documentElement.lang = next;
     if (next === currentLocale) return;
     currentLocale = next;
     localeListeners.forEach((listener) => listener());
 };
+applyLocale(currentLocale);
 
 settingsService.subscribe((settings) => {
-    serverDefault = settings.interfaceLanguage || 'en';
+    serverDefault = LOCALE_CODES.includes(settings.interfaceLanguage as Locale) ? settings.interfaceLanguage as Locale : 'en';
     if (!hasDeviceChoice) applyLocale(serverDefault);
 });
 
@@ -434,6 +758,34 @@ const subscribeLocale = (onChange: () => void) => {
     localeListeners.add(onChange);
     return () => { localeListeners.delete(onChange); };
 };
+
+/**
+ * "5–6 Oct 2026" style, in the reader's language. Dates are calendar days stored as
+ * YYYY-MM-DD, so they are formatted in UTC to stop a time zone shifting them by a day.
+ */
+const KK_MONTHS = ['қаңтар', 'ақпан', 'наурыз', 'сәуір', 'мамыр', 'маусым', 'шілде', 'тамыз', 'қыркүйек', 'қазан', 'қараша', 'желтоқсан'];
+
+// Many browsers ship little Kazakh date data and print "2026 M10 8", so Kazakh is spelled
+// out by hand: "8–10 қазан 2026", "30 қыркүйек – 2 қазан 2026".
+function formatKazakhRange(start: string, end: string) {
+    const parse = (value: string) => { const [year, month, day] = value.split('-').map(Number); return { year, month, day }; };
+    const from = parse(start);
+    const single = (date: typeof from, withYear = true) => `${date.day} ${KK_MONTHS[date.month - 1]}${withYear ? ` ${date.year}` : ''}`;
+    if (!end) return single(from);
+    const to = parse(end);
+    if (from.year !== to.year) return `${single(from)} – ${single(to)}`;
+    if (from.month !== to.month) return `${single(from, false)} – ${single(to)}`;
+    return `${from.day}–${single(to)}`;
+}
+
+export function formatEventDates(startDate: string, endDate: string, locale: Locale) {
+    if (!startDate) return '';
+    if (locale === 'kk') return formatKazakhRange(startDate, endDate);
+    const toDate = (value: string) => new Date(`${value}T00:00:00Z`);
+    const format = new Intl.DateTimeFormat(INTL_LOCALE[locale], { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+    if (!endDate) return format.format(toDate(startDate));
+    return format.formatRange(toDate(startDate), toDate(endDate));
+}
 
 export function useTranslation() {
     // An external store rather than component state: the locale lives outside React and

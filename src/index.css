@@ -43,6 +43,19 @@
   /* Borders and Effects */
   --border: rgba(255, 255, 255, 0.08);
   --glass-bg: rgba(26, 29, 45, 0.6);
+
+  /* Overlays and shadows that flip with the theme. Hardcoded white tints vanished on a light
+     background, so every tint and shadow goes through these. */
+  --surface-hover: #2d3247;
+  --tint-weak: rgba(255, 255, 255, 0.03);
+  --tint: rgba(255, 255, 255, 0.06);
+  --tint-strong: rgba(255, 255, 255, 0.1);
+  --shadow-soft: rgba(0, 0, 0, 0.2);
+  --shadow-strong: rgba(0, 0, 0, 0.4);
+  --danger-text: #fca5a5;
+  --title-from: #ffffff;
+  --title-to: #94a3b8;
+  color-scheme: dark;
   --glass-blur: blur(12px);
 
   --radius-sm: 8px;
@@ -56,6 +69,35 @@
   /* Animations */
   --transition-fast: 0.15s cubic-bezier(0.4, 0, 0.2, 1);
   --transition-smooth: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Light theme: chosen in the header, or following the device when set to system. The violet
+   and green are a shade deeper so text and icons keep their contrast on white. */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg-color: #f5f6fb;
+  --surface-1: #ffffff;
+  --surface-2: #eceef6;
+  --surface-hover: #e2e5f0;
+  --primary: #7c3aed;
+  --primary-hover: #6d28d9;
+  --primary-glow: rgba(124, 58, 237, 0.25);
+  --accent: #059669;
+  --accent-glow: rgba(5, 150, 105, 0.25);
+  --danger: #dc2626;
+  --danger-glow: rgba(220, 38, 38, 0.25);
+  --danger-text: #b91c1c;
+  --text-main: #151826;
+  --text-muted: #5b6275;
+  --border: rgba(15, 23, 42, 0.1);
+  --glass-bg: rgba(255, 255, 255, 0.8);
+  --tint-weak: rgba(15, 23, 42, 0.03);
+  --tint: rgba(15, 23, 42, 0.05);
+  --tint-strong: rgba(15, 23, 42, 0.08);
+  --shadow-soft: rgba(15, 23, 42, 0.06);
+  --shadow-strong: rgba(15, 23, 42, 0.1);
+  --title-from: #151826;
+  --title-to: #5b6275;
 }
 
 * {

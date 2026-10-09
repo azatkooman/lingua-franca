@@ -8,7 +8,7 @@ import '../pages/Admin.css';
 
 export default function AdminGuard({ children }: { children: ReactNode }) {
     const navigate = useNavigate();
-    const { t, locale, setLocale } = useTranslation();
+    const { t } = useTranslation();
     const [isAuthorized, setIsAuthorized] = useState(settingsService.isAdminAuthenticated());
     const [pin, setPin] = useState('');
     const [error, setError] = useState('');
@@ -51,12 +51,6 @@ export default function AdminGuard({ children }: { children: ReactNode }) {
 
     return (
         <div className="page-container admin-gate">
-            <div className="language-toggle">
-                <button className={`lang-btn ${locale === 'en' ? 'active' : ''}`} onClick={() => setLocale('en')}>EN</button>
-                <div className="divider"></div>
-                <button className={`lang-btn ${locale === 'ru' ? 'active' : ''}`} onClick={() => setLocale('ru')}>RU</button>
-            </div>
-
             <form className="card fade-in" onSubmit={submit} style={{ maxWidth: 450, margin: '20px auto', padding: '3rem' }}>
                 <div style={{ textAlign: 'center', marginBottom: '2.5rem' }}>
                     <div className="icon-wrapper" style={{
@@ -67,9 +61,9 @@ export default function AdminGuard({ children }: { children: ReactNode }) {
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        background: error ? 'rgba(239, 68, 68, 0.1)' : 'rgba(139, 92, 246, 0.1)'
+                        background: error ? 'var(--danger-glow)' : 'var(--primary-glow)'
                     }}>
-                        {error ? <ShieldAlert size={40} color="#ef4444" /> : <Lock size={40} color="var(--primary)" />}
+                        {error ? <ShieldAlert size={40} color="var(--danger)" /> : <Lock size={40} color="var(--primary)" />}
                     </div>
                     <h2 style={{ fontSize: '1.75rem', marginBottom: '0.5rem' }}>{t('admin_access')}</h2>
                     <p className="text-muted">{t('enter_pin_to_manage')}</p>
@@ -96,7 +90,7 @@ export default function AdminGuard({ children }: { children: ReactNode }) {
                 </button>
 
                 {error && (
-                    <p style={{ color: '#ef4444', textAlign: 'center', marginTop: '1rem', fontSize: '0.9rem', fontWeight: 500 }}>
+                    <p style={{ color: 'var(--danger)', textAlign: 'center', marginTop: '1rem', fontSize: '0.9rem', fontWeight: 500 }}>
                         {error}
                     </p>
                 )}

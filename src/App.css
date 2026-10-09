@@ -9,7 +9,7 @@
   padding: 1.5rem 2rem;
   background: var(--surface-1);
   border-bottom: 1px solid var(--border);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 4px 20px var(--shadow-soft);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -70,7 +70,7 @@ h1 {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 2rem;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 8px 32px var(--shadow-strong);
 }
 
 .glass-panel {
@@ -124,7 +124,7 @@ h1 {
 }
 
 .btn-secondary:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--tint-strong);
 }
 
 .btn-danger {
@@ -136,4 +136,143 @@ h1 {
 .btn-danger:hover {
   background: #dc2626;
   box-shadow: 0 6px 20px var(--danger-glow);
+}
+/* Header controls: contact, interface language, theme. Shared by every screen. */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.header-icon-btn {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-main);
+  transition: background var(--transition-fast);
+}
+
+.header-icon-btn:hover,
+.header-icon-btn[aria-expanded='true'] {
+  background: var(--surface-hover);
+}
+
+.lang-switch {
+  display: flex;
+  padding: 3px;
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.lang-switch button {
+  min-width: 36px;
+  padding: 0.35rem 0.55rem;
+  border-radius: var(--radius-full);
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  transition: all var(--transition-fast);
+}
+
+.lang-switch button:hover:not(.active) {
+  color: var(--text-main);
+}
+
+.lang-switch button.active {
+  background: var(--primary);
+  color: #fff;
+}
+
+.contact-wrapper {
+  position: relative;
+}
+
+.contact-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.5rem);
+  width: 18rem;
+  padding: 1rem;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px var(--shadow-strong);
+  z-index: 50;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.contact-popover-title {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.contact-popover-hint {
+  margin: 0.35rem 0 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.contact-popover-name {
+  margin-bottom: 0.5rem;
+  font-weight: 700;
+}
+
+.contact-popover ul {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.contact-popover a {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.4rem;
+  border-radius: var(--radius-sm);
+  color: var(--text-main);
+  word-break: break-all;
+}
+
+.contact-popover a:hover {
+  background: var(--tint);
+  color: var(--text-main);
+}
+
+@media (max-width: 480px) {
+  .app-header {
+    padding: 0.75rem 1rem;
+  }
+
+  /* Match the header's 1rem edge; 2rem wasted a fifth of a phone's width. */
+  .page-container {
+    padding: 1.25rem 1rem;
+  }
+
+  /* Logo, contact, three languages and the theme button do not fit beside the wordmark on
+     a phone, so the mark carries the brand there. */
+  .logo-container h1 {
+    display: none;
+  }
+
+  /* Anchored to the button, the panel would run off the left edge on a phone. */
+  .contact-popover {
+    position: fixed;
+    top: 4.25rem;
+    left: 1rem;
+    right: 1rem;
+    width: auto;
+  }
 }

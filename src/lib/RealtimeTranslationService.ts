@@ -16,6 +16,8 @@ interface ActiveSession {
     target: Language;
     sourceTrack: MediaStreamTrack;
     outputTrack?: MediaStreamTrack;
+    /** Plays the translation, muted, so Chromium decodes it and it can be sent on (see ontrack). */
+    player?: HTMLAudioElement;
     translatedText: string;
     originalText: string;
     startedAt: number;
@@ -150,9 +152,20 @@ class RealtimeTranslationService {
         this.sessions.set(target.id, session);
         const isCurrent = () => !this.stopping && this.sessions.get(target.id) === session;
 
-        peer.ontrack = ({ track }) => {
+        peer.ontrack = ({ track, streams }) => {
             if (!isCurrent()) return;
             session.outputTrack = track;
+            // Chromium only decodes a received WebRTC audio track while something is playing
+            // it. Sent on to the media server unplayed, the translation produced no packets at
+            // all: phones showed the captions but heard nothing, and the translation recording
+            // stayed empty. Playing it here, muted, keeps it flowing without any sound in the
+            // room (and so without feeding back into the microphone).
+            session.player?.pause();
+            const player = new Audio();
+            player.muted = true;
+            player.srcObject = streams[0] ?? new MediaStream([track]);
+            void player.play().catch((error) => console.warn('Could not start the translation player:', error));
+            session.player = player;
             session.firstOutputAt ||= performance.now();
             // After a reconnect the channel is still published, so swap the audio in place and
             // keep every listener attached instead of making them all renegotiate.
@@ -277,6 +290,11 @@ class RealtimeTranslationService {
         session.flush();
         session.flush = () => undefined;
         session.abort.abort();
+        if (session.player) {
+            session.player.pause();
+            session.player.srcObject = null;
+            session.player = undefined;
+        }
         session.peer.ontrack = null;
         session.peer.onconnectionstatechange = null;
         session.sourceTrack.stop();

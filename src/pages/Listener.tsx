@@ -1,10 +1,11 @@
-import { ArrowDown, ArrowLeft, Captions, Ear, Headphones, Maximize2, Minimize2, Volume2, VolumeX } from 'lucide-react';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { ArrowDown, ArrowLeft, Captions, Headphones, Maximize2, Minimize2, Volume2, VolumeX } from 'lucide-react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { voiceService, type CaptionSegment, type ListenerStatus } from '../lib/VoiceService';
 import { settingsService, type EventInfo, type Language } from '../lib/SettingsService';
 import { formatEventDates, useTranslation, type TranslationKey } from '../lib/i18n';
 import { useGoBack } from '../lib/navigation';
 import { allowSleep, keepAwake } from '../lib/keepAwake';
+import { choosePlaybackPath, startDirectPlayback, type DirectPlayback } from '../lib/directPlayback';
 import './Interpreter.css';
 import './Listener.css';
 
@@ -39,7 +40,7 @@ const store = (key: string, value: string) => {
 // reconnects to apparent silence.
 const readSavedVolume = () => readStored(VOLUME_KEY, (value) => {
     const saved = Number(value ?? NaN);
-    return Number.isFinite(saved) && saved > 0 && saved <= 100 ? saved : 100;
+    return Number.isFinite(saved) && saved > 0 && saved <= 200 ? saved : 100;
 });
 const readTextSize = () => readStored(TEXT_SIZE_KEY, (value): TextSize => (TEXT_SIZES.includes(value as TextSize) ? value as TextSize : 'medium'));
 const readShowOriginal = () => readStored(ORIGINAL_KEY, (value) => value !== 'false');
@@ -107,8 +108,10 @@ function Transcript({ segments, field, empty, sizeClass, jumpLabel }: {
 
 /* ------------------------------------------------------------ device helpers */
 
-type AudioSessionNavigator = Navigator & { audioSession?: { type: 'auto' | 'playback' | 'play-and-record' } };
-type SinkAudioElement = HTMLAudioElement & { setSinkId?: (sinkId: string) => Promise<void> };
+// iPhone and iPad ignore the page's volume (only the hardware buttons change it), so the slider
+// is replaced by a hint there. iPadOS presents itself as a Mac with a touch screen.
+const isApplePhone = () => /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.userAgent.includes('Macintosh') && navigator.maxTouchPoints > 1);
 
 /* ------------------------------------------------------------ page */
 
@@ -126,8 +129,10 @@ export default function Listener() {
     const [segments, setSegments] = useState<CaptionSegment[]>([]);
     const [isMuted, setIsMuted] = useState(false);
     const [volume, setVolume] = useState(readSavedVolume);
-    const [playbackMode, setPlaybackMode] = useState<'speaker' | 'earpiece'>('speaker');
-    const [playbackHint, setPlaybackHint] = useState('');
+    // How sound reaches the speaker: Web Audio on Android (see directPlayback), the media
+    // element elsewhere. Falls back to the element if the direct path fails on a phone.
+    const [playbackPath, setPlaybackPath] = useState(choosePlaybackPath);
+    const [volumeAdjustable] = useState(() => !isApplePhone());
     const [playBlocked, setPlayBlocked] = useState(false);
     const [isInterpreterMuted, setIsInterpreterMuted] = useState(false);
     const [signalLevel, setSignalLevel] = useState(0);
@@ -137,7 +142,7 @@ export default function Listener() {
 
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const audioContextRef = useRef<AudioContext | null>(null);
-    const playbackModeRef = useRef<'speaker' | 'earpiece'>('speaker');
+    const directRef = useRef<DirectPlayback | null>(null);
     const meterCleanup = useRef<(() => void) | null>(null);
     const fullscreenRef = useRef<HTMLDivElement>(null);
     // Ignores replies for a channel the listener has already switched away from.
@@ -146,7 +151,19 @@ export default function Listener() {
     // The channel from the QR link is derived, not stored: it resolves as soon as the channel
     // list loads, and an explicit tap simply overrides it.
     const linkedLanguage = useMemo(() => resolveChannel(languages, requestedChannel), [languages, requestedChannel]);
-    const channelId = selectedId || linkedLanguage?.id || '';
+    // Once anything is on air, only the live channels are offered. The channel list is every
+    // language the event may use (AI mode needs the source language as a channel), but in a
+    // human-interpreted service the source channel carries nothing and listeners who chose it
+    // heard silence. Before the service starts, all channels show so people can pick early.
+    // The channel from the QR link and the one being listened to stay, so a short interpreter
+    // drop does not pull the tab away.
+    const liveLanguages = languages.filter((language) => language.activePeerId);
+    const visibleLanguages = liveLanguages.length
+        ? languages.filter((language) => language.activePeerId || language.id === linkedLanguage?.id || (listening && language.id === selectedId))
+        : languages;
+    const chosenId = [selectedId, linkedLanguage?.id].find((id) => id && visibleLanguages.some((language) => language.id === id));
+    // With a single channel on air there is nothing to choose: it is picked already.
+    const channelId = chosenId || (liveLanguages.length === 1 ? liveLanguages[0].id : '');
     const linkedChannelMissing = Boolean(requestedChannel) && languages.length > 0 && !linkedLanguage;
     const activeLanguage = languages.find((language) => language.id === channelId) || null;
     const channelLive = Boolean(activeLanguage?.activePeerId);
@@ -181,6 +198,8 @@ export default function Listener() {
                 audioRef.current.srcObject = null;
             }
             meterCleanup.current?.();
+            directRef.current?.stop();
+            directRef.current = null;
             void audioContextRef.current?.close();
             audioContextRef.current = null;
         };
@@ -188,10 +207,12 @@ export default function Listener() {
 
     useEffect(() => {
         if (audioRef.current) {
-            audioRef.current.muted = isMuted;
-            audioRef.current.volume = volume / 100;
+            // On the Web Audio path the element only keeps Chrome decoding, and stays muted.
+            audioRef.current.muted = playbackPath === 'direct' ? true : isMuted;
+            audioRef.current.volume = Math.min(volume, 100) / 100;
         }
-    }, [volume, isMuted]);
+        directRef.current?.setGain(isMuted ? 0 : volume / 100);
+    }, [volume, isMuted, playbackPath]);
 
     // Leaving browser fullscreen with the system gesture or Escape also leaves the view.
     useEffect(() => {
@@ -199,38 +220,6 @@ export default function Listener() {
         document.addEventListener('fullscreenchange', onChange);
         return () => document.removeEventListener('fullscreenchange', onChange);
     }, []);
-
-    const applyPlaybackMode = useCallback(async (mode: 'speaker' | 'earpiece') => {
-        const audio = audioRef.current as SinkAudioElement | null;
-        if (!audio) return;
-        const phoneNavigator = navigator as AudioSessionNavigator;
-        let routedToNamedDevice = false;
-        let audioSessionApplied = false;
-        setPlaybackHint(mode === 'speaker' ? t('speaker_active') : t('earpiece_requested'));
-        try {
-            if (phoneNavigator.audioSession) {
-                phoneNavigator.audioSession.type = mode === 'speaker' ? 'playback' : 'play-and-record';
-                audioSessionApplied = true;
-            }
-            if (audio.setSinkId && navigator.mediaDevices?.enumerateDevices) {
-                const outputs = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'audiooutput');
-                const pattern = mode === 'speaker' ? /speaker|speakerphone|loudspeaker|громк/i : /earpiece|receiver|handset|телефон|динамик вызова/i;
-                const matchingOutput = outputs.find((device) => pattern.test(device.label));
-                if (matchingOutput) {
-                    await audio.setSinkId(matchingOutput.deviceId);
-                    routedToNamedDevice = true;
-                } else if (mode === 'speaker') {
-                    // Empty sink ID restores the normal media/speaker output.
-                    await audio.setSinkId('');
-                }
-            }
-            if (mode === 'earpiece' && !routedToNamedDevice && !audioSessionApplied) setPlaybackHint(t('earpiece_fallback'));
-            else setPlaybackHint(mode === 'speaker' ? t('speaker_active') : t('earpiece_active'));
-        } catch (error) {
-            console.warn('Audio output routing is controlled by the phone:', error);
-            setPlaybackHint(mode === 'speaker' ? t('speaker_active') : t('earpiece_fallback'));
-        }
-    }, [t]);
 
     /**
      * iOS only grants playback while a user gesture is still on the stack. The SFU handshake
@@ -242,12 +231,15 @@ export default function Listener() {
         const audio = audioRef.current;
         if (!audio) return;
         try {
-            const context = audioContextRef.current ?? new AudioContext();
+            // 'playback' asks for larger output buffers: steadier sound and less battery, and
+            // the extra few milliseconds do not matter for listening.
+            const context = audioContextRef.current ?? new AudioContext({ latencyHint: 'playback' });
             audioContextRef.current = context;
             void context.resume();
+            if (playbackPath === 'direct') return;
             if (!audio.srcObject) audio.srcObject = context.createMediaStreamDestination().stream;
             audio.muted = isMuted;
-            audio.volume = volume / 100;
+            audio.volume = Math.min(volume, 100) / 100;
             void audio.play().catch(() => undefined);
         } catch (error) {
             console.warn('Could not pre-authorise audio playback:', error);
@@ -277,16 +269,33 @@ export default function Listener() {
             (stream) => {
                 const audio = audioRef.current;
                 if (!audio || listeningTo.current !== language.id) return;
-                audio.srcObject = stream;
-                audio.play().then(() => {
-                    setPlayBlocked(false);
-                    void applyPlaybackMode(playbackModeRef.current);
-                }).catch((error) => {
-                    console.error('Audio playback failed:', error);
-                    setPlayBlocked(true);
-                });
+                directRef.current?.stop();
+                directRef.current = null;
                 meterCleanup.current?.();
-                meterCleanup.current = voiceService.createLevelMeter(stream, setSignalLevel);
+                meterCleanup.current = null;
+                const playWithElement = () => {
+                    audio.muted = isMuted;
+                    audio.srcObject = stream;
+                    audio.play().then(() => setPlayBlocked(false)).catch((error) => {
+                        console.error('Audio playback failed:', error);
+                        setPlayBlocked(true);
+                    });
+                    meterCleanup.current = voiceService.createLevelMeter(stream, setSignalLevel);
+                };
+                const context = audioContextRef.current;
+                if (playbackPath !== 'direct' || !context) { playWithElement(); return; }
+                startDirectPlayback(context, audio, stream, { gain: isMuted ? 0 : volume / 100, onLevel: setSignalLevel }).then((playback) => {
+                    if (listeningTo.current !== language.id) { playback.stop(); return; }
+                    directRef.current = playback;
+                    // Blocked until a tap if the browser has not allowed sound yet; the button
+                    // that shows then resumes the context, and this clears it again.
+                    context.onstatechange = () => setPlayBlocked(context.state !== 'running');
+                    setPlayBlocked(context.state !== 'running');
+                }).catch((error) => {
+                    console.warn('Direct playback unavailable, using the media element:', error);
+                    setPlaybackPath('element');
+                    if (listeningTo.current === language.id) playWithElement();
+                });
             },
             (muted) => setIsInterpreterMuted(muted),
             (segment) => {
@@ -302,6 +311,8 @@ export default function Listener() {
             return;
         }
         setNotice('');
+        // Pinned, so the tab stays the same when other channels come or go.
+        setSelectedId(language.id);
         unlockPlayback();
         // Inside the tap: the plain-link fallback (a silent video) needs a gesture to start.
         keepAwake();
@@ -317,6 +328,8 @@ export default function Listener() {
         if (listening && language.id !== listeningTo.current) {
             meterCleanup.current?.();
             meterCleanup.current = null;
+            directRef.current?.stop();
+            directRef.current = null;
             setSignalLevel(0);
             connect(language);
         }
@@ -330,11 +343,12 @@ export default function Listener() {
         setFullscreen(false);
         setSegments([]);
         setSignalLevel(0);
-        setPlaybackHint('');
         setIsInterpreterMuted(false);
         setPlayBlocked(false);
         meterCleanup.current?.();
         meterCleanup.current = null;
+        directRef.current?.stop();
+        directRef.current = null;
         if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
         if (audioRef.current) {
             audioRef.current.pause();
@@ -343,6 +357,10 @@ export default function Listener() {
     };
 
     const retryPlayback = () => {
+        if (directRef.current) {
+            void audioContextRef.current?.resume().then(() => setPlayBlocked(audioContextRef.current?.state !== 'running')).catch(() => undefined);
+            return;
+        }
         void audioRef.current?.play().then(() => setPlayBlocked(false)).catch(() => undefined);
     };
 
@@ -403,7 +421,7 @@ export default function Listener() {
 
     const channelTabs = (
         <div className="channel-tabs" role="tablist" aria-label={t('select_channel')}>
-            {languages.map((language) => (
+            {visibleLanguages.map((language) => (
                 <button key={language.id} type="button" role="tab" aria-selected={channelId === language.id}
                     className={`channel-tab ${channelId === language.id ? 'selected' : ''}`} onClick={() => chooseChannel(language)}>
                     <span>{language.name}</span>
@@ -431,7 +449,7 @@ export default function Listener() {
                     {(notice || linkedChannelMissing) && <p className="text-danger listen-notice">{notice || t('channel_not_found')}</p>}
                     {languages.length === 0 ? <p className="text-muted">{t('no_languages')}</p> : (
                         <div className="lobby-channels" role="radiogroup" aria-label={t('select_channel')}>
-                            {languages.map((language) => {
+                            {visibleLanguages.map((language) => {
                                 const isAi = language.activePeerId === 'ai-active';
                                 const isOriginal = language.liveRole === 'original';
                                 return (
@@ -519,32 +537,32 @@ export default function Listener() {
 
                     <details className="sound-settings">
                         <summary>{t('sound_settings')}</summary>
-                        <div className="playback-controls" role="group" aria-label={t('audio_output')}>
-                            <button type="button" className={`playback-mode-btn ${playbackMode === 'earpiece' ? 'active' : ''}`} aria-pressed={playbackMode === 'earpiece'}
-                                onClick={() => { playbackModeRef.current = 'earpiece'; setPlaybackMode('earpiece'); void applyPlaybackMode('earpiece'); }}>
-                                <Ear size={22} /><span>{t('earpiece')}</span>
-                            </button>
-                            <button type="button" className={`playback-mode-btn ${playbackMode === 'speaker' ? 'active' : ''}`} aria-pressed={playbackMode === 'speaker'}
-                                onClick={() => { playbackModeRef.current = 'speaker'; setPlaybackMode('speaker'); void applyPlaybackMode('speaker'); }}>
-                                <Volume2 size={22} /><span>{t('speaker')}</span>
-                            </button>
-                        </div>
-                        {playbackHint && <p className="playback-hint">{playbackHint}</p>}
                         <div className="volume-control">
                             <div className="signal-meter" role="meter" aria-label={t('audio_level')} title={t('audio_level')}
                                 aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(signalLevel)}>
                                 <div className="signal-bar" style={{ height: `${signalLevel}%` }}></div>
                             </div>
-                            <input type="range" min="0" max="100" value={isMuted ? 0 : volume} aria-label={t('sound_settings')}
-                                style={{ '--volume-percent': `${isMuted ? 0 : volume}%` } as CSSProperties}
-                                onChange={(change) => {
-                                    const next = parseInt(change.target.value);
-                                    setVolume(next);
-                                    store(VOLUME_KEY, String(next));
-                                    if (isMuted) setIsMuted(false);
-                                }}
-                                className="volume-slider" />
+                            {volumeAdjustable ? (() => {
+                                const max = playbackPath === 'direct' ? 200 : 100;
+                                const shown = isMuted ? 0 : Math.min(volume, max);
+                                return (
+                                    <>
+                                        <input type="range" min="0" max={max} step="5" value={shown} aria-label={t('volume_label')}
+                                            style={{ '--volume-percent': `${(shown / max) * 100}%` } as CSSProperties}
+                                            onChange={(change) => {
+                                                const next = parseInt(change.target.value);
+                                                setVolume(next);
+                                                store(VOLUME_KEY, String(next));
+                                                if (isMuted) setIsMuted(false);
+                                            }}
+                                            className="volume-slider" />
+                                        <span className="volume-value">{shown}%</span>
+                                    </>
+                                );
+                            })() : <p className="playback-hint volume-buttons-hint">{t('volume_buttons_hint')}</p>}
                         </div>
+                        {volumeAdjustable && playbackPath === 'direct' && <p className="playback-hint">{t('volume_boost_hint')}</p>}
+                        <p className="playback-hint">{t('headphones_hint')}</p>
                     </details>
 
                     <button type="button" className="stop-listening" onClick={stopListening}>{t('stop_listening')}</button>

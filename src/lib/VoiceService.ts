@@ -52,6 +52,10 @@ export class VoiceService {
     // the broadcast it was rebuilding.
     private intended = new Map<string, { track: MediaStreamTrack; mode: 'human' | 'ai'; role?: BroadcastRole }>();
     private recordOnlyIntent: { channelId: string; track: MediaStreamTrack } | null = null;
+    // Human mode can also put the speaker's own voice on its channel, from a second input.
+    // The interpreter's mute button leaves that channel playing.
+    private originalStream: MediaStream | null = null;
+    private keepOnMute = new Set<string>();
     // Bumped by stopBroadcast, so a start still waiting for the microphone or the server is
     // abandoned instead of going live after the operator stopped or left the page.
     private broadcastGeneration = 0;
@@ -67,6 +71,9 @@ export class VoiceService {
     // Bumped on every listen attempt, so a slow handshake for a channel the listener has
     // already switched away from cannot finish last and take over.
     private listenAttempt = 0;
+    // Watches the received stream; a paused (muted) broadcaster sends nothing on purpose.
+    private listenWatchdog = 0;
+    private remotePaused = false;
     private onListenerStatus?: ListenerStatusCallback;
     private onListenerStreamReceived?: (stream: MediaStream) => void;
     private onTranslationTextReceived?: CaptionCallback;
@@ -136,9 +143,15 @@ export class VoiceService {
     }
 
     async getInputStream(deviceId?: string) {
-        if (!navigator.mediaDevices?.getUserMedia) throw new Error('Microphone access requires HTTPS or localhost.');
         this.sourceStream?.getTracks().forEach((track) => track.stop());
         this.sourceStream = null;
+        this.sourceStream = await this.openInput(deviceId);
+        return this.sourceStream;
+    }
+
+    /** Opens an input without making it the main one (the original speech in Human mode). */
+    private async openInput(deviceId?: string): Promise<MediaStream> {
+        if (!navigator.mediaDevices?.getUserMedia) throw new Error('Microphone access requires HTTPS or localhost.');
         if (deviceId === SYSTEM_AUDIO_DEVICE_ID) {
             if (!this.isDesktopApp() || !navigator.mediaDevices.getDisplayMedia) {
                 throw new Error('System-output capture is available only in the desktop app.');
@@ -148,7 +161,6 @@ export class VoiceService {
             catch (error) { throw this.mediaError(error); }
             displayStream.getVideoTracks().forEach((track) => { track.stop(); displayStream.removeTrack(track); });
             if (!displayStream.getAudioTracks().length) throw new Error('Windows did not provide a system-audio track.');
-            this.sourceStream = displayStream;
             return displayStream;
         }
         const audio: MediaTrackConstraints = {
@@ -160,7 +172,7 @@ export class VoiceService {
             sampleRate: 48000,
         };
         try {
-            this.sourceStream = await navigator.mediaDevices.getUserMedia({ audio });
+            return await navigator.mediaDevices.getUserMedia({ audio });
         } catch (error) {
             // A chosen input that is gone used to fall back to the default device without a word,
             // which could broadcast the laptop microphone instead of the mixer feed.
@@ -169,7 +181,6 @@ export class VoiceService {
             }
             throw this.mediaError(error);
         }
-        return this.sourceStream;
     }
 
     private bindHandlers() {
@@ -195,7 +206,9 @@ export class VoiceService {
             if (this.currentListenerChannelId === channelId) this.onTranslationTextReceived?.(segment);
         });
         realtimeSocket.on<{ channelId: string; muted: boolean }>('channelMuted', ({ channelId, muted }) => {
-            if (this.currentListenerChannelId === channelId) this.onMuteStatusChange?.(muted);
+            if (this.currentListenerChannelId !== channelId) return;
+            this.remotePaused = muted;
+            this.onMuteStatusChange?.(muted);
         });
         realtimeSocket.on<{ channelId: string; count: number }>('listenerCount', ({ channelId, count }) => {
             if (!this.producers.has(channelId)) return;
@@ -455,9 +468,30 @@ export class VoiceService {
         }
     }
 
+    /**
+     * Human mode: also broadcasts the original speech on `channelId`, tagged as the original.
+     * The same input as the interpreter's is shared (a copy of its track, so muting the
+     * interpreter does not silence it); a different input is opened on its own.
+     */
+    async startOriginalChannel(channelId: string, deviceId: string, mainDeviceId: string, onStatus: StatusCallback, onConnectionsChange: (count: number) => void) {
+        const generation = this.broadcastGeneration;
+        const mainTrack = this.sourceStream?.getAudioTracks()[0];
+        const stream = deviceId === mainDeviceId && mainTrack ? new MediaStream([mainTrack.clone()]) : await this.openInput(deviceId);
+        if (generation !== this.broadcastGeneration) {
+            stream.getTracks().forEach((track) => track.stop());
+            throw new Error('The broadcast was stopped.');
+        }
+        this.originalStream = stream;
+        const [track] = stream.getAudioTracks();
+        if (!track) throw new Error('The input for the original speech produced no audio track. Choose a different device and try again.');
+        this.keepOnMute.add(channelId);
+        await this.publishTrack(channelId, track, 'human', onStatus, onConnectionsChange, 'original');
+    }
+
     setMuted(muted: boolean) {
         this.muted = muted;
         for (const [channelId, producer] of this.producers) {
+            if (this.keepOnMute.has(channelId)) continue;
             if (muted) producer.pause(); else producer.resume();
             // producer.pause() only pauses the local object; the server has to pause the real
             // producer so listeners actually stop receiving and are told why.
@@ -492,6 +526,7 @@ export class VoiceService {
      */
     stopChannel(channelId: string) {
         this.intended.delete(channelId);
+        this.keepOnMute.delete(channelId);
         realtimeSocket.emit('closeProducer', { channelId });
         this.dropChannel(channelId);
     }
@@ -505,6 +540,9 @@ export class VoiceService {
         this.stopRecordOnly();
         this.sourceStream?.getTracks().forEach((track) => track.stop());
         this.sourceStream = null;
+        this.originalStream?.getTracks().forEach((track) => track.stop());
+        this.originalStream = null;
+        this.keepOnMute.clear();
         this.listenerCounts.clear();
         this.muted = false;
         this.onConnectionsChange?.(0);
@@ -572,7 +610,9 @@ export class VoiceService {
             this.consumer = consumer;
             this.consumer.on('transportclose', () => this.handleStreamLoss());
             this.consumer.on('trackended', () => this.handleStreamLoss());
-            this.onMuteStatusChange?.(Boolean(consumeInfo.producerPaused));
+            this.remotePaused = Boolean(consumeInfo.producerPaused);
+            this.onMuteStatusChange?.(this.remotePaused);
+            this.watchStream(consumer, channelId, stale);
             onStatus('receiving');
             this.onListenerStreamReceived?.(new MediaStream([this.consumer.track]));
         } catch (error) {
@@ -582,7 +622,33 @@ export class VoiceService {
         }
     }
 
+    /**
+     * Reconnects when the stream stops delivering audio without the broadcaster having muted:
+     * the connection looks fine but the phone hears nothing (one Android phone needed a manual
+     * refresh in a real service). About five seconds without a packet triggers it.
+     */
+    private watchStream(consumer: mediasoupClient.types.Consumer, channelId: string, stale: () => boolean) {
+        window.clearInterval(this.listenWatchdog);
+        let lastPackets = -1;
+        let silentChecks = 0;
+        this.listenWatchdog = window.setInterval(() => {
+            if (stale() || this.consumer !== consumer || consumer.closed) { window.clearInterval(this.listenWatchdog); return; }
+            void consumer.getStats().then((stats) => {
+                let packets = 0;
+                stats.forEach((entry) => { if (entry.type === 'inbound-rtp') packets += entry.packetsReceived || 0; });
+                silentChecks = this.remotePaused || packets > lastPackets ? 0 : silentChecks + 1;
+                lastPackets = packets;
+                if (silentChecks < 2 || stale() || this.consumer !== consumer) return;
+                window.clearInterval(this.listenWatchdog);
+                console.warn(`No audio from ${channelId} for a while; reconnecting.`);
+                this.handleStreamLoss();
+                void this.reconnectListener();
+            }).catch(() => undefined);
+        }, 2500);
+    }
+
     private handleStreamLoss() {
+        window.clearInterval(this.listenWatchdog);
         this.consumer?.close();
         this.consumer = null;
         if (this.currentListenerChannelId) this.onListenerStatus?.('waiting');
@@ -596,6 +662,7 @@ export class VoiceService {
     }
 
     stopListening() {
+        window.clearInterval(this.listenWatchdog);
         this.listenAttempt += 1;
         this.currentListenerChannelId = null;
         this.onMuteStatusChange = undefined;

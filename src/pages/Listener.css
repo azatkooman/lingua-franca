@@ -682,6 +682,19 @@
 
 /* Incoming audio level. Drawn as a visible track, the same colour as the slider's empty
    part, because an empty meter used to be just a divider border and read as a stray line. */
+.volume-value {
+    min-width: 3.2rem;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.volume-buttons-hint {
+    margin: 0;
+    flex: 1;
+}
+
 .signal-meter {
     display: flex;
     flex-direction: column;

@@ -6,7 +6,7 @@ Local-network simultaneous interpretation for any kind of event: conferences, me
 
 ## Modes
 
-- **Human:** publishes an interpreter's microphone directly over the local WebRTC SFU.
+- **Human:** publishes an interpreter's microphone directly over the local WebRTC SFU. On the operator's computer, **Also broadcast the original speech on its own channel** puts the speaker's voice from a second input (for example the cable from the sound desk) on the source channel, tagged **Original** for listeners. The interpreter's mute button leaves the original playing. If the interpreter uses a phone, simply start the computer on the original channel instead.
 - **OpenAI Realtime (AI):** sends the source track to `gpt-realtime-translate`, republishes the translated audio track through the local SFU, and sends synchronized captions. If the OpenAI connection drops, the app rebuilds it on its own for about two minutes; listeners hear silence instead of being disconnected while it does.
 
 In AI mode the operator can also broadcast the original speech, with captions in the original language, on the source language's channel (**Also broadcast the original speech** on the broadcast screen, on by default). Listeners who speak that language can then follow along on their phones too.
@@ -21,9 +21,12 @@ Listeners scan the QR code, see the event name and dates, pick a language and ta
 - **Original text**: on translation channels, a second box under the translation with the speaker's own words, shown from the start and filled in as they speak. The listener can hide it. When AI mode also broadcasts the original speech, that channel is tagged **Original** in the list and its captions are labelled **Original speech**.
 - **Text size**: the **A** button cycles medium, large and small.
 - **Full screen**: a reading view with large text and a small bar for status, text size, mute and exit.
+- **Only live channels are listed** once the service is on air. The channel list holds every language the event may use (AI mode needs the source language as a channel), but in a human-interpreted service the source channel carries nothing, so it is hidden instead of offering silence. Before anything is on air all channels are shown, so people can choose early. With one channel on air it is already selected. A channel opened from a QR link, and the channel being listened to, always stay in the list.
 - **Switch language** with the tabs at the top, without going back.
 - **Status**: Live, Waiting for the speaker, Connecting, or Reconnecting.
-- **Sound**: mute, volume, a level meter, and Phone / Speaker output, under **Sound**.
+- **Sound**: mute, a level meter and a volume control under **Sound**. On Android the volume goes up to 200%, to make quiet speech louder. iPhones only allow the hardware buttons, so the screen says so. Headphones take over automatically when plugged in.
+- **Android playback**: Chrome on Android plays WebRTC audio from a media element through the phone's call path: quieter, following the call volume, and capped at 100%. Android listeners therefore hear the audio through Web Audio with a gain stage (up to 200%, with a limiter), while a muted element keeps Chrome decoding the stream (Chrome decodes received audio only while an element plays it). If that fails the page falls back to the normal player. Add `&playback=element` to a listener link to force the old way, or `&playback=direct` to try the new one on another browser.
+- **Silent-stream recovery**: a phone that stops receiving audio for about five seconds while the speaker is not muted reconnects on its own.
 - The screen is kept on while listening, on both links: the browser's wake lock on HTTPS, and on the plain link a tiny muted video that phones treat as playing ([NoSleep.js](https://github.com/richtr/NoSleep.js)). Text size, the original-text choice and the volume are remembered on each phone.
 
 Every screen has a help button (a question mark) with the organiser's contacts (set in Admin, hidden when empty), the **RU / KK / EN** interface switch, and a light / dark / system theme switch. The Kazakh text has not yet been reviewed by a native speaker.
@@ -34,7 +37,7 @@ Every screen has a help button (a question mark) with the organiser's contacts (
 
 **Recordings and transcripts** (in Admin):
 
-- **Record the audio of every live channel** saves each broadcast as an `.opus` file on this computer: phone and desktop interpreters, every AI translation, and in AI mode the original speech, even when it is not broadcast on its own channel. In Human mode only the interpreter can be recorded, because the original speech does not go through the app. To record an unbroadcast original in AI mode, switch recording on before starting the broadcast. The server writes the audio as it arrives, so a crash or power cut loses at most a second, and a recording can be downloaded while it is still running. Pauses (a muted microphone) are kept as silence, so the file keeps real time. Expect about 10 to 30 MB per hour for each channel (about 11 MB for one hour of speech in testing). Off by default.
+- **Record the audio of every live channel** saves each broadcast as an `.opus` file on this computer: phone and desktop interpreters, every AI translation, and in AI mode the original speech, even when it is not broadcast on its own channel. In Human mode the original speech is recorded only when it is also broadcast on its own channel; otherwise it does not go through the app. To record an unbroadcast original in AI mode, switch recording on before starting the broadcast. The server writes the audio as it arrives, so a crash or power cut loses at most a second, and a recording can be downloaded while it is still running. Pauses (a muted microphone) are kept as silence, so the file keeps real time. Expect about 10 to 30 MB per hour for each channel (about 11 MB for one hour of speech in testing). Off by default.
 - **Save the captions as text** (on by default) writes every finished caption sentence to a text file per language per day, with the time of each sentence and the original under it.
 - Files are listed by day with **Download** and **Delete**, and **Open folder** opens them in Explorer. They live in `%APPDATA%\lingua-franca\recordings`.
 
@@ -121,7 +124,7 @@ A phone only trusts certificates for public domain names, and a `192.168.x.x` ad
 - It opens with no warning, needs no DuckDNS and works on Wi-Fi without internet.
 - The audio is still encrypted: WebRTC always encrypts media (DTLS-SRTP). Only the page and the connection setup travel unencrypted on the venue Wi-Fi.
 - It serves listening only. Every sign-in, interpreter-code and operator request is refused on that port, sockets from it can never broadcast, and `/admin` and `/interpreter` redirect to HTTPS before anything can be typed.
-- The **Phone / Speaker** switch may not work there, because browsers keep audio-output selection for secure pages. Normal playback and volume are unaffected. The screen still stays on, using a silent video instead of the wake lock.
+- New Android Chrome versions (Chrome 154, October 2026, "Always use secure connections") show a one-time "not secure" warning before opening a plain-HTTP page; listeners can tap to continue. iPhones show nothing. To avoid the warning, set up the DuckDNS certificate: QR codes then use the HTTPS link, which opens without any warning everywhere. The screen still stays on on the plain link, using a silent video instead of the wake lock.
 
 Interpreter phones and Admin stay on HTTPS (they need the microphone or a PIN). They show the certificate warning once per phone unless the DuckDNS certificate in step 7 is set up. The plain link's page and connection setup are not authenticated, so someone on the same Wi-Fi with the right tools could tamper with them; for that reason QR codes switch to HTTPS automatically once a trusted certificate is set up. Admin can choose either link under **Link for listener phones**. If TCP 4175 is taken by another program, the app still starts and Admin says so, and QR codes fall back to HTTPS.
 

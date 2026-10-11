@@ -31,6 +31,11 @@ export default function Interpreter() {
     const [targetIds, setTargetIds] = useState<Set<string>>(new Set());
     // AI mode can also put the speaker's own audio and captions on the source channel.
     const [floorChannel, setFloorChannel] = useState(true);
+    // Human mode on the operator's computer can do the same from a second input, so listeners
+    // who want the speaker's own voice still have a channel for it.
+    const [humanOriginal, setHumanOriginal] = useState(() => localStorage.getItem('lingua_franca_human_original') === '1');
+    const [originalChannelId, setOriginalChannelId] = useState('');
+    const [originalMic, setOriginalMic] = useState(() => localStorage.getItem('lingua_franca_original_input') || '');
     const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([]);
     const [selectedMic, setSelectedMic] = useState('');
     const [isMuted, setIsMuted] = useState(false);
@@ -66,6 +71,7 @@ export default function Interpreter() {
         const target = languages.find((language) => language.code === 'en' && language.id !== source.id);
         setHumanChannelId((current) => current || authorizedChannelId || target?.id || languages[0].id);
         setSourceChannelId((current) => current || source.id);
+        setOriginalChannelId((current) => current || source.id);
         setTargetIds((current) => (current.size || !target ? current : new Set([target.id])));
     }, [languages, authorizedChannelId]);
 
@@ -74,6 +80,15 @@ export default function Interpreter() {
     const selectedMissing = Boolean(selectedMic) && (selectedMic === SYSTEM_AUDIO_DEVICE_ID
         ? !isDesktopApp
         : !microphones.some((microphone) => microphone.deviceId === selectedMic));
+
+    // Only the operator, and only with a second channel to put it on. Interpreter phones are
+    // limited to their own channel by the server.
+    const canBroadcastOriginal = isAdmin && !authorizedChannelId && languages.length > 1;
+    const originalActive = mode === 'human' && canBroadcastOriginal && humanOriginal;
+    // Never the interpreter's own channel: falls back to the first other one.
+    const originalTarget = originalChannelId && originalChannelId !== humanChannelId
+        ? originalChannelId
+        : languages.find((language) => language.id !== humanChannelId)?.id || '';
 
     const targetCandidates = useMemo(
         () => languages.filter((language) => language.id !== sourceChannelId),
@@ -168,12 +183,17 @@ export default function Interpreter() {
             if (mode === 'human') {
                 if (!humanChannelId) throw new Error(t('choose_channel_first'));
                 await voiceService.startBroadcast(humanChannelId, setStatus, setListeners, selectedMic);
+                // A failure here fails the whole start, like any other input problem: going live
+                // without the original the operator asked for would go unnoticed.
+                if (originalActive) await voiceService.startOriginalChannel(originalTarget, originalMic, selectedMic, setStatus, setListeners);
                 liveRef.current = true;
                 localStorage.setItem('lingua_franca_microphone', selectedMic);
                 void refreshMicrophones(false);
                 const stream = voiceService.getBroadcastStream();
                 if (stream) meterCleanup.current = voiceService.createLevelMeter(stream, setSignalLevel);
-                setStatus(`${t('on_air')}: ${languageName(humanChannelId)}`);
+                setStatus(originalActive
+                    ? `${t('on_air')}: ${languageName(humanChannelId)} · ${t('role_original')}: ${languageName(originalTarget)}`
+                    : `${t('on_air')}: ${languageName(humanChannelId)}`);
             } else {
                 const source = languages.find((language) => language.id === sourceChannelId);
                 const targetLanguages = languages.filter((language) => targetIds.has(language.id) && language.id !== sourceChannelId);
@@ -241,6 +261,31 @@ export default function Interpreter() {
                         {authorizedChannelId && (
                             <p className="text-muted">{t('interpreter_link_only', { channel: settingsService.getInterpreterChannelName() })}</p>
                         )}
+                        {canBroadcastOriginal && (
+                            <label className="checkbox-row mt-4">
+                                <input type="checkbox" checked={humanOriginal} disabled={isLive || starting} onChange={(event) => {
+                                    setHumanOriginal(event.target.checked);
+                                    localStorage.setItem('lingua_franca_human_original', event.target.checked ? '1' : '0');
+                                }} />
+                                <span>{t('human_original_option')}</span>
+                            </label>
+                        )}
+                        {originalActive && (
+                            <div className="glass-panel" style={{ padding: '1rem', margin: '0.5rem 0 1rem' }}>
+                                <label>{t('original_channel')}</label>
+                                <select className="custom-select" value={originalTarget} disabled={isLive || starting} onChange={(event) => setOriginalChannelId(event.target.value)}>
+                                    {languages.filter((language) => language.id !== humanChannelId).map((language) => <option key={language.id} value={language.id}>{language.name}</option>)}
+                                </select>
+                                <label>{t('original_input')}</label>
+                                <select className="custom-select" value={originalMic} disabled={isLive || starting} onChange={(event) => { setOriginalMic(event.target.value); localStorage.setItem('lingua_franca_original_input', event.target.value); }}>
+                                    <option value="">{t('default_input')}</option>
+                                    {isDesktopApp && <option value={SYSTEM_AUDIO_DEVICE_ID}>{t('system_output_input')}</option>}
+                                    {originalMic && originalMic !== SYSTEM_AUDIO_DEVICE_ID && !microphones.some((microphone) => microphone.deviceId === originalMic) && <option value={originalMic}>{t('input_missing_option')}</option>}
+                                    {microphones.map((microphone, index) => <option key={microphone.deviceId || `original-${index}`} value={microphone.deviceId}>{microphone.label || `Audio input ${index + 1}`}</option>)}
+                                </select>
+                                <p className="text-muted">{t('original_hint')}</p>
+                            </div>
+                        )}
                     </>
                 ) : (
                     <>
@@ -275,6 +320,7 @@ export default function Interpreter() {
                     <p className={isLive ? 'text-accent' : 'text-muted'}>{status}</p>
                     {isLive && <p className="text-muted">{t('listeners_connected', { count: listeners })}</p>}
                     {isLive && isMuted && <p className="text-danger">{t('mute_warning')}</p>}
+                    {isLive && originalActive && <p className="text-muted">{t('original_mute_note')}</p>}
                 </div>
 
                 <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>

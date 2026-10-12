@@ -256,3 +256,18 @@
     color: white;
     box-shadow: 0 4px 15px var(--primary-glow);
 }
+
+/* Two interpreters taking turns on one channel. */
+.handover-panel {
+    margin-top: 1rem;
+    padding: 1rem;
+    border: 1px solid rgba(245, 158, 11, 0.45);
+    display: grid;
+    gap: 0.75rem;
+}
+
+.handover-panel p {
+    margin: 0;
+    font-weight: 600;
+    line-height: 1.45;
+}

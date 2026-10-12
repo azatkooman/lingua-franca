@@ -1,6 +1,7 @@
 import { settingsService, type Language } from './SettingsService';
 import { voiceService } from './VoiceService';
 import { translateNow as tr } from './i18n';
+import { clearAlerts, raiseAlert } from './alerts';
 
 export interface TranslationUpdate {
     /** Stable for one caption sentence on one target, so a screen updates it in place. */
@@ -68,6 +69,11 @@ const PARTIAL_CAPTION_INTERVAL_MS = 250;
 // The original speech is transcribed only when asked for (input transcription). Without it the
 // Original box and the original channel's captions stayed empty.
 const INPUT_TRANSCRIPTION_MODEL = 'gpt-realtime-whisper';
+// Below this loudness (RMS of the input, roughly -50 dBFS) counts as silence for the pause.
+const SILENCE_RMS = 0.003;
+const SILENCE_CHECK_MS = 250;
+// Sound this many checks in a row (half a second) reopens the OpenAI connections.
+const RESUME_AFTER_CHECKS = 2;
 
 class RealtimeTranslationService {
     private sessions = new Map<string, ActiveSession>();
@@ -85,6 +91,16 @@ class RealtimeTranslationService {
     // The one target whose input transcript feeds those captions; every target hears the same
     // speech, so using them all would print each sentence once per language.
     private captionLead: string | null = null;
+    // The optional silence pause: after a stretch with no speech the OpenAI connections are
+    // closed (they bill by the minute, speech or not) and reopened as soon as someone speaks.
+    // Listeners stay connected throughout; the channel just carries silence.
+    private silenceWatch = 0;
+    private silenceContext: AudioContext | null = null;
+    private silencePauseMs = 0;
+    private silentSince = 0;
+    private loudChecks = 0;
+    private pausedForSilence = false;
+    private silenceBusy = false;
 
     async start(
         sourceLanguage: Language,
@@ -99,6 +115,8 @@ class RealtimeTranslationService {
         if (!settingsService.getAdminSettings()?.openaiConfigured) throw new Error('Add an OpenAI API key in Admin settings first.');
         this.stopping = false;
         this.muted = false;
+        this.pausedForSilence = false;
+        clearAlerts('ai_failed');
         this.context = { sourceLanguage, onStatus, onUpdate, onListeners };
         this.targets = new Map(targets.map((target) => [target.id, target]));
         // If the operator hands one of these channels to another broadcaster, stop paying for
@@ -131,6 +149,89 @@ class RealtimeTranslationService {
             });
         }
         await Promise.all(targets.map((target) => this.startTarget(target)));
+        this.startSilenceWatch(settingsService.getAdminSettings()?.aiSilencePauseMinutes ?? 0);
+    }
+
+    /** Watches the input's loudness for the silence pause; does nothing when it is off. */
+    private startSilenceWatch(minutes: number) {
+        this.stopSilenceWatch();
+        if (!(minutes > 0) || !this.sourceStream) return;
+        this.silencePauseMs = minutes * 60_000;
+        try {
+            const context = new AudioContext();
+            const analyser = context.createAnalyser();
+            analyser.fftSize = 2048;
+            context.createMediaStreamSource(this.sourceStream).connect(analyser);
+            const samples = new Float32Array(analyser.fftSize);
+            this.silenceContext = context;
+            this.silentSince = performance.now();
+            this.silenceWatch = window.setInterval(() => {
+                if (this.stopping || this.silenceBusy) return;
+                analyser.getFloatTimeDomainData(samples);
+                let sum = 0;
+                for (const sample of samples) sum += sample * sample;
+                const loud = Math.sqrt(sum / samples.length) > SILENCE_RMS;
+                if (this.pausedForSilence) {
+                    this.loudChecks = loud ? this.loudChecks + 1 : 0;
+                    if (this.loudChecks >= RESUME_AFTER_CHECKS) void this.resumeFromSilence();
+                    return;
+                }
+                if (loud) this.silentSince = performance.now();
+                else if (performance.now() - this.silentSince >= this.silencePauseMs) void this.pauseForSilence();
+            }, SILENCE_CHECK_MS);
+        } catch (error) {
+            console.warn('The silence pause could not start:', error);
+        }
+    }
+
+    private stopSilenceWatch() {
+        window.clearInterval(this.silenceWatch);
+        this.silenceWatch = 0;
+        void this.silenceContext?.close().catch(() => undefined);
+        this.silenceContext = null;
+    }
+
+    /** Closes every OpenAI leg but keeps the channels published, carrying silence. */
+    private async pauseForSilence() {
+        const context = this.context;
+        if (this.pausedForSilence || this.stopping || !context) return;
+        this.silenceBusy = true;
+        this.pausedForSilence = true;
+        this.loudChecks = 0;
+        try {
+            for (const timer of this.reconnectTimers.values()) window.clearTimeout(timer);
+            this.reconnectTimers.clear();
+            this.reconnectAttempts.clear();
+            const ids = [...this.targets.keys()];
+            for (const id of ids) {
+                await voiceService.replaceTrack(id, null).catch(() => false);
+                const session = this.sessions.get(id);
+                this.sessions.delete(id);
+                if (session) this.closeSession(session);
+            }
+            voiceService.setAiPaused(ids, true);
+            context.onStatus(tr('ai_paused_silence', { minutes: Math.round(this.silencePauseMs / 60_000) }));
+        } finally {
+            this.silenceBusy = false;
+        }
+    }
+
+    /** Someone is speaking again: reopen the OpenAI legs on the channels already published. */
+    private async resumeFromSilence() {
+        const context = this.context;
+        if (!this.pausedForSilence || this.stopping || !context) return;
+        this.silenceBusy = true;
+        this.pausedForSilence = false;
+        this.silentSince = performance.now();
+        try {
+            const targets = [...this.targets.values()];
+            voiceService.setAiPaused(targets.map((target) => target.id), false);
+            context.onStatus(tr('ai_resuming'));
+            await Promise.all(targets.map((target) => this.startTarget(target).catch(() => this.scheduleReconnect(target.id))));
+            if (this.context === context && !this.stopping) context.onStatus(tr('openai_live'));
+        } finally {
+            this.silenceBusy = false;
+        }
     }
 
     private async startTarget(target: Language) {
@@ -323,7 +424,7 @@ class RealtimeTranslationService {
     }
 
     private scheduleReconnect(targetId: string, minimumDelayMs = 0) {
-        if (this.stopping || this.reconnectTimers.has(targetId) || !this.targets.has(targetId)) return;
+        if (this.stopping || this.pausedForSilence || this.reconnectTimers.has(targetId) || !this.targets.has(targetId)) return;
         const attempts = this.reconnectAttempts.get(targetId) ?? 0;
         const backoff = attempts ? RECONNECT_DELAYS_MS[Math.min(attempts - 1, RECONNECT_DELAYS_MS.length - 1)] : 0;
         const timer = window.setTimeout(() => {
@@ -336,7 +437,7 @@ class RealtimeTranslationService {
     private async reconnectTarget(targetId: string) {
         const target = this.targets.get(targetId);
         const context = this.context;
-        if (this.stopping || !target || !context) return;
+        if (this.stopping || this.pausedForSilence || !target || !context) return;
         const current = this.sessions.get(targetId);
         // A "disconnected" leg that recovered during the grace period needs nothing.
         if (current?.peer.connectionState === 'connected') return;
@@ -344,6 +445,8 @@ class RealtimeTranslationService {
         this.reconnectAttempts.set(targetId, attempt);
         if (attempt > RECONNECT_DELAYS_MS.length) {
             context.onStatus(`OpenAI ${target.name} could not reconnect. Switch to Human mode, or stop and start again.`);
+            // This channel is now silent for good. A status line is easy to miss mid-service.
+            raiseAlert('ai_failed', tr('ai_failed_alert', { channel: target.name }), { channelId: targetId });
             return;
         }
         context.onStatus(`OpenAI ${target.name} connection lost. Reconnecting (attempt ${attempt} of ${RECONNECT_DELAYS_MS.length})…`);
@@ -393,6 +496,8 @@ class RealtimeTranslationService {
 
     stop() {
         this.stopping = true;
+        this.stopSilenceWatch();
+        this.pausedForSilence = false;
         this.stopReplacedWatch?.();
         this.stopReplacedWatch = null;
         for (const timer of this.reconnectTimers.values()) window.clearTimeout(timer);

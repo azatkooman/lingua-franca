@@ -1,5 +1,8 @@
 import { BrowserRouter, Navigate, Routes, Route } from 'react-router-dom';
 import AppHeader from './components/AppHeader';
+import AlertBanner from './components/AlertBanner';
+// Registers the operator alerts pushed by the server (phones that cannot hear, the AI budget).
+import './lib/operatorEvents';
 import Home from './pages/Home';
 import Admin from './pages/Admin';
 import Interpreter from './pages/Interpreter';
@@ -14,6 +17,7 @@ function App() {
     <BrowserRouter>
       <div className="app-container">
         <AppHeader />
+        <AlertBanner />
 
         <main className="app-main">
           <Routes>

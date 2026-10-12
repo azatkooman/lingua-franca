@@ -1,4 +1,4 @@
-const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, safeStorage, shell, systemPreferences } = require('electron');
+const { app, BrowserWindow, Notification, desktopCapturer, dialog, ipcMain, safeStorage, shell, systemPreferences } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -9,11 +9,13 @@ const http = require('http');
 const forge = require('node-forge');
 
 const {
-    DEFAULT_SETTINGS, INTERFACE_LANGUAGES, adminSettings, dropRetiredSettings, findLanguage, isValidDuckDnsDomain,
+    DEFAULT_SETTINGS, INTERFACE_LANGUAGES, adminSettings, budgetLevel, dropRetiredSettings, findLanguage, isValidDuckDnsDomain,
+    isVirtualAdapter, normalizeBudget, normalizeSilencePause,
     isValidEmail, normalizeContact, normalizeDuckDnsDomain, normalizeEvent, normalizeLanguages, publicSettings,
     selectLocalAddress,
 } = require('./lib/settings.cjs');
 const { TranscriptStore } = require('./lib/transcript.cjs');
+const { ListenerReports } = require('./lib/listener-reports.cjs');
 const { certificateCoversHost, certificateDetails: readCertificateDetails } = require('./lib/certificates.cjs');
 const { RecordingStore, ROLES, TranscriptLog } = require('./lib/recordings.cjs');
 const { startChannelRecording } = require('./lib/recorder.cjs');
@@ -58,6 +60,10 @@ const CAPTION_ROOM = 'captions:';
 // can never lock itself out. Broadcasters are signed in and refused instead.
 const LISTENER_TRANSPORT_LIMIT = 4;
 const PUBLISHER_TRANSPORT_LIMIT = 24;
+// A handover the current interpreter approved stays open this long for the next one to start.
+const HANDOVER_MS = 60 * 1000;
+// "Extend" on the dashboard gives a phone interpreter this much more time, up to a full session.
+const INTERPRETER_EXTEND_MS = 2 * 60 * 60 * 1000;
 
 let mainWindow;
 let httpsServer;
@@ -421,10 +427,28 @@ function pdfFileName(value) {
 // save box with an empty file name; this prints the page itself and suggests a real name.
 function registerDesktopActions(isDev) {
     const appOrigin = isDev ? 'https://localhost:5173' : `http://localhost:${LOCAL_PORT}`;
-    ipcMain.handle('save-page-as-pdf', async (event, requestedName) => {
+    const fromApp = (event) => {
         let origin = '';
         try { origin = new URL(event.senderFrame?.url || '').origin; } catch { /* not a page of ours */ }
-        if (origin !== appOrigin || !mainWindow || event.sender !== mainWindow.webContents) return { error: 'Not available here.' };
+        return origin === appOrigin && Boolean(mainWindow) && event.sender === mainWindow.webContents;
+    };
+    // Something the operator must see now (the AI gave up, an input died, phones cannot hear).
+    // Silent on purpose: this computer's sound may feed the PA, or be the broadcast itself when
+    // the input is "System output". The taskbar button flashes until the window is looked at.
+    ipcMain.handle('notify-operator', (event, payload) => {
+        if (!fromApp(event)) return { error: 'Not available here.' };
+        const title = String(payload?.title || 'Lingua Franca').slice(0, 120);
+        const body = String(payload?.body || '').slice(0, 400);
+        try { if (Notification.isSupported()) new Notification({ title, body, silent: true }).show(); }
+        catch (error) { console.warn('Could not show a notification:', error.message); }
+        if (mainWindow && !mainWindow.isFocused()) {
+            mainWindow.flashFrame(true);
+            mainWindow.once('focus', () => mainWindow?.flashFrame(false));
+        }
+        return { ok: true };
+    });
+    ipcMain.handle('save-page-as-pdf', async (event, requestedName) => {
+        if (!fromApp(event)) return { error: 'Not available here.' };
         const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
             defaultPath: path.join(app.getPath('documents'), pdfFileName(requestedName)),
             filters: [{ name: 'PDF', extensions: ['pdf'] }],
@@ -445,6 +469,10 @@ function createWindow(isDev) {
         webPreferences: {
             nodeIntegration: false, contextIsolation: true, sandbox: true,
             preload: path.join(__dirname, 'desktop', 'preload.cjs'),
+            // This window runs the broadcast. Chromium otherwise slows its timers once it is
+            // minimised (to once a minute after a while), which delays caption lines, OpenAI
+            // reconnects and the silence pause's wake-up by that much.
+            backgroundThrottling: false,
         },
     });
     // Only the origin this mode actually serves: the packaged app has no reason to trust the
@@ -574,6 +602,13 @@ async function startServers(isDev) {
     const recordOnlyProducers = new Map();
     const peakListeners = new Map();
     const usage = { aiSeconds: 0, since: Date.now() };
+    // "I can't hear" taps from phones, per channel, for the dashboard and the operator alert.
+    const listenerReports = new ListenerReports();
+    // channelId -> { socketId, approved, at }: the broadcaster waiting to take a channel over
+    // from the interpreter on it (two interpreters taking turns).
+    const handovers = new Map();
+    // Highest budget warning already sent (0, 80, 100), so each is sent once.
+    let budgetAlerted = 0;
 
     const adminSessions = new ExpiringMap();
     const interpreterSessions = new ExpiringMap();
@@ -610,14 +645,29 @@ async function startServers(isDev) {
     // socket id -> { channelId, transportId } of what that phone is listening to right now.
     const countListeners = (channelId) => [...listenerChannels.values()].filter((entry) => entry.channelId === channelId).length;
     const emitListenerCount = (channelId) => io.emit('listenerCount', { channelId, count: countListeners(channelId) });
+    // Seconds of OpenAI time one broadcast has run up so far: from when it last started
+    // billing (it stops while paused for silence) or the dashboard's last reset, whichever is later.
+    const billedSeconds = (info, now = Date.now()) => (info?.role === 'translation' && info.billedSince
+        ? Math.max(0, now - Math.max(info.billedSince, usage.since)) / 1000 : 0);
+    const aiSpentSeconds = (now = Date.now()) => {
+        let total = usage.aiSeconds;
+        for (const info of broadcastInfo.values()) total += billedSeconds(info, now);
+        return total;
+    };
     // Adds a finished AI broadcast's time to the running total before forgetting it.
     const endBroadcast = (channelId) => {
-        const info = broadcastInfo.get(channelId);
-        if (info?.role === 'translation') usage.aiSeconds += (Date.now() - Math.max(info.since, usage.since)) / 1000;
+        usage.aiSeconds += billedSeconds(broadcastInfo.get(channelId));
         broadcastInfo.delete(channelId);
+    };
+    // Only operator sessions; a socket on the plain listener port never holds a token.
+    const emitToOperators = (event, payload) => {
+        for (const operatorSocket of io.of('/').sockets.values()) {
+            if (operatorSocket.data.token && adminSessions.has(operatorSocket.data.token)) operatorSocket.emit(event, payload);
+        }
     };
 
     const startRecording = (channelId, producer, role) => {
+        if (role === 'test') return;
         if (!settings.recordingEnabled || !media.router || producer.closed || activeRecordings.has(producer.id)) return;
         const startedAt = new Date();
         let file;
@@ -673,6 +723,12 @@ async function startServers(isDev) {
         try { producer.close(); } catch { /* already closed */ }
         setChannelState(channelId);
         io.emit('producerClosed', { channelId });
+        // Someone was waiting to take this channel over and it is now free: let them start.
+        const waiting = handovers.get(channelId);
+        if (waiting) {
+            handovers.delete(channelId);
+            io.to(waiting.socketId).emit('handoverApproved', { channelId, free: true });
+        }
         return true;
     };
 
@@ -731,7 +787,7 @@ async function startServers(isDev) {
                 // Recordings end on their own as the router closes; the AI time still counts.
                 for (const channelId of [...broadcastInfo.keys()]) endBroadcast(channelId);
                 recordOnlyProducers.clear();
-                producers.clear(); producerOwners.clear(); liveChannels.clear(); listenerChannels.clear();
+                producers.clear(); producerOwners.clear(); liveChannels.clear(); listenerChannels.clear(); handovers.clear();
                 // Empty each socket's transport list but keep the entry. Those sockets stay
                 // connected and renegotiate on 'sfuReady'; deleting the entries left every
                 // transport they created afterwards untracked, so connectTransport and consume
@@ -839,6 +895,70 @@ async function startServers(isDev) {
             callback({ ok: true });
         });
 
+        // A listener tapped "I can't hear". Counted per phone over two minutes and pushed to the
+        // operator, who otherwise only learns about a dead channel when someone walks over.
+        on('listenerReport', ({ channelId } = {}, callback) => {
+            const language = findLanguage(settings.languages, String(channelId || '').slice(0, 80));
+            if (!language) return callback({ error: 'Unknown channel.' });
+            const { accepted, count } = listenerReports.record(language.id, socket.id);
+            if (accepted) emitToOperators('listenerReports', { channelId: language.id, channelName: language.name, count });
+            callback({ ok: true, accepted, count });
+        });
+
+        // Two interpreters taking turns: the next one asks, the one on air approves, and the
+        // next one's broadcast then replaces the current one (see 'produce').
+        on('requestHandover', ({ channelId } = {}, callback) => {
+            const publisher = socketPublisher();
+            if (!publisher) return callback({ error: 'Broadcaster login required.', code: 'login_required' });
+            const id = String(channelId || '').slice(0, 80);
+            if (!findLanguage(settings.languages, id)) return callback({ error: 'Unknown channel.' });
+            if (publisher.role === 'interpreter' && publisher.channelId !== id) {
+                return callback({ error: 'This interpreter link is authorized for a different channel.', code: 'wrong_channel' });
+            }
+            const owner = producerOwners.get(id);
+            if (!producers.has(id) || !owner) return callback({ ok: true, free: true });
+            if (ownsChannel(id)) return callback({ ok: true, own: true });
+            handovers.set(id, { socketId: socket.id, approved: false, at: Date.now() });
+            io.to(owner.socketId).emit('handoverRequested', { channelId: id });
+            callback({ ok: true, requested: true });
+        });
+
+        on('acceptHandover', ({ channelId } = {}, callback) => {
+            const id = String(channelId || '').slice(0, 80);
+            const pending = handovers.get(id);
+            if (!pending) return callback({ error: 'Nobody is waiting to take this channel over.' });
+            if (producerOwners.get(id)?.socketId !== socket.id) return callback({ error: 'Only the broadcaster on this channel can hand it over.' });
+            pending.approved = true;
+            pending.at = Date.now();
+            io.to(pending.socketId).emit('handoverApproved', { channelId: id });
+            callback({ ok: true });
+        });
+
+        on('cancelHandover', ({ channelId } = {}, callback) => {
+            const id = String(channelId || '').slice(0, 80);
+            const pending = handovers.get(id);
+            if (pending?.socketId === socket.id) {
+                handovers.delete(id);
+                const owner = producerOwners.get(id);
+                if (owner) io.to(owner.socketId).emit('handoverCancelled', { channelId: id });
+            }
+            callback({ ok: true });
+        });
+
+        // The AI legs were closed for silence (or reopened): stop (or restart) counting their
+        // time, so the dashboard's cost and the budget warning reflect what OpenAI bills.
+        on('setAiPaused', ({ channelIds, paused } = {}, callback) => {
+            if (!socketIsAdmin()) return callback({ error: 'Administrator login required.' });
+            const ids = Array.isArray(channelIds) ? channelIds.slice(0, 32).map((value) => String(value).slice(0, 80)) : [];
+            for (const id of ids) {
+                const info = broadcastInfo.get(id);
+                if (info?.role !== 'translation' || !ownsChannel(id)) continue;
+                if (paused && info.billedSince) { usage.aiSeconds += billedSeconds(info); info.billedSince = null; }
+                if (!paused && !info.billedSince) info.billedSince = Date.now();
+            }
+            callback({ ok: true });
+        });
+
         // A transport this phone no longer needs (it stopped listening, switched channel, or its
         // channel had no broadcast yet). Without this, each attempt left one open on the server.
         on('closeTransport', ({ transportId } = {}, callback) => {
@@ -910,20 +1030,27 @@ async function startServers(isDev) {
                 // Starting a second broadcast on a live channel used to cut the first one off
                 // without a word. Only the operator may take a channel over, and the broadcaster
                 // being replaced is told, instead of carrying on into a producer nobody hears.
+                const isTest = appData?.role === 'test';
+                if (isTest && publisher.role !== 'admin') throw new Error('Only the operator can play a test tone.');
                 const previousOwner = producerOwners.get(channelId);
+                // A handover the current interpreter approved for this device lets it take over.
+                const handover = handovers.get(channelId);
+                const handedOver = Boolean(handover?.approved && handover.socketId === socket.id && Date.now() - handover.at < HANDOVER_MS);
                 if (producers.has(channelId) && !ownsChannel(channelId)) {
-                    if (publisher.role !== 'admin') {
+                    if (publisher.role !== 'admin' && !handedOver) {
                         throw coded(`${language.name} is already being broadcast. Ask the operator to stop it first.`, 'channel_taken', { channel: language.name });
                     }
-                    io.to(previousOwner.socketId).emit('producerReplaced', { channelId });
+                    if (previousOwner) io.to(previousOwner.socketId).emit('producerReplaced', { channelId, reason: handedOver ? 'handover' : 'takeover' });
                 }
+                // Settled either way: whoever goes on air now ends any pending request.
+                handovers.delete(channelId);
                 closeProducerFor(channelId);
                 const producer = await transport.produce({ kind, rtpParameters, appData: { channelId } });
                 producers.set(channelId, producer);
                 producerOwners.set(channelId, { socketId: socket.id, token: socketToken() || '', role: publisher.role });
-                const role = ROLES.includes(appData?.role) ? appData.role : appData?.mode === 'ai' ? 'translation' : 'interpreter';
-                setChannelState(channelId, appData?.mode === 'ai' ? 'ai-active' : 'sfu-active', role);
-                broadcastInfo.set(channelId, { role, since: Date.now() });
+                const role = isTest ? 'test' : ROLES.includes(appData?.role) ? appData.role : appData?.mode === 'ai' ? 'translation' : 'interpreter';
+                setChannelState(channelId, appData?.mode === 'ai' && !isTest ? 'ai-active' : 'sfu-active', role);
+                broadcastInfo.set(channelId, { role, since: Date.now(), billedSince: role === 'translation' ? Date.now() : null });
                 startRecording(channelId, producer, role);
                 producer.on('transportclose', () => {
                     if (producers.get(channelId)?.id === producer.id) closeProducerFor(channelId);
@@ -1048,6 +1175,14 @@ async function startServers(isDev) {
             const listening = listenerChannels.get(socket.id);
             listenerChannels.delete(socket.id);
             if (listening) emitListenerCount(listening.channelId);
+            listenerReports.forget(socket.id);
+            // A device that asked to take a channel over and left: tell the one on air.
+            for (const [channelId, pending] of [...handovers]) {
+                if (pending.socketId !== socket.id) continue;
+                handovers.delete(channelId);
+                const owner = producerOwners.get(channelId);
+                if (owner) io.to(owner.socketId).emit('handoverCancelled', { channelId });
+            }
         });
     });
 
@@ -1243,6 +1378,8 @@ async function startServers(isDev) {
         if (typeof patch.preferredAddress === 'string') settings.preferredAddress = patch.preferredAddress.slice(0, 64);
         if (typeof patch.recordingEnabled === 'boolean') settings.recordingEnabled = patch.recordingEnabled;
         if (typeof patch.transcriptsEnabled === 'boolean') settings.transcriptsEnabled = patch.transcriptsEnabled;
+        if (patch.aiBudgetUsd !== undefined) { settings.aiBudgetUsd = normalizeBudget(patch.aiBudgetUsd); budgetAlerted = 0; }
+        if (patch.aiSilencePauseMinutes !== undefined) settings.aiSilencePauseMinutes = normalizeSilencePause(patch.aiSilencePauseMinutes);
         try {
             if (typeof patch.openaiApiKey === 'string' && patch.openaiApiKey.trim()) settings.openaiApiKeyEncrypted = protectSecret(patch.openaiApiKey.trim());
         } catch (error) { return response.status(503).json({ error: error.message }); }
@@ -1261,22 +1398,28 @@ async function startServers(isDev) {
     expressApp.get('/api/admin/live', requireAdmin, (_request, response) => {
         const now = Date.now();
         const recordingChannels = new Set([...activeRecordings.values()].map((entry) => entry.channelId));
-        let aiSeconds = usage.aiSeconds;
-        for (const info of broadcastInfo.values()) if (info.role === 'translation') aiSeconds += (now - Math.max(info.since, usage.since)) / 1000;
+        const aiSeconds = aiSpentSeconds(now);
         response.json({
             channels: settings.languages.map((language) => {
                 const producer = producers.get(language.id);
                 const info = broadcastInfo.get(language.id);
+                const owner = producerOwners.get(language.id);
                 return {
                     id: language.id, name: language.name, live: Boolean(producer), role: info?.role || null,
                     since: info?.since || null, paused: Boolean(producer?.paused),
                     listeners: countListeners(language.id), peakListeners: peakListeners.get(language.id) || 0,
                     recording: recordingChannels.has(language.id),
+                    // Phones on this channel that tapped "I can't hear" in the last two minutes.
+                    reports: listenerReports.count(language.id),
+                    // A phone interpreter's access ends at a fixed time; the operator can extend it.
+                    accessEndsAt: owner?.role === 'interpreter' ? interpreterSessions.expiresAt(owner.token) || null : null,
+                    aiPaused: info?.role === 'translation' && !info.billedSince,
                 };
             }),
             totalListeners: listenerChannels.size,
             aiSeconds: Math.round(aiSeconds),
             aiPricePerMinute: AI_PRICE_PER_MINUTE,
+            budgetUsd: normalizeBudget(settings.aiBudgetUsd),
             since: usage.since,
             // The server's clock, so "on air" times are right on a phone whose clock differs.
             now,
@@ -1288,12 +1431,66 @@ async function startServers(isDev) {
     expressApp.post('/api/admin/live/reset', requireAdmin, (_request, response) => {
         usage.aiSeconds = 0;
         usage.since = Date.now();
+        budgetAlerted = 0;
+        listenerReports.clear();
         peakListeners.clear();
         for (const language of settings.languages) {
             const count = countListeners(language.id);
             if (count) peakListeners.set(language.id, count);
         }
         response.json({ ok: true, since: usage.since });
+    });
+
+    // Gives the phone interpreter on a channel more time, so the eight-hour limit does not cut
+    // them off mid-sentence. Never beyond a full session from now.
+    expressApp.post('/api/admin/interpreter-sessions/extend', requireAdmin, (request, response) => {
+        const channelId = String(request.body?.channelId || '').slice(0, 80);
+        const owner = producerOwners.get(channelId);
+        const current = owner?.role === 'interpreter' ? interpreterSessions.expiresAt(owner.token) : 0;
+        if (!current) return response.status(404).json({ error: 'No phone interpreter is broadcasting on that channel.' });
+        const expiresAt = Math.min(current + INTERPRETER_EXTEND_MS, Date.now() + INTERPRETER_SESSION_MS);
+        interpreterSessions.touch(owner.token, expiresAt);
+        io.to(owner.socketId).emit('sessionExtended', { expiresAt });
+        response.json({ ok: true, expiresAt });
+    });
+
+    // The pre-service check: everything that can be tested from this computer, in one list.
+    // Whether phones can reach it is tested with a phone (the test tone in Admin).
+    expressApp.get('/api/admin/preflight', requireAdmin, async (_request, response) => {
+        const checks = [];
+        const add = (id, status, detail = '') => checks.push({ id, status, detail: String(detail || '') });
+        add('media', !media.router ? 'fail' : media.portMode === 'multiplexed' ? 'ok' : 'warn', media.router ? media.portMode : media.error);
+        add('listener_port', listenerPortError ? 'warn' : 'ok', listenerPortError || String(LISTENER_PORT));
+        const adapter = networkAddresses().find((entry) => entry.address === localAddress);
+        add('network', addressDrift || !adapter ? 'fail' : isVirtualAdapter(adapter.name) ? 'warn' : 'ok',
+            addressDrift || (adapter ? `${adapter.name} · ${localAddress}` : localAddress));
+        const daysLeft = certificateState.expiresAt ? Math.floor((Date.parse(certificateState.expiresAt) - Date.now()) / 86_400_000) : null;
+        add('certificate', certificateState.error || (daysLeft !== null && daysLeft < 14) ? 'warn' : 'ok',
+            certificateState.error || `${certificateState.type}${daysLeft !== null ? ` · ${daysLeft}` : ''}`);
+        const microphone = ['win32', 'darwin'].includes(process.platform) ? systemPreferences.getMediaAccessStatus('microphone') : 'unknown';
+        add('microphone', ['granted', 'unknown'].includes(microphone) ? 'ok' : 'fail', microphone);
+        add('secure_storage', secureStorageAvailable && safeStorage.isEncryptionAvailable() ? 'ok' : 'warn');
+        if (settings.recordingEnabled) {
+            try {
+                const disk = fs.statfsSync(recordingStore.ensure());
+                const free = disk.bavail * disk.bsize;
+                add('disk', free < 200 * 1024 ** 2 ? 'fail' : free < 2 * 1024 ** 3 ? 'warn' : 'ok', String(free));
+            } catch (error) { add('disk', 'warn', error.message); }
+        }
+        // Creating a client secret checks the key without opening a session, so it costs nothing.
+        const apiKey = revealSecret(settings.openaiApiKeyEncrypted);
+        if (!apiKey) add('openai', 'warn', 'not_configured');
+        else {
+            try {
+                const upstream = await fetchWithTimeout('https://api.openai.com/v1/realtime/translations/client_secrets', {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session: { model: 'gpt-realtime-translate', audio: { output: { language: 'en' } } } }),
+                }, 10_000);
+                add('openai', upstream.ok ? 'ok' : 'fail', upstream.ok ? '' : `HTTP ${upstream.status}`);
+            } catch (error) { add('openai', 'fail', error.message); }
+        }
+        response.json({ checks, at: Date.now() });
     });
 
     expressApp.get('/api/admin/recordings', requireAdmin, (_request, response) => {
@@ -1404,6 +1601,14 @@ async function startServers(isDev) {
         // session that owns a live channel is kept alive here instead of lapsing under it.
         for (const owner of producerOwners.values()) if (owner.role === 'admin') keepAdminSession(owner.token);
         endInterpreterBroadcasts();
+        listenerReports.prune();
+        // Warn the operator once at 80% of the AI budget and once when it is spent. Nothing is
+        // stopped: cutting the translation mid-sermon would be worse than going over.
+        const budgetUsd = normalizeBudget(settings.aiBudgetUsd);
+        const spentUsd = aiSpentSeconds() / 60 * AI_PRICE_PER_MINUTE;
+        const level = budgetLevel(spentUsd, budgetUsd);
+        if (level > budgetAlerted) emitToOperators('aiBudget', { level, spentUsd, budgetUsd });
+        budgetAlerted = level;
     }, SESSION_SWEEP_MS);
     sessionSweepTimer.unref?.();
 

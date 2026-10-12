@@ -485,3 +485,73 @@ textarea.custom-input {
     color: var(--text-muted);
     border-color: var(--border);
 }
+
+/* Dashboard additions: "can't hear" counts, a phone interpreter's access, the AI budget. */
+.report-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--danger);
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.live-access {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-top: 0.2rem;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+}
+
+.live-access.ending {
+    color: #f59e0b;
+    font-weight: 600;
+}
+
+.live-extend {
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    padding: 0 0.55rem;
+    cursor: pointer;
+}
+
+.live-ai.over-budget {
+    color: #f59e0b;
+}
+
+/* The pre-service check. */
+.preflight-list {
+    list-style: none;
+    margin: 0.75rem 0 0;
+    padding: 0;
+    display: grid;
+    gap: 0.5rem;
+}
+
+.preflight-item {
+    display: flex;
+    gap: 0.6rem;
+    align-items: flex-start;
+    line-height: 1.4;
+}
+
+.preflight-item .preflight-icon { flex: none; margin-top: 0.1rem; }
+.preflight-item.ok .preflight-icon { color: var(--accent); }
+.preflight-item.warn .preflight-icon { color: #f59e0b; }
+.preflight-item.fail .preflight-icon { color: var(--danger); }
+.preflight-item small { display: block; color: var(--text-muted); }
+
+.test-tone {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid rgba(148, 163, 184, 0.2);
+}

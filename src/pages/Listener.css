@@ -715,3 +715,37 @@
     transition: height 0.1s ease-out;
     box-shadow: 0 0 8px var(--accent-glow);
 }
+
+/* "Can't hear?" and the help it opens. */
+.cant-hear-btn {
+    margin-left: auto;
+}
+
+.cant-hear-help {
+    margin: 0.75rem 0;
+    padding: 0.9rem 1rem;
+    border-radius: 12px;
+    border: 1px solid rgba(245, 158, 11, 0.45);
+    background: rgba(245, 158, 11, 0.08);
+    line-height: 1.5;
+}
+
+.cant-hear-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.cant-hear-help p {
+    margin: 0.35rem 0 0.5rem;
+}
+
+.cant-hear-help ol {
+    margin: 0;
+    padding-left: 1.25rem;
+}
+
+.cant-hear-help li + li {
+    margin-top: 0.3rem;
+}

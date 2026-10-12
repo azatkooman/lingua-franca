@@ -54,6 +54,17 @@ export interface AdminSettings extends AppSettings {
     duckDnsConfigured: boolean;
     certificateHostname: string;
     certificateEmail: string;
+    /** Dollars; 0 = no budget. Warns at 80% and 100%, never stops anything. */
+    aiBudgetUsd: number;
+    /** Minutes without speech before the OpenAI legs close; 0 = never. */
+    aiSilencePauseMinutes: number;
+}
+
+/** One check in the pre-service list. */
+export interface PreflightCheck {
+    id: 'media' | 'listener_port' | 'network' | 'certificate' | 'microphone' | 'secure_storage' | 'disk' | 'openai';
+    status: 'ok' | 'warn' | 'fail';
+    detail: string;
 }
 
 /** One channel on the operator's live dashboard. */
@@ -61,12 +72,18 @@ export interface LiveChannel {
     id: string;
     name: string;
     live: boolean;
-    role: 'original' | 'translation' | 'interpreter' | null;
+    role: 'original' | 'translation' | 'interpreter' | 'test' | null;
     since: number | null;
     paused: boolean;
     listeners: number;
     peakListeners: number;
     recording: boolean;
+    /** Phones that tapped "I can't hear" in the last two minutes. */
+    reports: number;
+    /** When the phone interpreter on air loses access; null for anyone else. */
+    accessEndsAt: number | null;
+    /** An AI channel whose OpenAI connection is closed for silence. */
+    aiPaused: boolean;
 }
 
 export interface LiveStatus {
@@ -74,6 +91,7 @@ export interface LiveStatus {
     totalListeners: number;
     aiSeconds: number;
     aiPricePerMinute: number;
+    budgetUsd: number;
     since: number;
     now: number;
 }
@@ -115,6 +133,8 @@ class SettingsService {
     private interpreterToken = sessionStorage.getItem('lingua_franca_interpreter_token') || '';
     private interpreterChannelId = sessionStorage.getItem('lingua_franca_interpreter_channel_id') || '';
     private interpreterChannelName = sessionStorage.getItem('lingua_franca_interpreter_channel_name') || '';
+    // When this phone's interpreter access ends (epoch ms), for the warning before it does.
+    private interpreterExpiresAt = Number(sessionStorage.getItem('lingua_franca_interpreter_expires_at')) || 0;
     private refreshTimer: number;
 
     constructor() {
@@ -133,6 +153,10 @@ class SettingsService {
         // The operator ended this session: a PIN change signs out other operator sessions, and
         // "End all interpreter access" ends every phone's. The socket authenticated with the
         // publisher token, so that is the one to drop; the guards then ask to sign in again.
+        // The operator gave this phone interpreter more time.
+        realtimeSocket.on<{ expiresAt: number }>('sessionExtended', ({ expiresAt }) => {
+            if (this.interpreterToken && Number(expiresAt) > 0) this.setInterpreterExpiresAt(Number(expiresAt));
+        });
         realtimeSocket.on('sessionRevoked', () => {
             if (this.adminToken) this.clearAdminSession();
             else this.clearInterpreterSession();
@@ -262,6 +286,7 @@ class SettingsService {
     getPublisherToken() { return this.adminToken || this.interpreterToken; }
     getInterpreterChannelId() { return this.interpreterChannelId; }
     getInterpreterChannelName() { return this.interpreterChannelName; }
+    getInterpreterExpiresAt() { return this.interpreterExpiresAt; }
     isAdminAuthenticated() { return Boolean(this.adminToken); }
     isInterpreterAuthenticated() { return Boolean(this.interpreterToken && this.interpreterChannelId); }
 
@@ -293,7 +318,7 @@ class SettingsService {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }),
         });
         const data = await response.json().catch(() => ({})) as
-            { token?: string; channelId?: string; channelName?: string; error?: string };
+            { token?: string; channelId?: string; channelName?: string; expiresAt?: number; error?: string };
         if (!response.ok || !data.token || !data.channelId) throw new Error(data.error || 'Interpreter login failed.');
         this.interpreterToken = data.token;
         this.interpreterChannelId = data.channelId;
@@ -301,7 +326,15 @@ class SettingsService {
         sessionStorage.setItem('lingua_franca_interpreter_token', data.token);
         sessionStorage.setItem('lingua_franca_interpreter_channel_id', data.channelId);
         sessionStorage.setItem('lingua_franca_interpreter_channel_name', this.interpreterChannelName);
+        this.setInterpreterExpiresAt(Number(data.expiresAt) || 0);
         realtimeSocket.setAuthToken(this.getPublisherToken());
+        this.notifyInterpreterAuth();
+    }
+
+    /** Also used when the operator extends this phone's access. */
+    setInterpreterExpiresAt(expiresAt: number) {
+        this.interpreterExpiresAt = expiresAt;
+        try { sessionStorage.setItem('lingua_franca_interpreter_expires_at', String(expiresAt)); } catch { /* optional */ }
         this.notifyInterpreterAuth();
     }
 
@@ -312,6 +345,8 @@ class SettingsService {
         sessionStorage.removeItem('lingua_franca_interpreter_token');
         sessionStorage.removeItem('lingua_franca_interpreter_channel_id');
         sessionStorage.removeItem('lingua_franca_interpreter_channel_name');
+        sessionStorage.removeItem('lingua_franca_interpreter_expires_at');
+        this.interpreterExpiresAt = 0;
         realtimeSocket.setAuthToken(this.getPublisherToken());
         this.notifyInterpreterAuth();
     }
@@ -357,6 +392,20 @@ class SettingsService {
     async getLiveStatus() {
         return await (await this.adminRequest('/api/admin/live', { cache: 'no-store' })).json() as LiveStatus;
     }
+
+    async runPreflight() {
+        return await (await this.adminRequest('/api/admin/preflight', { cache: 'no-store' })).json() as { checks: PreflightCheck[]; at: number };
+    }
+
+    /** Two more hours for the phone interpreter on a channel. */
+    async extendInterpreter(channelId: string) {
+        return await (await this.adminRequest('/api/admin/interpreter-sessions/extend', {
+            method: 'POST', body: JSON.stringify({ channelId }),
+        })).json() as { expiresAt: number };
+    }
+
+    async setAiBudget(aiBudgetUsd: number) { await this.patchAdminSettings({ aiBudgetUsd }); }
+    async setSilencePause(aiSilencePauseMinutes: number) { await this.patchAdminSettings({ aiSilencePauseMinutes }); }
 
     /** Starts the dashboard's listener peaks and AI time from now, for a new event. */
     async resetLiveCounters() {

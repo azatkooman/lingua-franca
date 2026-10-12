@@ -191,3 +191,50 @@ a:hover {
   font-size: 0.9rem;
   line-height: 1.45;
 }
+
+/* Urgent problems for the operator or an interpreter: above every screen until dismissed. */
+.alert-stack {
+  position: sticky;
+  top: 0;
+  z-index: 900;
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem 0;
+}
+
+.alert-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  max-width: 900px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 0.75rem 0.9rem;
+  border-radius: 10px;
+  background: var(--danger);
+  color: #ffffff;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+}
+
+.alert-banner.budget,
+.alert-banner.access_ending,
+.alert-banner.handover {
+  background: #b45309;
+}
+
+.alert-banner p {
+  flex: 1;
+  margin: 0;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.alert-dismiss {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  padding: 0.1rem;
+  min-width: 32px;
+  min-height: 32px;
+}

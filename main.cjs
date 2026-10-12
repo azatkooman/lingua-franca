@@ -17,7 +17,7 @@ const { TranscriptStore } = require('./lib/transcript.cjs');
 const { certificateCoversHost, certificateDetails: readCertificateDetails } = require('./lib/certificates.cjs');
 const { RecordingStore, ROLES, TranscriptLog } = require('./lib/recordings.cjs');
 const { startChannelRecording } = require('./lib/recorder.cjs');
-const { ExpiringMap, LoginThrottle, isValidPin, newAccessCode, newToken, setPin, verifyPin } = require('./lib/security.cjs');
+const { ExpiringMap, LoginThrottle, isValidPin, newAccessCode, newToken, refreshSession, setPin, verifyPin } = require('./lib/security.cjs');
 
 const HTTPS_PORT = 4173;
 const LOCAL_PORT = 4174;
@@ -34,7 +34,11 @@ const LISTENER_API = new Set(['/api/settings', '/api/health']);
 const RTC_PORT = 10000;
 const RTC_MIN_PORT = 10000;
 const RTC_MAX_PORT = 10100;
+// An operator session ends after 12 hours unused, and in any case after a week. It used to
+// end exactly 12 hours after sign-in, even mid-event: captions silently stopped reaching phones
+// and the next AI reconnect failed. Every use extends it, and a live broadcast keeps it alive.
 const ADMIN_SESSION_MS = 12 * 60 * 60 * 1000;
+const ADMIN_SESSION_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 const INTERPRETER_SESSION_MS = 8 * 60 * 60 * 1000;
 const INTERPRETER_CODE_MS = 8 * 60 * 60 * 1000;
 const CERTIFICATE_RENEWAL_DAYS = 30;
@@ -47,6 +51,13 @@ const SESSION_SWEEP_MS = Number(process.env.LINGUA_FRANCA_SESSION_SWEEP_MS) || 3
 // ($0.034) plus gpt-realtime-whisper ($0.017), which transcribes the original speech for its
 // captions. Only used for the rough cost shown on the operator's dashboard.
 const AI_PRICE_PER_MINUTE = 0.034 + 0.017;
+// Captions go only to phones watching that channel, not to every connected phone.
+const CAPTION_ROOM = 'captions:';
+// Bounds what one device can hold open. A listener needs one transport (two briefly while
+// switching channel); at the limit its oldest one is closed rather than refusing it, so a phone
+// can never lock itself out. Broadcasters are signed in and refused instead.
+const LISTENER_TRANSPORT_LIMIT = 4;
+const PUBLISHER_TRANSPORT_LIMIT = 24;
 
 let mainWindow;
 let httpsServer;
@@ -570,7 +581,9 @@ async function startServers(isDev) {
     const adminThrottle = new LoginThrottle({ maxAttempts: 5, baseDelayMs: 30_000, maxDelayMs: 30 * 60_000 });
     const interpreterThrottle = new LoginThrottle({ maxAttempts: 5, baseDelayMs: 30_000, maxDelayMs: 30 * 60_000 });
 
-    const isAdminToken = (token) => Boolean(token) && adminSessions.get(token) !== undefined;
+    // Every successful use pushes the deadline out again, up to the session's hard limit.
+    const keepAdminSession = (token) => refreshSession(adminSessions, token, ADMIN_SESSION_MS);
+    const isAdminToken = (token) => keepAdminSession(token);
     const publisherSession = (token) => {
         if (isAdminToken(token)) return { role: 'admin' };
         const session = token ? interpreterSessions.get(token) : undefined;
@@ -600,7 +613,7 @@ async function startServers(isDev) {
     // Adds a finished AI broadcast's time to the running total before forgetting it.
     const endBroadcast = (channelId) => {
         const info = broadcastInfo.get(channelId);
-        if (info?.role === 'translation') usage.aiSeconds += (Date.now() - info.since) / 1000;
+        if (info?.role === 'translation') usage.aiSeconds += (Date.now() - Math.max(info.since, usage.since)) / 1000;
         broadcastInfo.delete(channelId);
     };
 
@@ -687,7 +700,7 @@ async function startServers(isDev) {
         const revoked = new Set(store.keys().filter((token) => token !== keepToken));
         for (const token of revoked) store.delete(token);
         for (const socket of io.of('/').sockets.values()) {
-            if (!revoked.has(socket.handshake.auth?.token)) continue;
+            if (!revoked.has(socket.data.token)) continue;
             socket.emit('sessionRevoked');
             // A short pause lets the notice reach the client before the socket closes.
             setTimeout(() => socket.disconnect(true), 200).unref?.();
@@ -749,11 +762,15 @@ async function startServers(isDev) {
         // A socket that came in on the plain listener port is never treated as signed in, even
         // if it presents a token: it may only listen.
         const listenOnly = socket.request.socket?.localPort === LISTENER_PORT;
-        const socketToken = () => (listenOnly ? '' : socket.handshake.auth?.token);
+        // Starts as the handshake token and changes with 'setToken'.
+        socket.data.token = listenOnly ? '' : String(socket.handshake.auth?.token || '').slice(0, 256);
+        const socketToken = () => socket.data.token;
         const socketIsAdmin = () => isAdminToken(socketToken());
         const socketPublisher = () => publisherSession(socketToken());
         // A reconnecting phone gets a new socket id but keeps its session token, so either one
         // proves ownership. A channel with no live producer belongs to nobody.
+        // transport id -> its consumer, for this socket.
+        const consumers = new Map();
         const ownsChannel = (channelId) => {
             const owner = producerOwners.get(channelId);
             return !owner || owner.socketId === socket.id || (Boolean(owner.token) && owner.token === socketToken());
@@ -801,6 +818,27 @@ async function startServers(isDev) {
         on('getRouterRtpCapabilities', (_payload, callback) =>
             callback(media.router ? media.router.rtpCapabilities : { error: `SFU unavailable: ${media.error}` }));
 
+        // Signing in, or back in after a session lapsed, swaps the token on the live connection.
+        // The client used to reconnect instead, and the server treated that as the device leaving:
+        // every broadcast and listener on it was torn down, while the client, seeing its own
+        // disconnect, did not republish. Ownership follows the socket, so its channels move to
+        // the new token.
+        on('setToken', ({ token } = {}, callback) => {
+            if (listenOnly) return callback({ ok: true, ignored: true });
+            socket.data.token = String(token || '').slice(0, 256);
+            for (const owner of producerOwners.values()) if (owner.socketId === socket.id) owner.token = socket.data.token;
+            callback({ ok: true });
+        });
+
+        // Which channel's captions this phone wants. Captions used to go to every phone, which
+        // threw away all but its own channel: several times the traffic on a busy Wi-Fi.
+        on('watchCaptions', ({ channelId } = {}, callback) => {
+            const id = String(channelId || '').slice(0, 80);
+            for (const room of [...socket.rooms]) if (room.startsWith(CAPTION_ROOM)) socket.leave(room);
+            if (id) socket.join(`${CAPTION_ROOM}${id}`);
+            callback({ ok: true });
+        });
+
         // A transport this phone no longer needs (it stopped listening, switched channel, or its
         // channel had no broadcast yet). Without this, each attempt left one open on the server.
         on('closeTransport', ({ transportId } = {}, callback) => {
@@ -811,7 +849,18 @@ async function startServers(isDev) {
 
         on('createWebRtcTransport', async ({ type } = {}, callback) => {
             if (!media.router) return callback({ error: `SFU unavailable: ${media.error}` });
-            if (type === 'producer' && !socketPublisher()) return callback({ error: 'Broadcaster login required.' });
+            const publisher = socketPublisher();
+            if (type === 'producer' && !publisher) return callback({ error: 'Broadcaster login required.', code: 'login_required' });
+            const owned = transports.get(socket.id);
+            if (owned && publisher && owned.size >= PUBLISHER_TRANSPORT_LIMIT) {
+                return callback({ error: 'Too many open connections from this device. Stop and start the broadcast again.' });
+            }
+            if (owned && !publisher) {
+                // Oldest first: Map keeps insertion order.
+                for (const stale of [...owned.values()].slice(0, Math.max(0, owned.size - LISTENER_TRANSPORT_LIMIT + 1))) {
+                    try { stale.close(); } catch { /* already closed */ }
+                }
+            }
             try {
                 const transport = await media.router.createWebRtcTransport(transportOptions(localAddress));
                 trackTransport(transport);
@@ -833,7 +882,9 @@ async function startServers(isDev) {
 
         on('produce', async ({ transportId, kind, rtpParameters, appData } = {}, callback) => {
             const publisher = socketPublisher();
-            if (!publisher) return callback({ error: 'Broadcaster login required.' });
+            if (!publisher) return callback({ error: 'Broadcaster login required.', code: 'login_required' });
+            // A code lets a phone show the reason in its own language.
+            const coded = (message, code, extra = {}) => Object.assign(new Error(message), { code, ...extra });
             try {
                 const transport = transports.get(socket.id)?.get(transportId);
                 if (!transport) throw new Error('Producer transport not found.');
@@ -841,7 +892,7 @@ async function startServers(isDev) {
                 const language = findLanguage(settings.languages, channelId);
                 if (!language) throw new Error('Unknown channel.');
                 if (publisher.role === 'interpreter' && publisher.channelId !== channelId) {
-                    throw new Error('This interpreter link is authorized for a different channel.');
+                    throw coded('This interpreter link is authorized for a different channel.', 'wrong_channel');
                 }
                 // The original speech in AI mode, recorded without being broadcast. It goes
                 // nowhere but the recording, so it never touches the channel's live state.
@@ -862,7 +913,7 @@ async function startServers(isDev) {
                 const previousOwner = producerOwners.get(channelId);
                 if (producers.has(channelId) && !ownsChannel(channelId)) {
                     if (publisher.role !== 'admin') {
-                        throw new Error(`${language.name} is already being broadcast. Ask the operator to stop it first.`);
+                        throw coded(`${language.name} is already being broadcast. Ask the operator to stop it first.`, 'channel_taken', { channel: language.name });
                     }
                     io.to(previousOwner.socketId).emit('producerReplaced', { channelId });
                 }
@@ -879,7 +930,7 @@ async function startServers(isDev) {
                 });
                 callback({ id: producer.id });
                 socket.broadcast.emit('producerAvailable', { channelId });
-            } catch (error) { callback({ error: error.message }); }
+            } catch (error) { callback({ error: error.message, code: error.code, channel: error.channel }); }
         });
 
         // Explicit teardown. Without it the server only learns a broadcast ended when DTLS
@@ -938,7 +989,13 @@ async function startServers(isDev) {
                 }
                 const transport = transports.get(socket.id)?.get(transportId);
                 if (!transport) throw new Error('Consumer transport not found.');
+                // One stream per transport: the client never asks for more, and each repeated
+                // consume would otherwise send another copy of the audio to the same phone.
+                const previousConsumer = consumers.get(transport.id);
+                if (previousConsumer) { try { previousConsumer.close(); } catch { /* already closed */ } }
                 const consumer = await transport.consume({ producerId: producer.id, rtpCapabilities, paused: false });
+                consumers.set(transport.id, consumer);
+                consumer.observer.once('close', () => { if (consumers.get(transport.id) === consumer) consumers.delete(transport.id); });
                 // A phone switching channels leaves its old one: tell that broadcaster too, or
                 // its count stayed one too high until something else changed it.
                 const previousChannel = listenerChannels.get(socket.id)?.channelId;
@@ -969,7 +1026,7 @@ async function startServers(isDev) {
             if (!language) return callback?.({ error: 'Unknown channel.' });
             const segment = transcripts.update(id, { segmentId, text, originalText, final });
             if (!segment) return callback?.({ error: 'A caption needs a segment id.' });
-            io.emit('translationText', { channelId: id, ...segment });
+            io.to(`${CAPTION_ROOM}${id}`).emit('translationText', { channelId: id, ...segment });
             if (segment.final && settings.transcriptsEnabled !== false) {
                 try { transcriptLog.append(id, language.name, segment, { eventName: settings.event?.name || '' }); }
                 catch (error) { console.error('Could not save the transcript:', error.message); }
@@ -1057,7 +1114,7 @@ async function startServers(isDev) {
         }
         adminThrottle.succeed(address);
         const token = newToken();
-        adminSessions.set(token, { role: 'admin' }, Date.now() + ADMIN_SESSION_MS);
+        adminSessions.set(token, { role: 'admin', capAt: Date.now() + ADMIN_SESSION_MAX_MS }, Date.now() + ADMIN_SESSION_MS);
         response.json({ token, expiresIn: ADMIN_SESSION_MS / 1000 });
     });
 
@@ -1205,7 +1262,7 @@ async function startServers(isDev) {
         const now = Date.now();
         const recordingChannels = new Set([...activeRecordings.values()].map((entry) => entry.channelId));
         let aiSeconds = usage.aiSeconds;
-        for (const info of broadcastInfo.values()) if (info.role === 'translation') aiSeconds += (now - info.since) / 1000;
+        for (const info of broadcastInfo.values()) if (info.role === 'translation') aiSeconds += (now - Math.max(info.since, usage.since)) / 1000;
         response.json({
             channels: settings.languages.map((language) => {
                 const producer = producers.get(language.id);
@@ -1224,6 +1281,19 @@ async function startServers(isDev) {
             // The server's clock, so "on air" times are right on a phone whose clock differs.
             now,
         });
+    });
+
+    // Starts the dashboard's listener peaks and AI time afresh, for an app left running between
+    // events. Before, both only reset when the app restarted, so they added up across services.
+    expressApp.post('/api/admin/live/reset', requireAdmin, (_request, response) => {
+        usage.aiSeconds = 0;
+        usage.since = Date.now();
+        peakListeners.clear();
+        for (const language of settings.languages) {
+            const count = countListeners(language.id);
+            if (count) peakListeners.set(language.id, count);
+        }
+        response.json({ ok: true, since: usage.since });
     });
 
     expressApp.get('/api/admin/recordings', requireAdmin, (_request, response) => {
@@ -1329,7 +1399,12 @@ async function startServers(isDev) {
     listenerServer.on('error', (error) => console.error('Listener HTTP server error:', error.message));
 
     // Interpreter sessions last eight hours; a broadcast must not outlive its session.
-    sessionSweepTimer = setInterval(() => endInterpreterBroadcasts(), SESSION_SWEEP_MS);
+    sessionSweepTimer = setInterval(() => {
+        // A Human-mode broadcast sends nothing that would refresh its operator session, so the
+        // session that owns a live channel is kept alive here instead of lapsing under it.
+        for (const owner of producerOwners.values()) if (owner.role === 'admin') keepAdminSession(owner.token);
+        endInterpreterBroadcasts();
+    }, SESSION_SWEEP_MS);
     sessionSweepTimer.unref?.();
 
     // A stored certificate is reused at startup without contacting DuckDNS, and the periodic

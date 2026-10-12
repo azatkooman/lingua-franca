@@ -5,6 +5,7 @@ import LogoMark from './LogoMark';
 import { settingsService, type ContactInfo } from '../lib/SettingsService';
 import { LOCALES, useTranslation } from '../lib/i18n';
 import { cycleTheme, useTheme } from '../lib/theme';
+import { whatsappNumber } from '../lib/phoneNumbers';
 
 const digits = (value: string) => value.replace(/\D/g, '');
 
@@ -16,7 +17,9 @@ function contactLinks(contact: ContactInfo) {
     // forcing + onto it would dial a different country.
     const dial = (value: string) => `${value.trim().startsWith('+') ? '+' : ''}${digits(value)}`;
     if (contact.phone) links.push({ key: 'phone', href: `tel:${dial(contact.phone)}`, label: contact.phone, icon: Phone });
-    if (contact.whatsapp) links.push({ key: 'whatsapp', href: `https://wa.me/${digits(contact.whatsapp)}`, label: 'WhatsApp', icon: MessageCircle, external: true });
+    // No link rather than a wrong one: wa.me needs the country code (see whatsappNumber).
+    const whatsapp = contact.whatsapp ? whatsappNumber(contact.whatsapp) : null;
+    if (whatsapp) links.push({ key: 'whatsapp', href: `https://wa.me/${whatsapp}`, label: 'WhatsApp', icon: MessageCircle, external: true });
     if (contact.telegram) {
         const handle = contact.telegram.replace(/^@/, '');
         const target = /^\+?\d{5,}$/.test(handle) ? `+${digits(handle)}` : handle;

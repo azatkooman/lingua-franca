@@ -1,5 +1,6 @@
 import { settingsService, type Language } from './SettingsService';
 import { voiceService } from './VoiceService';
+import { translateNow as tr } from './i18n';
 
 export interface TranslationUpdate {
     /** Stable for one caption sentence on one target, so a screen updates it in place. */
@@ -60,6 +61,10 @@ const TRANSLATION_WAIT_MS = 8000;
 // cannot hold up the start or the reconnect sequence.
 const SDP_TIMEOUT_MS = 20_000;
 const SENTENCE_END = /[.!?…。！？]["»”')\]]*\s*$/;
+// A sentence still growing is sent to phones at most this often. OpenAI sends a delta for every
+// few characters, and each one used to go out with the whole sentence so far; finished
+// sentences are still sent at once.
+const PARTIAL_CAPTION_INTERVAL_MS = 250;
 // The original speech is transcribed only when asked for (input transcription). Without it the
 // Original box and the original channel's captions stayed empty.
 const INPUT_TRANSCRIPTION_MODEL = 'gpt-realtime-whisper';
@@ -110,7 +115,7 @@ class RealtimeTranslationService {
         if (this.stopping) {
             this.sourceStream.getTracks().forEach((track) => track.stop());
             this.sourceStream = null;
-            throw new Error('The broadcast was stopped.');
+            throw new Error(tr('voice_stopped'));
         }
         if (this.floorChannel) {
             const [floorTrack] = this.sourceStream.getAudioTracks();
@@ -135,7 +140,7 @@ class RealtimeTranslationService {
         const { value: clientSecret } = await settingsService.createRealtimeSession(context.sourceLanguage.code, target.code);
         if (!clientSecret) throw new Error(`OpenAI did not return a client secret for ${target.name}.`);
         // Stopped meanwhile: opening an OpenAI connection now would keep billing with nobody to stop it.
-        if (this.stopping || this.context !== context) throw new Error('The broadcast was stopped.');
+        if (this.stopping || this.context !== context) throw new Error(tr('voice_stopped'));
         const [inputTrack] = this.sourceStream?.getAudioTracks() ?? [];
         if (!inputTrack) throw new Error('The selected input produced no audio track.');
         const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -185,7 +190,20 @@ class RealtimeTranslationService {
             }
         };
 
+        let lastPartialAt = 0;
+        let partialTimer = 0;
         const sendCaptions = (final: boolean) => {
+            window.clearTimeout(partialTimer);
+            partialTimer = 0;
+            if (!final) {
+                const wait = lastPartialAt + PARTIAL_CAPTION_INTERVAL_MS - performance.now();
+                // Too soon: send the newest text once the interval is up instead.
+                if (wait > 0) {
+                    partialTimer = window.setTimeout(() => { if (isCurrent()) sendCaptions(false); }, wait);
+                    return;
+                }
+                lastPartialAt = performance.now();
+            }
             const segmentId = `${session.segmentKey}-${session.segment}`;
             voiceService.sendTranslationText(target.id, {
                 segmentId, text: session.translatedText, originalText: session.originalText, final,
@@ -204,6 +222,9 @@ class RealtimeTranslationService {
         const finishSegment = () => {
             window.clearTimeout(idleTimer);
             idleTimer = 0;
+            // A pending partial belongs to the sentence ending now; it must not fire into the next.
+            window.clearTimeout(partialTimer);
+            partialTimer = 0;
             segmentOpenedAt = 0;
             if (session.translatedText || session.originalText) sendCaptions(true);
             session.translatedText = ''; session.originalText = '';
@@ -272,7 +293,7 @@ class RealtimeTranslationService {
                 });
                 if (!answer.ok) throw new Error(`OpenAI ${target.name} session failed: ${await answer.text()}`);
                 const sdp = await answer.text();
-                if (!isCurrent()) throw new Error('The broadcast was stopped.');
+                if (!isCurrent()) throw new Error(tr('voice_stopped'));
                 await peer.setRemoteDescription({ type: 'answer', sdp });
             } finally {
                 window.clearTimeout(deadline);

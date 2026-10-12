@@ -28,10 +28,12 @@ class RealtimeSocket {
         if (token === this.token) return;
         this.token = token;
         if (!this.socket) return;
-        // Reconnect so the server re-reads the handshake with the new credentials.
-        this.socket.disconnect();
-        this.socket = null;
-        this.open();
+        // Swap the token on the live connection. Reconnecting instead made the server treat this
+        // device as gone and tear down every broadcast and listener on it, while this side,
+        // seeing its own disconnect, did not republish: dead air with the screen still "live".
+        // Later automatic reconnects send the new token in their handshake.
+        this.socket.auth = { token };
+        if (this.socket.connected) this.socket.emit('setToken', { token }, () => undefined);
     }
 
     private open() {
@@ -43,6 +45,10 @@ class RealtimeSocket {
             reconnectionDelayMax: 5000,
         });
         this.socket = socket;
+        // Registered before every other handler, so the server holds the current token before
+        // anything (a republish, for one) runs on this connection. A token changed while the
+        // handshake was in flight would otherwise leave the server with the old one.
+        socket.on('connect', () => { socket.emit('setToken', { token: this.token }, () => undefined); });
         for (const [event, handlers] of this.handlers) {
             for (const handler of handlers) socket.on(event, handler);
         }

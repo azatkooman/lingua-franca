@@ -1,5 +1,6 @@
 import * as mediasoupClient from 'mediasoup-client';
 import { realtimeSocket } from './realtimeSocket';
+import { translateNow as tr, type TranslationKey } from './i18n';
 
 export const SYSTEM_AUDIO_DEVICE_ID = '__lingua_franca_system_audio__';
 type StatusCallback = (status: string) => void;
@@ -107,21 +108,25 @@ export class VoiceService {
         return () => { this.replacedHandlers.delete(handler); };
     }
 
+    // Phone interpreters see these too. They used to get English text telling them to open
+    // Windows Settings and restart the app, which helps nobody holding a phone.
+    private deviceText(desktop: TranslationKey, phone: TranslationKey) {
+        return tr(this.isDesktopApp() ? desktop : phone);
+    }
+
     private mediaError(error: unknown) {
         const name = error instanceof DOMException ? error.name : '';
         const detail = error instanceof Error ? error.message : String(error);
-        if (name === 'NotAllowedError' || name === 'SecurityError') {
-            return new Error('Microphone permission was denied. In Windows Settings, enable Privacy & security → Microphone → Microphone access and “Let desktop apps access your microphone,” then restart Lingua Franca.');
-        }
-        if (name === 'NotFoundError') return new Error('Windows reported no recording device. Connect or enable an input in Settings → System → Sound → Input.');
-        if (name === 'NotReadableError' || name === 'AbortError') return new Error('Windows could not open the input. Close other audio applications or disable exclusive mode for this recording device, then refresh.');
-        if (name === 'OverconstrainedError') return new Error('The selected audio device is no longer available. Refresh the input list and choose it again.');
-        return new Error(`${name ? `${name}: ` : ''}${detail || 'Unknown audio-device error.'}`);
+        if (name === 'NotAllowedError' || name === 'SecurityError') return new Error(this.deviceText('media_denied_desktop', 'media_denied_phone'));
+        if (name === 'NotFoundError') return new Error(this.deviceText('media_none_desktop', 'media_none_phone'));
+        if (name === 'NotReadableError' || name === 'AbortError') return new Error(this.deviceText('media_busy_desktop', 'media_busy_phone'));
+        if (name === 'OverconstrainedError') return new Error(tr('media_gone'));
+        return new Error(tr('media_unknown', { detail: `${name ? `${name}: ` : ''}${detail || '?'}` }));
     }
 
     async getMicrophones(requestPermission = false) {
         try {
-            if (!navigator.mediaDevices?.enumerateDevices) throw new Error('This browser does not expose audio-device enumeration.');
+            if (!navigator.mediaDevices?.enumerateDevices) throw new Error(tr('media_no_enumeration'));
             if (requestPermission) {
                 const permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 permissionStream.getTracks().forEach((track) => track.stop());
@@ -136,7 +141,7 @@ export class VoiceService {
                 if (device.kind === 'audioinput' && device.deviceId) byId.set(device.deviceId, device);
             }
             const devices = [...byId.values()].sort((left, right) => (left.label || '').localeCompare(right.label || ''));
-            if (!devices.length) throw new Error('Chromium returned zero recording devices. Check Windows microphone privacy and confirm the device is enabled under System → Sound → Input.');
+            if (!devices.length) throw new Error(this.deviceText('media_zero_desktop', 'media_zero_phone'));
             return devices;
         }
         catch (error) { console.error('Error enumerating devices:', error); throw this.mediaError(error); }
@@ -151,7 +156,7 @@ export class VoiceService {
 
     /** Opens an input without making it the main one (the original speech in Human mode). */
     private async openInput(deviceId?: string): Promise<MediaStream> {
-        if (!navigator.mediaDevices?.getUserMedia) throw new Error('Microphone access requires HTTPS or localhost.');
+        if (!navigator.mediaDevices?.getUserMedia) throw new Error(tr('media_needs_https'));
         if (deviceId === SYSTEM_AUDIO_DEVICE_ID) {
             if (!this.isDesktopApp() || !navigator.mediaDevices.getDisplayMedia) {
                 throw new Error('System-output capture is available only in the desktop app.');
@@ -177,7 +182,7 @@ export class VoiceService {
             // A chosen input that is gone used to fall back to the default device without a word,
             // which could broadcast the laptop microphone instead of the mixer feed.
             if (deviceId && error instanceof DOMException && ['NotFoundError', 'OverconstrainedError'].includes(error.name)) {
-                throw new Error('The selected input is not available. Reconnect it, press refresh and choose it again. Nothing was broadcast.');
+                throw new Error(tr('media_selected_gone'));
             }
             throw this.mediaError(error);
         }
@@ -222,7 +227,7 @@ export class VoiceService {
         realtimeSocket.on('sfuRestarting', () => {
             this.device = null;
             this.onListenerStatus?.('restarting');
-            if (this.producers.size) this.onPublishStatus('Media engine restarting…');
+            if (this.producers.size) this.onPublishStatus(tr('voice_engine_restarting'));
         });
         realtimeSocket.on('sfuReady', () => {
             this.device = null;
@@ -232,10 +237,11 @@ export class VoiceService {
         // A dropped Wi-Fi link gives the reconnected socket a new id, so the server holds no
         // transports for it and the listener has to negotiate again.
         realtimeSocket.on<string>('disconnect', (reason) => {
-            // Our own disconnect (a sign-in change) is not a dropped link.
+            // Our own disconnect is not a dropped link. (A sign-in change no longer disconnects:
+            // the token is swapped on the live connection.)
             if (reason === 'io client disconnect') return;
             this.socketDropped = true;
-            if (this.producers.size) this.onPublishStatus('Connection to the computer lost. Reconnecting…');
+            if (this.producers.size) this.onPublishStatus(tr('voice_link_lost'));
             if (this.currentListenerChannelId) this.onListenerStatus?.('restarting');
         });
         realtimeSocket.on('connect', () => {
@@ -276,20 +282,28 @@ export class VoiceService {
         this.device = device;
     }
 
+    /** The server's reason in this device's language when it gave a code, else its own text. */
+    private serverError(result: { error?: string; code?: string; channel?: string }) {
+        if (result.code === 'login_required') return new Error(tr('server_login_required'));
+        if (result.code === 'wrong_channel') return new Error(tr('server_wrong_channel'));
+        if (result.code === 'channel_taken') return new Error(tr('server_channel_taken', { channel: result.channel || '' }));
+        return new Error(result.error || 'No producer ID returned.');
+    }
+
     /** A send transport whose producer is announced to the server with `appData`. */
     private async openSendTransport(appData: Record<string, unknown>) {
-        const transportInfo = await realtimeSocket.request<TransportResponse>('createWebRtcTransport', { type: 'producer' });
-        if (transportInfo.error) throw new Error(transportInfo.error);
+        const transportInfo = await realtimeSocket.request<TransportResponse & { code?: string }>('createWebRtcTransport', { type: 'producer' });
+        if (transportInfo.error) throw this.serverError(transportInfo);
         const transport = this.device!.createSendTransport(transportInfo);
         transport.on('connect', ({ dtlsParameters }, callback, errback) => {
             void realtimeSocket.request<{ error?: string } | undefined>('connectTransport', { transportId: transport.id, dtlsParameters })
                 .then((result) => result?.error ? errback(new Error(result.error)) : callback());
         });
         transport.on('produce', ({ kind, rtpParameters }, callback, errback) => {
-            void realtimeSocket.request<{ id?: string; error?: string }>('produce', {
+            void realtimeSocket.request<{ id?: string; error?: string; code?: string; channel?: string }>('produce', {
                 transportId: transport.id, kind, rtpParameters, appData,
             }).then((result) => result.error || !result.id
-                ? errback(new Error(result.error || 'No producer ID returned.'))
+                ? errback(this.serverError(result))
                 : callback({ id: result.id }));
         });
         transport.on('connectionstatechange', (state) => { if (state === 'failed') this.scheduleRepublish(); });
@@ -308,13 +322,13 @@ export class VoiceService {
         await this.loadDevice();
         this.onConnectionsChange = onConnectionsChange;
         this.onPublishStatus = onStatus;
-        onStatus('Connecting…');
+        onStatus(tr('voice_connecting'));
         this.intended.set(channelId, { track, mode, role });
         // Abandoned when the broadcast was stopped meanwhile, or this channel was handed a
         // newer track (an OpenAI reconnect) by a later call.
         const superseded = () => generation !== this.broadcastGeneration || this.intended.get(channelId)?.track !== track;
         const transport = await this.openSendTransport({ channelId, mode, role });
-        if (superseded()) { this.closeTransport(transport); throw new Error('The broadcast was stopped.'); }
+        if (superseded()) { this.closeTransport(transport); throw new Error(tr('voice_stopped')); }
         this.sendTransports.set(channelId, transport);
         let producer: mediasoupClient.types.Producer;
         try {
@@ -331,16 +345,16 @@ export class VoiceService {
             producer.close();
             if (this.sendTransports.get(channelId) === transport) this.sendTransports.delete(channelId);
             this.closeTransport(transport);
-            throw new Error('The broadcast was stopped.');
+            throw new Error(tr('voice_stopped'));
         }
         this.producers.set(channelId, producer);
         // The input itself stopped (a USB interface unplugged, the device switched off). The
         // channel ends; say so, since the screen otherwise still looked live.
         producer.on('trackended', () => {
             this.stopChannel(channelId);
-            this.onPublishStatus('The audio input stopped sending sound, so this channel is off air. Check the cable or device, then press Stop and start again.');
+            this.onPublishStatus(tr('voice_input_ended'));
         });
-        onStatus('Broadcasting');
+        onStatus(tr('voice_broadcasting'));
     }
 
     /**
@@ -391,7 +405,7 @@ export class VoiceService {
                 } catch (error) {
                     if (generation !== this.broadcastGeneration) return;
                     failed = true;
-                    this.onPublishStatus(`Could not resume broadcasting yet (${error instanceof Error ? error.message : String(error)}). Trying again…`);
+                    this.onPublishStatus(tr('voice_resume_failed', { detail: error instanceof Error ? error.message : String(error) }));
                 }
             }
             if (this.muted) this.setMuted(true);
@@ -422,9 +436,9 @@ export class VoiceService {
         const superseded = () => generation !== this.broadcastGeneration || this.recordOnlyIntent?.track !== track;
         const transport = await this.openSendTransport({ channelId, recordOnly: true });
         try {
-            if (superseded()) throw new Error('The broadcast was stopped.');
+            if (superseded()) throw new Error(tr('voice_stopped'));
             const producer = await transport.produce({ track, stopTracks: false });
-            if (superseded()) { producer.close(); throw new Error('The broadcast was stopped.'); }
+            if (superseded()) { producer.close(); throw new Error(tr('voice_stopped')); }
             this.recordOnly = { channelId, transport, producer };
         } catch (error) {
             this.closeTransport(transport);
@@ -456,14 +470,14 @@ export class VoiceService {
             if (generation !== this.broadcastGeneration) {
                 stream.getTracks().forEach((track) => track.stop());
                 if (this.sourceStream === stream) this.sourceStream = null;
-                throw new Error('The broadcast was stopped.');
+                throw new Error(tr('voice_stopped'));
             }
             const [track] = stream.getAudioTracks();
-            if (!track) throw new Error('That input opened but produced no audio track. Choose a different device and try again.');
+            if (!track) throw new Error(tr('media_no_track'));
             await this.publishTrack(channelId, track, 'human', onStatus, onConnectionsChange);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            onStatus(`Error: ${message}`);
+            onStatus(tr('voice_error', { detail: message }));
             throw error;
         }
     }
@@ -479,11 +493,11 @@ export class VoiceService {
         const stream = deviceId === mainDeviceId && mainTrack ? new MediaStream([mainTrack.clone()]) : await this.openInput(deviceId);
         if (generation !== this.broadcastGeneration) {
             stream.getTracks().forEach((track) => track.stop());
-            throw new Error('The broadcast was stopped.');
+            throw new Error(tr('voice_stopped'));
         }
         this.originalStream = stream;
         const [track] = stream.getAudioTracks();
-        if (!track) throw new Error('The input for the original speech produced no audio track. Choose a different device and try again.');
+        if (!track) throw new Error(tr('media_original_no_track'));
         this.keepOnMute.add(channelId);
         await this.publishTrack(channelId, track, 'human', onStatus, onConnectionsChange, 'original');
     }
@@ -581,9 +595,14 @@ export class VoiceService {
             this.closeRecvTransport();
             onStatus('connecting');
             await this.loadDevice();
+            // Captions now go only to phones that ask for a channel. Asked again on every
+            // negotiation, because a reconnected socket starts with no subscriptions.
+            realtimeSocket.emit('watchCaptions', { channelId });
             const transportInfo = await realtimeSocket.request<TransportResponse>('createWebRtcTransport', { type: 'consumer' });
             if (transportInfo.error) throw new Error(transportInfo.error);
-            if (stale()) return;
+            // Switched channel meanwhile: the server already made this transport, so give it back
+            // rather than leave one open per quick switch.
+            if (stale()) { realtimeSocket.emit('closeTransport', { transportId: transportInfo.id }); return; }
             const recvTransport = this.device!.createRecvTransport(transportInfo);
             this.recvTransport = recvTransport;
             // A media link that fails (Wi-Fi roaming, the computer's address changing) gives no
@@ -666,6 +685,7 @@ export class VoiceService {
         this.listenAttempt += 1;
         this.currentListenerChannelId = null;
         this.onMuteStatusChange = undefined;
+        realtimeSocket.emit('watchCaptions', { channelId: '' });
         this.consumer?.close();
         this.consumer = null;
         this.closeRecvTransport();

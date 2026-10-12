@@ -366,6 +366,7 @@ async function run() {
         const english = settings.languages[0].id;
         const operator = await connect(token);
         const early = await connect('', LISTENER_BASE);
+        await ask(early, 'watchCaptions', { channelId: english });
         const relayed = waitFor(early, 'translationText', 5000);
         assert.equal((await ask(operator, 'sendTranslationText', { channelId: english, segmentId: 'smoke-1', text: 'Good', originalText: 'Доброе' })).ok, true);
         assert.equal((await relayed).text, 'Good');
@@ -376,6 +377,92 @@ async function run() {
         assert.deepEqual(segments.map((segment) => [segment.id, segment.text, segment.final]),
             [['smoke-1', 'Good morning', true], ['smoke-2', 'Welcome', false]]);
         return `${segments.length} segments for a late joiner`;
+    });
+
+    await check('captions reach only the phones watching that channel', async () => {
+        const { body: settings } = await json('/api/settings');
+        const [first, second] = settings.languages.map((language) => language.id);
+        const operator = await connect(token);
+        const watcher = await connect('', LISTENER_BASE);
+        const other = await connect('', LISTENER_BASE);
+        const idle = await connect('', LISTENER_BASE);
+        await ask(watcher, 'watchCaptions', { channelId: first });
+        await ask(other, 'watchCaptions', { channelId: second });
+        const seen = { other: 0, idle: 0 };
+        other.on('translationText', () => { seen.other += 1; });
+        idle.on('translationText', () => { seen.idle += 1; });
+        const relayed = waitFor(watcher, 'translationText', 5000);
+        await ask(operator, 'sendTranslationText', { channelId: first, segmentId: 'room-1', text: 'Only here' });
+        assert.equal((await relayed).text, 'Only here');
+        await sleep(300);
+        assert.deepEqual(seen, { other: 0, idle: 0 }, 'phones on other channels, or none, receive nothing');
+        // Switching channel moves the subscription rather than adding one.
+        await ask(watcher, 'watchCaptions', { channelId: second });
+        let stale = 0;
+        watcher.on('translationText', ({ channelId }) => { if (channelId === first) stale += 1; });
+        await ask(operator, 'sendTranslationText', { channelId: first, segmentId: 'room-2', text: 'Not any more' });
+        await sleep(300);
+        assert.equal(stale, 0);
+        return 'delivered to 1 of 3, and moved on switch';
+    });
+
+    await check('signing in again swaps the token on the live connection', async () => {
+        const { body: settings } = await json('/api/settings');
+        const english = settings.languages[0].id;
+        const device = await connect('');
+        assert.match((await ask(device, 'sendTranslationText', { channelId: english, segmentId: 'auth-1', text: 'x' })).error || '', /Administrator/);
+        let dropped = false;
+        device.on('disconnect', () => { dropped = true; });
+        assert.equal((await ask(device, 'setToken', { token })).ok, true);
+        assert.equal((await ask(device, 'sendTranslationText', { channelId: english, segmentId: 'auth-2', text: 'y' })).ok, true, 'now an operator');
+        assert.equal((await ask(device, 'setToken', { token: '' })).ok, true);
+        assert.match((await ask(device, 'sendTranslationText', { channelId: english, segmentId: 'auth-3', text: 'z' })).error || '', /Administrator/, 'and back');
+        assert.equal(dropped, false, 'the connection was never dropped');
+        const plain = await connect('', LISTENER_BASE);
+        assert.equal((await ask(plain, 'setToken', { token })).ignored, true);
+        assert.match((await ask(plain, 'sendTranslationText', { channelId: english, segmentId: 'auth-4', text: 'w' })).error || '', /Administrator/, 'never on the plain port');
+        return 'granted and revoked in place; refused on the plain port';
+    });
+
+    await check('a broadcast survives its operator signing in again', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const { body: settings } = await json('/api/settings');
+        const channel = settings.languages[0].id;
+        const operator = await connect(token);
+        assert.ok((await produce(operator, channel, 7777)).id);
+        assert.equal((await ask(operator, 'setToken', { token: await login() })).ok, true);
+        await sleep(300);
+        assert.equal(await channelMode(channel), 'sfu-active', 'still on air');
+        assert.equal((await ask(operator, 'setProducerPaused', { channelId: channel, paused: true })).ok, true, 'and still controlled by its owner');
+        await ask(operator, 'closeProducer', { channelId: channel });
+        return 'on air and owned after the token change';
+    });
+
+    await check('one phone cannot hold an unbounded number of transports', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const phone = await connect('', LISTENER_BASE);
+        const made = [];
+        for (let index = 0; index < 10; index += 1) made.push((await ask(phone, 'createWebRtcTransport', { type: 'consumer' })).id);
+        assert.ok(made.every(Boolean), 'a listener is never refused');
+        const alive = [];
+        for (const transportId of made) {
+            const reply = await ask(phone, 'connectTransport', { transportId, dtlsParameters: FAKE_DTLS });
+            if (!/not found/.test(reply.error || '')) alive.push(transportId);
+        }
+        assert.ok(alive.length <= 4, `${alive.length} still open`);
+        assert.ok(alive.includes(made.at(-1)), 'the newest one is kept');
+        return `${alive.length} of 10 kept, oldest closed`;
+    });
+
+    await check('the dashboard counters can be reset for a new event', async () => {
+        const reset = await json('/api/admin/live/reset', { method: 'POST', headers: authed(token) });
+        assert.equal(reset.status, 200);
+        const { body } = await json('/api/admin/live', { headers: authed(token) });
+        assert.equal(body.aiSeconds, 0);
+        assert.ok(body.since >= Date.now() - 5000, 'counting starts now');
+        assert.ok(body.channels.every((channel) => channel.peakListeners === channel.listeners), 'peaks restart from the current audience');
+        assert.equal((await json('/api/admin/live/reset', { method: 'POST' })).status, 401, 'operator only');
+        return 'AI time 0, peaks = current';
     });
 
     await check('only an operator can send captions, and never from the plain listener port', async () => {
@@ -686,6 +773,7 @@ async function run() {
         const phone = await connect(interpreterToken);
         const attempt = await produce(phone, channelId, 2222);
         assert.match(attempt.error || '', /already being broadcast/);
+        assert.equal(attempt.code, 'channel_taken', 'coded, so the phone can show it in its own language');
         assert.match((await ask(phone, 'setProducerPaused', { channelId, paused: true })).error || '', /Another broadcaster/);
         assert.equal((await ask(phone, 'closeProducer', { channelId })).ignored, true);
         assert.equal(await channelMode(channelId), 'sfu-active', 'the operator broadcast is still live');

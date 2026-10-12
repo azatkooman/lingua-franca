@@ -358,6 +358,11 @@ class SettingsService {
         return await (await this.adminRequest('/api/admin/live', { cache: 'no-store' })).json() as LiveStatus;
     }
 
+    /** Starts the dashboard's listener peaks and AI time from now, for a new event. */
+    async resetLiveCounters() {
+        await this.adminRequest('/api/admin/live/reset', { method: 'POST' });
+    }
+
     async listRecordings() {
         return await (await this.adminRequest('/api/admin/recordings', { cache: 'no-store' })).json() as { folder: string; items: RecordingItem[] };
     }

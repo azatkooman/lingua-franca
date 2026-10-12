@@ -5,6 +5,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { settingsService, type AdminSettings, type ContactInfo, type EventInfo, type Language } from '../lib/SettingsService';
 import { LOCALES, useTranslation, type Locale } from '../lib/i18n';
 import { useGoBack } from '../lib/navigation';
+import { isInternationalNumber } from '../lib/phoneNumbers';
 import { fetchAdminHealth, listenerUrl, readPhoneLink, savePhoneLink, usesPlainLink, type HealthInfo, type PhoneLink } from '../lib/listenerLinks';
 import LiveDashboard from '../components/LiveDashboard';
 import RecordingsCard from '../components/RecordingsCard';
@@ -211,6 +212,7 @@ export default function Admin() {
                         {settings.languages.map((language) => <option key={language.id} value={language.id}>{language.name}</option>)}
                     </select>
                     <p className="text-muted"><code>{qrUrl || t('detecting_network')}</code></p>
+                    {usePlainLink && health && <p className="address-warning">{t('poster_ip_warning', { address: health.localAddress })}</p>}
                     <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
                         <button className="btn-primary" disabled={!qrUrl} onClick={() => setShowQr(true)}><QrCode size={18} /> {t('show_listener_qr')}</button>
                         <button className="btn-secondary" disabled={!qrUrl} onClick={() => navigate('/admin/poster')}><Printer size={18} /> {t('poster_button')}</button>
@@ -317,6 +319,9 @@ export default function Admin() {
                         <label>{t('contact_whatsapp')}</label>
                         <input className="custom-input" type="tel" maxLength={32} placeholder="+7 700 000 00 00" value={contact.whatsapp}
                             onChange={(change) => setContactDraft({ ...contact, whatsapp: change.target.value })} />
+                        {contact.whatsapp.trim() && !isInternationalNumber(contact.whatsapp) && (
+                            <p className="address-warning">{t('contact_whatsapp_international')}</p>
+                        )}
                     </div>
                 </div>
                 <div className="form-row mt-4">

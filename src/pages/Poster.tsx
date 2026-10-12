@@ -3,7 +3,7 @@ import { ArrowLeft, FileDown, Printer } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { settingsService, type AdminSettings } from '../lib/SettingsService';
 import { LOCALES, formatEventDates, translateFor, useTranslation, type Locale } from '../lib/i18n';
-import { fetchAdminHealth, listenerUrl, readPhoneLink, type HealthInfo } from '../lib/listenerLinks';
+import { fetchAdminHealth, listenerUrl, readPhoneLink, usesPlainLink, type HealthInfo } from '../lib/listenerLinks';
 import { useGoBack } from '../lib/navigation';
 import { desktopBridge } from '../lib/desktop';
 import './Poster.css';
@@ -115,6 +115,10 @@ export default function Poster() {
                     ))}
                 </div>
                 {!health && <p className="text-danger">{t('network_not_ready')}</p>}
+                {/* Posters are printed and reused; a code holding a DHCP address dies with the lease. */}
+                {usesPlainLink(health, phoneLink) && health && (
+                    <p className="poster-address-warning">{t('poster_ip_warning', { address: health.localAddress })}</p>
+                )}
                 <div className="poster-actions mt-4">
                     {desktopBridge && (
                         <button className="btn-primary" disabled={!health || !channels.length || savingPdf} onClick={() => void savePdf()}>

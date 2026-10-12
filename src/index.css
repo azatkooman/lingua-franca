@@ -177,3 +177,17 @@ a:hover {
   50% { transform: translateY(-10px); }
   100% { transform: translateY(0px); }
 }
+
+/* A configuration that works today but will break later (a DHCP address in a printed QR, a local
+   WhatsApp number). Amber-toned rather than the error red. */
+.address-warning,
+.poster-address-warning {
+  margin: 0.5rem 0 0;
+  padding: 0.6rem 0.8rem;
+  border-left: 3px solid #f59e0b;
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.1);
+  color: var(--text-main);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}

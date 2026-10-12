@@ -147,6 +147,12 @@ export default function Listener() {
     const fullscreenRef = useRef<HTMLDivElement>(null);
     // Ignores replies for a channel the listener has already switched away from.
     const listeningTo = useRef('');
+    // The controls as they are now, for the stream callback. VoiceService keeps that callback and
+    // calls it again on every automatic reconnect (the silence watchdog, a Wi-Fi drop, the
+    // interpreter restarting); reading these from the closure instead used the values from the
+    // moment Connect was tapped, so a reconnect un-muted a muted phone and undid a volume boost.
+    const playback = useRef({ isMuted, volume, playbackPath });
+    useEffect(() => { playback.current = { isMuted, volume, playbackPath }; }, [isMuted, volume, playbackPath]);
 
     // The channel from the QR link is derived, not stored: it resolves as soon as the channel
     // list loads, and an explicit tap simply overrides it.
@@ -273,8 +279,10 @@ export default function Listener() {
                 directRef.current = null;
                 meterCleanup.current?.();
                 meterCleanup.current = null;
+                const { isMuted: muted, volume: level, playbackPath: path } = playback.current;
                 const playWithElement = () => {
-                    audio.muted = isMuted;
+                    audio.muted = playback.current.isMuted;
+                    audio.volume = Math.min(playback.current.volume, 100) / 100;
                     audio.srcObject = stream;
                     audio.play().then(() => setPlayBlocked(false)).catch((error) => {
                         console.error('Audio playback failed:', error);
@@ -283,10 +291,12 @@ export default function Listener() {
                     meterCleanup.current = voiceService.createLevelMeter(stream, setSignalLevel);
                 };
                 const context = audioContextRef.current;
-                if (playbackPath !== 'direct' || !context) { playWithElement(); return; }
-                startDirectPlayback(context, audio, stream, { gain: isMuted ? 0 : volume / 100, onLevel: setSignalLevel }).then((playback) => {
-                    if (listeningTo.current !== language.id) { playback.stop(); return; }
-                    directRef.current = playback;
+                if (path !== 'direct' || !context) { playWithElement(); return; }
+                startDirectPlayback(context, audio, stream, { gain: muted ? 0 : level / 100, onLevel: setSignalLevel }).then((direct) => {
+                    if (listeningTo.current !== language.id) { direct.stop(); return; }
+                    directRef.current = direct;
+                    // The listener may have changed the controls while this was starting.
+                    direct.setGain(playback.current.isMuted ? 0 : playback.current.volume / 100);
                     // Blocked until a tap if the browser has not allowed sound yet; the button
                     // that shows then resumes the context, and this clears it again.
                     context.onstatechange = () => setPlayBlocked(context.state !== 'running');

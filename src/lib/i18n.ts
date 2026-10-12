@@ -295,6 +295,39 @@ const en = {
     headphones_hint: 'For private listening, plug in headphones; the sound switches to them automatically.',
     input_missing_hint: 'The selected input is not connected. Reconnect it and press refresh, or choose another input. Starting will not switch to a different microphone on its own.',
     original_waiting: 'The speaker’s own words will appear here.',
+    // Broadcasting status and audio-device errors. These reach phone interpreters, who see the
+    // phone versions; the computer versions name the Windows settings to change.
+    voice_connecting: 'Connecting…',
+    voice_broadcasting: 'Broadcasting',
+    voice_engine_restarting: 'Media engine restarting…',
+    voice_link_lost: 'Connection to the computer lost. Reconnecting…',
+    voice_input_ended: 'The audio input stopped sending sound, so this channel is off air. Check the cable or device, then press Stop and start again.',
+    voice_resume_failed: 'Could not resume broadcasting yet ({detail}). Trying again…',
+    voice_stopped: 'The broadcast was stopped.',
+    voice_error: 'Error: {detail}',
+    media_denied_desktop: 'Microphone permission was denied. In Windows Settings, enable Privacy & security → Microphone → Microphone access and “Let desktop apps access your microphone,” then restart Lingua Franca.',
+    media_denied_phone: 'Microphone access is blocked. Allow the microphone for this page in the browser’s site settings, then try again.',
+    media_none_desktop: 'Windows reported no recording device. Connect or enable an input in Settings → System → Sound → Input.',
+    media_none_phone: 'This phone reported no microphone.',
+    media_busy_desktop: 'Windows could not open the input. Close other audio applications or disable exclusive mode for this recording device, then refresh.',
+    media_busy_phone: 'The microphone is in use by another app (a call, for example). Close it, then try again.',
+    media_gone: 'The selected audio device is no longer available. Refresh the input list and choose it again.',
+    media_selected_gone: 'The selected input is not available. Reconnect it, press refresh and choose it again. Nothing was broadcast.',
+    media_no_track: 'That input opened but produced no audio track. Choose a different device and try again.',
+    media_original_no_track: 'The input for the original speech produced no audio track. Choose a different device and try again.',
+    media_zero_desktop: 'No recording devices were found. Check microphone access in Windows privacy settings and confirm the device is enabled under System → Sound → Input.',
+    media_zero_phone: 'No microphone was found. Allow microphone access for this page, then refresh.',
+    media_no_enumeration: 'This browser cannot list audio devices.',
+    media_needs_https: 'Microphone access needs the secure (HTTPS) address.',
+    media_unknown: 'Could not open the microphone ({detail}).',
+    // A printed QR that points at a DHCP address breaks when the router hands out another one.
+    poster_ip_warning: 'These codes contain this computer’s network address ({address}). If the router gives the computer a different address, printed codes stop working. Reserve this address for the computer in the router (a DHCP reservation), or set up the trusted certificate to use a fixed name.',
+    dashboard_reset: 'Reset counters',
+    dashboard_reset_confirm: 'Start counting listener peaks and AI time again from now?',
+    server_login_required: 'You are no longer signed in. Sign in again, or ask the operator for a new interpreter link.',
+    server_wrong_channel: 'This interpreter link is for a different channel.',
+    server_channel_taken: '{channel} is already being broadcast. Ask the operator to stop it first.',
+    contact_whatsapp_international: 'Use the international format with the country code, for example +7 701 123 4567. WhatsApp links do not work with local numbers.',
 };
 
 export type TranslationKey = keyof typeof en;
@@ -587,6 +620,36 @@ const ru: Record<TranslationKey, string> = {
     headphones_hint: 'Чтобы слушать без помех для других, подключите наушники: звук переключится на них сам.',
     input_missing_hint: 'Выбранный вход не подключён. Подключите его и нажмите «Обновить» или выберите другой вход. Приложение не переключится на другой микрофон само.',
     original_waiting: 'Здесь появятся слова спикера на языке оригинала.',
+    voice_connecting: 'Подключение…',
+    voice_broadcasting: 'Идёт трансляция',
+    voice_engine_restarting: 'Медиасервер перезапускается…',
+    voice_link_lost: 'Связь с компьютером потеряна. Переподключение…',
+    voice_input_ended: 'Аудиовход перестал передавать звук, поэтому канал выключен. Проверьте кабель или устройство, затем нажмите «Стоп» и начните снова.',
+    voice_resume_failed: 'Пока не удалось возобновить трансляцию ({detail}). Пробуем снова…',
+    voice_stopped: 'Трансляция остановлена.',
+    voice_error: 'Ошибка: {detail}',
+    media_denied_desktop: 'Доступ к микрофону запрещён. В параметрах Windows откройте «Конфиденциальность и защита → Микрофон», включите «Доступ к микрофону» и «Разрешить классическим приложениям доступ к микрофону», затем перезапустите Lingua Franca.',
+    media_denied_phone: 'Доступ к микрофону заблокирован. Разрешите микрофон для этой страницы в настройках сайта в браузере и попробуйте снова.',
+    media_none_desktop: 'Windows не нашла устройств записи. Подключите или включите вход в «Параметры → Система → Звук → Ввод».',
+    media_none_phone: 'Телефон не нашёл микрофон.',
+    media_busy_desktop: 'Windows не смогла открыть вход. Закройте другие аудиоприложения или отключите монопольный режим для этого устройства записи, затем обновите список.',
+    media_busy_phone: 'Микрофон занят другим приложением (например, звонком). Закройте его и попробуйте снова.',
+    media_gone: 'Выбранное аудиоустройство больше недоступно. Обновите список входов и выберите его снова.',
+    media_selected_gone: 'Выбранный вход недоступен. Подключите его снова, нажмите «Обновить» и выберите его. Ничего не транслировалось.',
+    media_no_track: 'Вход открылся, но не передаёт звук. Выберите другое устройство и попробуйте снова.',
+    media_original_no_track: 'Вход для речи на языке оригинала не передаёт звук. Выберите другое устройство и попробуйте снова.',
+    media_zero_desktop: 'Устройства записи не найдены. Проверьте доступ к микрофону в параметрах конфиденциальности Windows и убедитесь, что устройство включено в «Система → Звук → Ввод».',
+    media_zero_phone: 'Микрофон не найден. Разрешите доступ к микрофону для этой страницы и обновите список.',
+    media_no_enumeration: 'Этот браузер не может показать список аудиоустройств.',
+    media_needs_https: 'Для доступа к микрофону нужен защищённый адрес (HTTPS).',
+    media_unknown: 'Не удалось открыть микрофон ({detail}).',
+    poster_ip_warning: 'Эти коды содержат сетевой адрес компьютера ({address}). Если роутер выдаст компьютеру другой адрес, напечатанные коды перестанут работать. Закрепите этот адрес за компьютером в настройках роутера (резервирование DHCP) или настройте доверенный сертификат, чтобы использовать постоянное имя.',
+    dashboard_reset: 'Сбросить счётчики',
+    dashboard_reset_confirm: 'Начать подсчёт пиков слушателей и времени ИИ заново?',
+    server_login_required: 'Вы больше не вошли в систему. Войдите снова или попросите у оператора новую ссылку переводчика.',
+    server_wrong_channel: 'Эта ссылка переводчика предназначена для другого канала.',
+    server_channel_taken: '{channel} уже транслируется. Попросите оператора сначала остановить трансляцию.',
+    contact_whatsapp_international: 'Укажите номер в международном формате с кодом страны, например +7 701 123 4567. Ссылки WhatsApp не работают с местными номерами.',
 };
 
 // Kazakh. Written for this release; worth a read-through by a native speaker before an event.
@@ -876,6 +939,36 @@ const kk: Record<TranslationKey, string> = {
     headphones_hint: 'Басқаларға кедергі жасамай тыңдау үшін құлаққап қосыңыз: дыбыс оларға өзі ауысады.',
     input_missing_hint: 'Таңдалған кіріс қосылмаған. Оны қосып, жаңартуды басыңыз немесе басқа кірісті таңдаңыз. Қолданба басқа микрофонға өздігінен ауыспайды.',
     original_waiting: 'Мұнда спикердің түпнұсқа тілдегі сөздері шығады.',
+    voice_connecting: 'Қосылуда…',
+    voice_broadcasting: 'Трансляция жүріп жатыр',
+    voice_engine_restarting: 'Медиасервер қайта іске қосылуда…',
+    voice_link_lost: 'Компьютермен байланыс үзілді. Қайта қосылуда…',
+    voice_input_ended: 'Аудиокіріс дыбыс жіберуді тоқтатты, сондықтан арна өшірілді. Кабельді немесе құрылғыны тексеріп, «Тоқтату» түймесін басып, қайта бастаңыз.',
+    voice_resume_failed: 'Трансляцияны әзірге жалғастыру мүмкін болмады ({detail}). Қайталап көреміз…',
+    voice_stopped: 'Трансляция тоқтатылды.',
+    voice_error: 'Қате: {detail}',
+    media_denied_desktop: 'Микрофонға рұқсат берілмеген. Windows параметрлерінде «Құпиялылық және қауіпсіздік → Микрофон» бөлімін ашып, «Микрофонға қол жеткізу» және «Жұмыс үстелі қолданбаларына микрофонды пайдалануға рұқсат беру» параметрлерін қосыңыз, содан кейін Lingua Franca-ны қайта іске қосыңыз.',
+    media_denied_phone: 'Микрофонға қол жеткізу бұғатталған. Браузердің сайт параметрлерінде осы бетке микрофонды пайдалануға рұқсат беріп, қайталап көріңіз.',
+    media_none_desktop: 'Windows жазу құрылғысын таппады. «Параметрлер → Жүйе → Дыбыс → Кіріс» бөлімінде кірісті қосыңыз немесе жалғаңыз.',
+    media_none_phone: 'Телефон микрофонды таппады.',
+    media_busy_desktop: 'Windows кірісті аша алмады. Басқа аудиоқолданбаларды жабыңыз немесе осы жазу құрылғысы үшін монополиялық режимді өшіріп, тізімді жаңартыңыз.',
+    media_busy_phone: 'Микрофонды басқа қолданба (мысалы, қоңырау) пайдаланып тұр. Оны жауып, қайталап көріңіз.',
+    media_gone: 'Таңдалған аудиоқұрылғы енді қолжетімсіз. Кірістер тізімін жаңартып, оны қайта таңдаңыз.',
+    media_selected_gone: 'Таңдалған кіріс қолжетімсіз. Оны қайта жалғап, жаңартуды басып, қайта таңдаңыз. Ештеңе таратылған жоқ.',
+    media_no_track: 'Кіріс ашылды, бірақ дыбыс жібермейді. Басқа құрылғыны таңдап, қайталап көріңіз.',
+    media_original_no_track: 'Түпнұсқа тілдегі сөзге арналған кіріс дыбыс жібермейді. Басқа құрылғыны таңдап, қайталап көріңіз.',
+    media_zero_desktop: 'Жазу құрылғылары табылмады. Windows құпиялылық параметрлерінде микрофонға рұқсатты тексеріп, құрылғының «Жүйе → Дыбыс → Кіріс» бөлімінде қосулы екеніне көз жеткізіңіз.',
+    media_zero_phone: 'Микрофон табылмады. Осы бетке микрофонға рұқсат беріп, тізімді жаңартыңыз.',
+    media_no_enumeration: 'Бұл браузер аудиоқұрылғылар тізімін көрсете алмайды.',
+    media_needs_https: 'Микрофонға қол жеткізу үшін қорғалған мекенжай (HTTPS) қажет.',
+    media_unknown: 'Микрофонды ашу мүмкін болмады ({detail}).',
+    poster_ip_warning: 'Бұл кодтарда осы компьютердің желілік мекенжайы бар ({address}). Егер роутер компьютерге басқа мекенжай берсе, басып шығарылған кодтар жұмыс істемей қалады. Роутер параметрлерінде осы мекенжайды компьютерге бекітіңіз (DHCP резервтеу) немесе тұрақты атауды пайдалану үшін сенімді сертификатты баптаңыз.',
+    dashboard_reset: 'Есептегіштерді нөлдеу',
+    dashboard_reset_confirm: 'Тыңдаушылар шыңы мен ЖИ уақытын қазірден бастап қайта санау керек пе?',
+    server_login_required: 'Сіз енді жүйеде емессіз. Қайта кіріңіз немесе оператордан аудармашыға арналған жаңа сілтеме сұраңыз.',
+    server_wrong_channel: 'Бұл аудармашы сілтемесі басқа арнаға арналған.',
+    server_channel_taken: '{channel} арнасы қазір таратылып жатыр. Алдымен трансляцияны тоқтатуды оператордан сұраңыз.',
+    contact_whatsapp_international: 'Нөмірді ел кодымен халықаралық форматта жазыңыз, мысалы +7 701 123 4567. WhatsApp сілтемелері жергілікті нөмірлермен жұмыс істемейді.',
 };
 
 export const translations = { en, ru, kk };
@@ -984,6 +1077,16 @@ export function formatDuration(totalSeconds: number, locale: Locale) {
     if (h) return `${h} ${hours} ${String(m).padStart(2, '0')} ${minutes}`;
     if (m) return `${m} ${minutes}`;
     return `${value} ${seconds}`;
+}
+
+/**
+ * A sentence in this device's current language, for code outside React components (the
+ * broadcasting service). `vars` fills {placeholders} as in t().
+ */
+export function translateNow(key: TranslationKey, vars?: Record<string, string | number>): string {
+    const text = translations[currentLocale][key] || en[key] || key;
+    if (!vars) return text;
+    return text.replace(/\{(\w+)\}/g, (match, name: string) => (name in vars ? String(vars[name]) : match));
 }
 
 /** A sentence in a given interface language, for pages that mix languages (the QR poster). */

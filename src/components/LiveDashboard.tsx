@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Activity, Circle } from 'lucide-react';
+import { Activity, Circle, RotateCcw } from 'lucide-react';
 import { settingsService, type LiveChannel, type LiveStatus } from '../lib/SettingsService';
 import { formatDuration, intlLocale, useTranslation, type TranslationKey } from '../lib/i18n';
 
@@ -15,6 +15,8 @@ export default function LiveDashboard() {
     const { t, locale } = useTranslation();
     const [status, setStatus] = useState<LiveStatus | null>(null);
     const [failed, setFailed] = useState(false);
+    // Bumped to fetch at once after a reset rather than at the next poll.
+    const [refreshKey, setRefreshKey] = useState(0);
 
     useEffect(() => {
         let cancelled = false;
@@ -41,7 +43,14 @@ export default function LiveDashboard() {
             window.clearTimeout(timer);
             document.removeEventListener('visibilitychange', onVisible);
         };
-    }, []);
+    }, [refreshKey]);
+
+    // An app left running between events kept adding up peaks and AI time across them.
+    const reset = async () => {
+        if (!window.confirm(t('dashboard_reset_confirm'))) return;
+        try { await settingsService.resetLiveCounters(); } catch { setFailed(true); }
+        setRefreshKey((key) => key + 1);
+    };
 
     const money = (value: number, digits = 2) => new Intl.NumberFormat(intlLocale(locale), {
         style: 'currency', currency: 'USD', minimumFractionDigits: digits, maximumFractionDigits: digits,
@@ -52,6 +61,11 @@ export default function LiveDashboard() {
             <div className="card-header">
                 <Activity size={20} /><h3>{t('live_title')}</h3>
                 {status && <span className="live-total">{t('live_total', { count: status.totalListeners })}</span>}
+                {status && (
+                    <button type="button" className="btn-icon-small live-reset" title={t('dashboard_reset')} aria-label={t('dashboard_reset')} onClick={() => void reset()}>
+                        <RotateCcw size={16} />
+                    </button>
+                )}
             </div>
             {!status ? <p className="text-muted">{failed ? t('live_unavailable') : t('loading')}</p> : (
                 <>

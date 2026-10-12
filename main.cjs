@@ -1468,7 +1468,8 @@ async function startServers(isDev) {
         add('certificate', certificateState.error || (daysLeft !== null && daysLeft < 14) ? 'warn' : 'ok',
             certificateState.error || `${certificateState.type}${daysLeft !== null ? ` · ${daysLeft}` : ''}`);
         const microphone = ['win32', 'darwin'].includes(process.platform) ? systemPreferences.getMediaAccessStatus('microphone') : 'unknown';
-        add('microphone', ['granted', 'unknown'].includes(microphone) ? 'ok' : 'fail', microphone);
+        // 'not-determined' is not a refusal: the system asks the first time a broadcast starts.
+        add('microphone', ['granted', 'unknown'].includes(microphone) ? 'ok' : microphone === 'not-determined' ? 'warn' : 'fail', microphone);
         add('secure_storage', secureStorageAvailable && safeStorage.isEncryptionAvailable() ? 'ok' : 'warn');
         if (settings.recordingEnabled) {
             try {

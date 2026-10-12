@@ -23,6 +23,7 @@ const mediasoup = require('mediasoup');
 const { io } = require('socket.io-client');
 
 process.env.LINGUA_FRANCA_SESSION_SWEEP_MS = '1000';
+let microphoneStatus = 'granted';
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'lingua-franca-smoke-'));
 // A settings file from an older build that still has the retired text-fallback settings.
 const settingsFile = path.join(userData, 'lingua-franca-settings.json');
@@ -71,7 +72,8 @@ const electronStub = {
         encryptString: (value) => Buffer.from(`enc:${value}`),
         decryptString: (buffer) => buffer.toString().replace(/^enc:/, ''),
     },
-    systemPreferences: { getMediaAccessStatus: () => 'granted' },
+    // Changeable, so the pre-service check can be tested against each permission state.
+    systemPreferences: { getMediaAccessStatus: () => microphoneStatus },
     shell: { openPath: async () => '', showItemInFolder() {} },
     ipcMain: { handle() {} },
 };
@@ -501,6 +503,20 @@ async function run() {
         assert.ok(body.checks.every((entry) => ['ok', 'warn', 'fail'].includes(entry.status)));
         assert.equal(body.checks.find((entry) => entry.id === 'openai').detail, 'not_configured', 'no key is a warning, not a call');
         return `${body.checks.length} checks`;
+    });
+
+    await check('the pre-service check tells "not asked yet" apart from "blocked"', async () => {
+        const state = async (status) => {
+            microphoneStatus = status;
+            const { body } = await json('/api/admin/preflight', { headers: authed(token) });
+            return body.checks.find((entry) => entry.id === 'microphone').status;
+        };
+        const seen = [await state('granted'), await state('not-determined'), await state('denied')];
+        microphoneStatus = 'granted';
+        // Only on Windows and macOS is the state read; elsewhere it is "unknown", which passes.
+        if (!['win32', 'darwin'].includes(process.platform)) return 'skipped (no permission API here)';
+        assert.deepEqual(seen, ['ok', 'warn', 'fail']);
+        return 'granted ok, not asked warn, denied fail';
     });
 
     await check('the AI budget and silence pause are stored, normalised', async () => {

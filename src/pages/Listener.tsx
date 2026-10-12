@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowLeft, Captions, Headphones, Maximize2, Minimize2, Volume2, VolumeX } from 'lucide-react';
+import { ArrowDown, ArrowLeft, Captions, CircleHelp, Headphones, Maximize2, Minimize2, Volume2, VolumeX, X } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { voiceService, type CaptionSegment, type ListenerStatus } from '../lib/VoiceService';
 import { settingsService, type EventInfo, type Language } from '../lib/SettingsService';
@@ -139,6 +139,8 @@ export default function Listener() {
     const [textSize, setTextSize] = useState<TextSize>(readTextSize);
     const [showOriginal, setShowOriginal] = useState(readShowOriginal);
     const [fullscreen, setFullscreen] = useState(false);
+    // "Can't hear?": tells the operator, reconnects, and shows what the listener can check.
+    const [helpOpen, setHelpOpen] = useState(false);
 
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const audioContextRef = useRef<AudioContext | null>(null);
@@ -355,6 +357,7 @@ export default function Listener() {
         setSignalLevel(0);
         setIsInterpreterMuted(false);
         setPlayBlocked(false);
+        setHelpOpen(false);
         meterCleanup.current?.();
         meterCleanup.current = null;
         directRef.current?.stop();
@@ -364,6 +367,11 @@ export default function Listener() {
             audioRef.current.pause();
             audioRef.current.srcObject = null;
         }
+    };
+
+    const cantHear = () => {
+        setHelpOpen(true);
+        void voiceService.reportCantHear();
     };
 
     const retryPlayback = () => {
@@ -505,10 +513,29 @@ export default function Listener() {
                         <button type="button" className="listen-control icon-only" onClick={toggleFullscreen} aria-label={t('fullscreen')} title={t('fullscreen')}>
                             <Maximize2 size={20} />
                         </button>
+                        <button type="button" className="listen-control wide cant-hear-btn" onClick={cantHear} aria-expanded={helpOpen}>
+                            <CircleHelp size={20} /><span>{t('cant_hear')}</span>
+                        </button>
                     </div>
 
                     {playBlocked && (
                         <button type="button" className="sound-blocked" onClick={retryPlayback}><VolumeX size={18} /> {t('no_sound_hint')}</button>
+                    )}
+
+                    {helpOpen && (
+                        <section className="cant-hear-help" aria-live="polite">
+                            <div className="cant-hear-head">
+                                <strong>{t('cant_hear_title')}</strong>
+                                <button type="button" className="alert-dismiss" onClick={() => setHelpOpen(false)} aria-label={t('dismiss')}><X size={18} /></button>
+                            </div>
+                            <p>{t('cant_hear_reported')}</p>
+                            <ol>
+                                <li>{volumeAdjustable ? t('cant_hear_volume') : t('cant_hear_volume_iphone')}</li>
+                                <li>{t('cant_hear_blocked')}</li>
+                                <li>{t('cant_hear_headphones')}</li>
+                                {isInterpreterMuted && <li>{t('cant_hear_muted')}</li>}
+                            </ol>
+                        </section>
                     )}
 
                     {captioned || !channelLive ? (

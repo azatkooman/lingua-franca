@@ -35,6 +35,14 @@ Every screen has a help button (a question mark) with the organiser's contacts (
 
 **Live now** (top of Admin) refreshes every few seconds: each channel's state (off air, interpreter, AI translation or original, and for how long), whether it is muted or being recorded, how many phones are listening now and the most at once, and the total. When AI translation has run it also shows the time used and a rough cost, at OpenAI's prices of about $0.051 per minute for each translated language ($0.034 for the translation and $0.017 for transcribing the original speech). Your OpenAI bill has the exact amount.
 
+**Alerts.** When something needs the operator now, a red banner appears at the top of every screen, and the desktop app shows a silent Windows notification and flashes its taskbar button. It is silent on purpose: this computer's sound may feed the PA, or be the broadcast itself. Alerts fire when an AI channel gives up reconnecting, an audio input stops sending sound, two or more phones on a channel tap **Can't hear?** within two minutes, and the AI budget reaches 80% and 100%.
+
+**Can't hear?** On a listener phone this button tells the operator (counted once per phone on **Live now**), reconnects straight away, and shows the listener what to check.
+
+**Phone interpreters.** **Live now** shows when a phone interpreter's access ends, with **+2 h** to extend it; the phone warns its interpreter 15 minutes before. Two interpreters can take turns on one channel: the next one starts, is offered **Ask to take over**, and the one on air taps **Hand over now**. Listeners reconnect in about a second.
+
+**AI budget and silence pause** (in the OpenAI card). A budget in dollars only warns, at 80% and when reached; the translation is never stopped for it. **Pause AI during silence** (off by default) closes the OpenAI connections after 2, 5 or 10 minutes without speech, since they bill by the minute speech or not, and reopens them when someone speaks. That loses the first second or two of speech, so leave it off for a sermon with long dramatic pauses. **Reset counters** on **Live now** starts the peaks and AI time from zero for a new event.
+
 **Recordings and transcripts** (in Admin):
 
 - **Record the audio of every live channel** saves each broadcast as an `.opus` file on this computer: phone and desktop interpreters, every AI translation, and in AI mode the original speech, even when it is not broadcast on its own channel. In Human mode the original speech is recorded only when it is also broadcast on its own channel; otherwise it does not go through the app. To record an unbroadcast original in AI mode, switch recording on before starting the broadcast. The server writes the audio as it arrives, so a crash or power cut loses at most a second, and a recording can be downloaded while it is still running. Pauses (a muted microphone) are kept as silence, so the file keeps real time. Expect about 10 to 30 MB per hour for each channel (about 11 MB for one hour of speech in testing). Off by default.
@@ -129,6 +137,8 @@ A phone only trusts certificates for public domain names, and a `192.168.x.x` ad
 Interpreter phones and Admin stay on HTTPS (they need the microphone or a PIN). They show the certificate warning once per phone unless the DuckDNS certificate in step 7 is set up. The plain link's page and connection setup are not authenticated, so someone on the same Wi-Fi with the right tools could tamper with them; for that reason QR codes switch to HTTPS automatically once a trusted certificate is set up. Admin can choose either link under **Link for listener phones**. If TCP 4175 is taken by another program, the app still starts and Admin says so, and QR codes fall back to HTTPS.
 
 ## Pre-service checks
+
+**Pre-service check** in Admin tests this computer in one go: the media engine, the listener link, the network adapter, the certificate, microphone permission, key storage, disk space when recording, and the OpenAI key. Under it, **Play test tone** beeps once a second on a channel that is off air and shows its QR: if a phone on the venue Wi-Fi hears it, phones can reach this computer through the firewall and play sound. The tone is never recorded and stops by itself after three minutes.
 
 - If you want the audio afterwards, **Record the audio of every live channel** is on, and **Live now** shows **Recording** next to each live channel once it starts.
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Activity, Circle, RotateCcw } from 'lucide-react';
+import { Activity, AlertTriangle, Circle, Clock, RotateCcw } from 'lucide-react';
 import { settingsService, type LiveChannel, type LiveStatus } from '../lib/SettingsService';
 import { formatDuration, intlLocale, useTranslation, type TranslationKey } from '../lib/i18n';
 
@@ -8,6 +8,7 @@ const ROLE_LABEL: Record<NonNullable<LiveChannel['role']>, TranslationKey> = {
     original: 'role_original',
     translation: 'role_translation',
     interpreter: 'role_interpreter',
+    test: 'role_test',
 };
 
 /** What is on air right now, who is listening, what is being recorded, and the AI cost so far. */
@@ -46,6 +47,14 @@ export default function LiveDashboard() {
     }, [refreshKey]);
 
     // An app left running between events kept adding up peaks and AI time across them.
+    // Gives the phone interpreter on a channel two more hours before the limit cuts them off.
+    const extend = async (channelId: string) => {
+        try { await settingsService.extendInterpreter(channelId); } catch { setFailed(true); }
+        setRefreshKey((key) => key + 1);
+    };
+
+    const clock = (time: number) => new Date(time).toLocaleTimeString(intlLocale(locale), { hour: '2-digit', minute: '2-digit' });
+
     const reset = async () => {
         if (!window.confirm(t('dashboard_reset_confirm'))) return;
         try { await settingsService.resetLiveCounters(); } catch { setFailed(true); }
@@ -82,9 +91,17 @@ export default function LiveDashboard() {
                                                 ? `${t(ROLE_LABEL[channel.role ?? 'interpreter'])} · ${t('live_on_air', { time: onAir })}`
                                                 : t('live_off')}
                                             {channel.live && channel.paused && <span className="live-muted"> · {t('live_muted')}</span>}
+                                            {channel.live && channel.aiPaused && <span className="live-muted"> · {t('live_ai_paused')}</span>}
                                         </span>
+                                        {channel.accessEndsAt && (
+                                            <span className={`live-access ${channel.accessEndsAt - status.now < 30 * 60_000 ? 'ending' : ''}`}>
+                                                <Clock size={13} aria-hidden="true" /> {t('live_access_ends', { time: clock(channel.accessEndsAt) })}
+                                                <button type="button" className="live-extend" onClick={() => void extend(channel.id)}>{t('live_extend')}</button>
+                                            </span>
+                                        )}
                                     </div>
                                     <div className="live-stats">
+                                        {channel.reports > 0 && <span className="report-badge"><AlertTriangle size={12} /> {t('live_reports', { count: channel.reports })}</span>}
                                         {channel.recording && <span className="rec-badge"><Circle size={8} fill="currentColor" /> {t('live_recording')}</span>}
                                         <span className="live-count">{t('live_listeners', { count: channel.listeners })}</span>
                                         <span className="text-muted live-peak">{t('live_peak', { count: channel.peakListeners })}</span>
@@ -93,9 +110,10 @@ export default function LiveDashboard() {
                             );
                         })}
                     </ul>
-                    {status.aiSeconds > 0 && (
-                        <p className="live-ai">
+                    {(status.aiSeconds > 0 || status.budgetUsd > 0) && (
+                        <p className={`live-ai ${status.budgetUsd > 0 && status.aiSeconds / 60 * status.aiPricePerMinute >= status.budgetUsd * 0.8 ? 'over-budget' : ''}`}>
                             {t('live_ai_usage', { time: formatDuration(status.aiSeconds, locale), cost: money(status.aiSeconds / 60 * status.aiPricePerMinute) })}
+                            {status.budgetUsd > 0 && <> · {t('live_budget', { budget: money(status.budgetUsd) })}</>}
                             <small className="text-muted">{t('live_ai_hint', { price: money(status.aiPricePerMinute, 3) })}</small>
                         </p>
                     )}

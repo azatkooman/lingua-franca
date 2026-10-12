@@ -2,6 +2,7 @@
 
 interface DesktopBridge {
     savePageAsPdf(fileName: string): Promise<{ saved?: string; canceled?: boolean; error?: string }>;
+    notify?(title: string, body: string): Promise<{ ok?: boolean; error?: string }>;
 }
 
 export const desktopBridge: DesktopBridge | null =

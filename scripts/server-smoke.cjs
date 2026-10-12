@@ -22,6 +22,7 @@ const dgram = require('dgram');
 const mediasoup = require('mediasoup');
 const { io } = require('socket.io-client');
 
+process.env.LINGUA_FRANCA_SESSION_SWEEP_MS = '1000';
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'lingua-franca-smoke-'));
 // A settings file from an older build that still has the retired text-fallback settings.
 const settingsFile = path.join(userData, 'lingua-franca-settings.json');
@@ -465,6 +466,97 @@ async function run() {
         return 'AI time 0, peaks = current';
     });
 
+    await check('"I can’t hear" is counted once per phone and pushed to the operator', async () => {
+        const { body: settings } = await json('/api/settings');
+        const channel = settings.languages[0].id;
+        await json('/api/admin/live/reset', { method: 'POST', headers: authed(token) });
+        const operator = await connect(token);
+        const phone = await connect('', LISTENER_BASE);
+        const other = await connect('', LISTENER_BASE);
+        let leaked = 0;
+        other.on('listenerReports', () => { leaked += 1; });
+        const pushed = waitFor(operator, 'listenerReports', 5000);
+        assert.equal((await ask(phone, 'listenerReport', { channelId: channel })).accepted, true);
+        assert.equal((await pushed).count, 1);
+        assert.equal((await ask(phone, 'listenerReport', { channelId: channel })).accepted, false, 'a repeat within a minute');
+        assert.equal((await ask(other, 'listenerReport', { channelId: channel })).count, 2);
+        assert.match((await ask(phone, 'listenerReport', { channelId: 'nope' })).error || '', /Unknown channel/);
+        const row = (await json('/api/admin/live', { headers: authed(token) })).body.channels.find((entry) => entry.id === channel);
+        assert.equal(row.reports, 2);
+        await sleep(200);
+        assert.equal(leaked, 0, 'listener phones never receive the operator push');
+        phone.close();
+        await sleep(300);
+        assert.equal((await json('/api/admin/live', { headers: authed(token) })).body.channels.find((entry) => entry.id === channel).reports, 1, 'a phone that left stops counting');
+        other.close();
+        return '2 phones counted, 1 after one left';
+    });
+
+    await check('the pre-service check lists every item, for the operator only', async () => {
+        assert.equal((await json('/api/admin/preflight')).status, 401);
+        const { status, body } = await json('/api/admin/preflight', { headers: authed(token) });
+        assert.equal(status, 200);
+        const ids = body.checks.map((entry) => entry.id);
+        for (const id of ['media', 'listener_port', 'network', 'certificate', 'microphone', 'secure_storage', 'openai']) assert.ok(ids.includes(id), id);
+        assert.ok(body.checks.every((entry) => ['ok', 'warn', 'fail'].includes(entry.status)));
+        assert.equal(body.checks.find((entry) => entry.id === 'openai').detail, 'not_configured', 'no key is a warning, not a call');
+        return `${body.checks.length} checks`;
+    });
+
+    await check('the AI budget and silence pause are stored, normalised', async () => {
+        const { body } = await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ aiBudgetUsd: '12.345', aiSilencePauseMinutes: 5 }) });
+        assert.deepEqual([body.aiBudgetUsd, body.aiSilencePauseMinutes], [12.35, 5]);
+        const odd = (await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ aiBudgetUsd: -3, aiSilencePauseMinutes: 7 }) })).body;
+        assert.deepEqual([odd.aiBudgetUsd, odd.aiSilencePauseMinutes], [0, 0]);
+        return 'rounded; invalid becomes off';
+    });
+
+    await check('a test tone is never recorded', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const { body: settings } = await json('/api/settings');
+        const channel = settings.languages[1].id;
+        await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ recordingEnabled: true }) });
+        const operator = await connect(token);
+        const transport = await ask(operator, 'createWebRtcTransport', { type: 'producer' });
+        const produced = await ask(operator, 'produce', { transportId: transport.id, kind: 'audio', rtpParameters: opusRtp(8501), appData: { channelId: channel, mode: 'human', role: 'test' } });
+        assert.ok(produced.id, produced.error);
+        await sleep(300);
+        const row = (await json('/api/admin/live', { headers: authed(token) })).body.channels.find((entry) => entry.id === channel);
+        assert.deepEqual([row.live, row.role, row.recording], [true, 'test', false]);
+        await ask(operator, 'closeProducer', { channelId: channel });
+        await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ recordingEnabled: false }) });
+        return 'on air as a test, not recorded';
+    });
+
+    await check('AI time stops counting while paused for silence, and the budget warns', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const { body: settings } = await json('/api/settings');
+        const channel = settings.languages[0].id;
+        await json('/api/admin/live/reset', { method: 'POST', headers: authed(token) });
+        await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ aiBudgetUsd: 0.01 }) });
+        const operator = await connect(token);
+        const warned = waitFor(operator, 'aiBudget', 30_000);
+        const transport = await ask(operator, 'createWebRtcTransport', { type: 'producer' });
+        assert.ok((await ask(operator, 'produce', { transportId: transport.id, kind: 'audio', rtpParameters: opusRtp(8601), appData: { channelId: channel, mode: 'ai', role: 'translation' } })).id);
+        // 0.01 dollars of AI time at about 0.05 a minute is about 12 seconds.
+        const warning = await warned;
+        assert.ok(warning.level >= 80 && warning.budgetUsd === 0.01, JSON.stringify(warning));
+        assert.equal((await ask(operator, 'setAiPaused', { channelIds: [channel], paused: true })).ok, true);
+        const paused = (await json('/api/admin/live', { headers: authed(token) })).body;
+        assert.equal(paused.channels.find((entry) => entry.id === channel).aiPaused, true);
+        await sleep(1500);
+        assert.equal((await json('/api/admin/live', { headers: authed(token) })).body.aiSeconds, paused.aiSeconds, 'frozen while paused');
+        await ask(operator, 'setAiPaused', { channelIds: [channel], paused: false });
+        await sleep(1500);
+        assert.ok((await json('/api/admin/live', { headers: authed(token) })).body.aiSeconds > paused.aiSeconds, 'counting again');
+        const listener = await connect('', LISTENER_BASE);
+        assert.match((await ask(listener, 'setAiPaused', { channelIds: [channel], paused: true })).error || '', /Administrator/);
+        await ask(operator, 'closeProducer', { channelId: channel });
+        await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ aiBudgetUsd: 0 }) });
+        await json('/api/admin/live/reset', { method: 'POST', headers: authed(token) });
+        return `warned at ${warning.level}%, paused and resumed`;
+    });
+
     await check('only an operator can send captions, and never from the plain listener port', async () => {
         const { body: settings } = await json('/api/settings');
         const english = settings.languages[0].id;
@@ -564,6 +656,105 @@ async function run() {
         });
         assert.equal(replay.status, 401, 'a used code must not be exchangeable again');
         return 'first 200, replay 401';
+    });
+
+    // Two phone interpreters on one channel, signed in before the brute-force check below
+    // locks this address out of further interpreter sign-ins.
+    const interpreterLogin = async (forChannel) => {
+        const { body: link } = await json('/api/admin/interpreter-link', { method: 'POST', headers: authed(token), body: JSON.stringify({ channelId: forChannel }) });
+        return (await json('/api/interpreter/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: link.code }) })).body.token;
+    };
+    let turnA = '';
+    let turnB = '';
+    let turnC = '';
+    await check('two interpreters can be signed in on one channel', async () => {
+        turnA = await interpreterLogin(channelId);
+        turnB = await interpreterLogin(channelId);
+        turnC = await interpreterLogin(channelId);
+        assert.ok(turnA && turnB && turnC);
+        return '3 interpreter sessions';
+    });
+
+    await check('an interpreter hands a channel over to the next one, only when it agrees', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const first = await connect(turnA);
+        const next = await connect(turnB);
+        assert.ok((await produce(first, channelId, 8101)).id, 'the first interpreter is on air');
+        const refused = await produce(next, channelId, 8102);
+        assert.equal(refused.code, 'channel_taken');
+        const asked = waitFor(first, 'handoverRequested', 5000);
+        assert.equal((await ask(next, 'requestHandover', { channelId })).requested, true);
+        assert.equal((await asked).channelId, channelId, 'the one on air is asked');
+        assert.equal((await produce(next, channelId, 8103)).code, 'channel_taken', 'still refused before it agrees');
+        const approved = waitFor(next, 'handoverApproved', 5000);
+        const replaced = waitFor(first, 'producerReplaced', 5000);
+        assert.equal((await ask(first, 'acceptHandover', { channelId })).ok, true);
+        await approved;
+        assert.ok((await produce(next, channelId, 8104)).id, 'the next one goes on air');
+        assert.equal((await replaced).reason, 'handover', 'and the first is told it was a handover');
+        assert.equal(await channelMode(channelId), 'sfu-active');
+        await ask(next, 'closeProducer', { channelId });
+        first.close(); next.close();
+        return 'asked, approved, replaced';
+    });
+
+    await check('only the one on air can approve, and leaving cancels a request', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const onAir = await connect(turnA);
+        const waiting = await connect(turnB);
+        const bystander = await connect(turnC);
+        assert.ok((await produce(onAir, channelId, 8201)).id);
+        await ask(waiting, 'requestHandover', { channelId });
+        assert.match((await ask(bystander, 'acceptHandover', { channelId })).error || '', /Only the broadcaster/);
+        const cancelled = waitFor(onAir, 'handoverCancelled', 5000);
+        waiting.close();
+        assert.equal((await cancelled).channelId, channelId);
+        assert.match((await ask(onAir, 'acceptHandover', { channelId })).error || '', /Nobody is waiting/);
+        await ask(onAir, 'closeProducer', { channelId });
+        onAir.close(); bystander.close();
+        return 'bystander refused; departure cancels';
+    });
+
+    await check('a channel that comes free tells whoever was waiting for it', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const onAir = await connect(turnA);
+        const waiting = await connect(turnB);
+        assert.ok((await produce(onAir, channelId, 8301)).id);
+        await ask(waiting, 'requestHandover', { channelId });
+        const freed = waitFor(waiting, 'handoverApproved', 5000);
+        await ask(onAir, 'closeProducer', { channelId });
+        assert.equal((await freed).free, true);
+        assert.ok((await produce(waiting, channelId, 8302)).id, 'and it can start');
+        await ask(waiting, 'closeProducer', { channelId });
+        onAir.close(); waiting.close();
+        return 'freed channel offered';
+    });
+
+    await check('the operator can give a phone interpreter more time', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const phone = await connect(turnA);
+        assert.ok((await produce(phone, channelId, 8401)).id);
+        const before = (await json('/api/admin/live', { headers: authed(token) })).body.channels.find((entry) => entry.id === channelId).accessEndsAt;
+        assert.ok(before > Date.now(), 'the dashboard shows when access ends');
+        const told = waitFor(phone, 'sessionExtended', 5000);
+        const { status, body } = await json('/api/admin/interpreter-sessions/extend', { method: 'POST', headers: authed(token), body: JSON.stringify({ channelId }) });
+        assert.equal(status, 200);
+        assert.ok(body.expiresAt >= before, 'later, or capped at a full session from now');
+        assert.equal((await told).expiresAt, body.expiresAt, 'and the phone is told');
+        assert.equal((await json('/api/admin/interpreter-sessions/extend', { method: 'POST', headers: authed(token), body: JSON.stringify({ channelId: 'nobody-here' }) })).status, 404);
+        await ask(phone, 'closeProducer', { channelId });
+        phone.close();
+        return 'extended and announced';
+    });
+
+    await check('only the operator can play a test tone', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const phone = await connect(turnC);
+        const transport = await ask(phone, 'createWebRtcTransport', { type: 'producer' });
+        const refused = await ask(phone, 'produce', { transportId: transport.id, kind: 'audio', rtpParameters: opusRtp(8701), appData: { channelId, mode: 'human', role: 'test' } });
+        assert.match(refused.error || '', /Only the operator/);
+        phone.close();
+        return 'interpreter refused';
     });
 
     await check('interpreter codes cannot be brute forced', async () => {

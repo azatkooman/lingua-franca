@@ -3,7 +3,8 @@ import { ArrowLeft, Cpu, Mic, Radio, RefreshCw, ShieldAlert, Square } from 'luci
 import { SYSTEM_AUDIO_DEVICE_ID, voiceService } from '../lib/VoiceService';
 import { settingsService, type AdminSettings, type AppSettings } from '../lib/SettingsService';
 import { realtimeTranslationService, type TranslationUpdate } from '../lib/RealtimeTranslationService';
-import { useTranslation } from '../lib/i18n';
+import { intlLocale, useTranslation } from '../lib/i18n';
+import { clearAlerts, raiseAlert } from '../lib/alerts';
 import { useGoBack } from '../lib/navigation';
 import './Interpreter.css';
 import './Listener.css';
@@ -12,7 +13,7 @@ interface TranscriptItem { id: number; key: string; original: string; translatio
 
 export default function Interpreter() {
     const goBack = useGoBack();
-    const { t } = useTranslation();
+    const { t, locale } = useTranslation();
     const [settings, setSettings] = useState<AppSettings>(settingsService.getSettings());
     const [admin, setAdmin] = useState<AdminSettings | null>(settingsService.getAdminSettings());
     const isAdmin = settingsService.isAdminAuthenticated();
@@ -43,6 +44,13 @@ export default function Interpreter() {
     const [listeners, setListeners] = useState(0);
     const [microphoneAccess, setMicrophoneAccess] = useState('checking');
     const [transcript, setTranscript] = useState<TranscriptItem[]>([]);
+    // Two interpreters taking turns. As the next one: 'offer' after finding the channel taken,
+    // 'waiting' once asked. As the one on air: the channel someone is waiting to take over.
+    const [handoverAsk, setHandoverAsk] = useState<'offer' | 'waiting' | null>(null);
+    const [handoverRequestFor, setHandoverRequestFor] = useState<string | null>(null);
+    // A phone interpreter's access ends at a fixed time; warn before it cuts them off.
+    const [interpreterExpiresAt, setInterpreterExpiresAt] = useState(settingsService.getInterpreterExpiresAt());
+    const [now, setNow] = useState(() => Date.now());
     const meterCleanup = useRef<(() => void) | null>(null);
     const transcriptId = useRef(0);
     const pickersSeeded = useRef(false);
@@ -59,6 +67,12 @@ export default function Interpreter() {
 
     useEffect(() => settingsService.subscribe(setSettings), []);
     useEffect(() => settingsService.subscribeAdmin(setAdmin), []);
+    useEffect(() => settingsService.subscribeInterpreterAuth(() => setInterpreterExpiresAt(settingsService.getInterpreterExpiresAt())), []);
+    useEffect(() => {
+        if (!authorizedChannelId) return;
+        const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+        return () => window.clearInterval(timer);
+    }, [authorizedChannelId]);
 
     // Seed the channel pickers once the configured list arrives. The usual service translates
     // Russian into English, so prefer those codes; otherwise fall back to the first channel.
@@ -143,8 +157,12 @@ export default function Interpreter() {
 
     // The operator can take a live channel over from this device. Say so, and once nothing
     // is left on air, stop properly instead of showing "live" for audio nobody receives.
-    useEffect(() => voiceService.onProducerReplaced((channelId) => {
-        const message = t('operator_took_over', { channel: languageName(channelId) });
+    useEffect(() => voiceService.onProducerReplaced((channelId, reason) => {
+        setHandoverRequestFor(null);
+        clearAlerts('handover', channelId);
+        const message = reason === 'handover'
+            ? t('handed_over', { channel: languageName(channelId) })
+            : t('operator_took_over', { channel: languageName(channelId) });
         if (voiceService.isPublishing()) { setStatus(message); return; }
         void stopBroadcast().then(() => setStatus(`${message} ${t('broadcast_stopped')}`));
     }), [languageName, stopBroadcast, t]);
@@ -172,6 +190,58 @@ export default function Interpreter() {
                 ...previous,
             ].slice(0, 50);
         });
+    };
+
+    // The handover approval arrives as an event; it starts the broadcast through this ref so
+    // it always uses the current choices.
+    const startRef = useRef<() => Promise<void>>(async () => undefined);
+    const handoverAskRef = useRef(handoverAsk);
+    useEffect(() => { handoverAskRef.current = handoverAsk; }, [handoverAsk]);
+
+    useEffect(() => voiceService.onHandover((event) => {
+        if (event.type === 'requested' && voiceService.isPublishing()) {
+            setHandoverRequestFor(event.channelId);
+            raiseAlert('handover', t('handover_requested', { channel: languageName(event.channelId) }), { channelId: event.channelId });
+        }
+        if (event.type === 'cancelled') {
+            setHandoverRequestFor((current) => (current === event.channelId ? null : current));
+            clearAlerts('handover', event.channelId);
+        }
+        if (event.type === 'approved' && handoverAskRef.current === 'waiting') {
+            setHandoverAsk(null);
+            void startRef.current();
+        }
+    }), [languageName, t]);
+
+    const askHandover = async () => {
+        try {
+            const result = await voiceService.requestHandover(humanChannelId);
+            // Freed meanwhile, or already ours: just start.
+            if (result.free || result.own) { setHandoverAsk(null); await startRef.current(); return; }
+            setHandoverAsk('waiting');
+            setStatus(t('handover_waiting', { channel: languageName(humanChannelId) }));
+        } catch (error) {
+            setStatus(error instanceof Error ? error.message : String(error));
+        }
+    };
+
+    const cancelHandoverAsk = () => {
+        voiceService.cancelHandover(humanChannelId);
+        setHandoverAsk(null);
+        setStatus(t('offline'));
+    };
+
+    const handOver = async () => {
+        const channelId = handoverRequestFor;
+        if (!channelId) return;
+        try {
+            await voiceService.acceptHandover(channelId);
+            setStatus(t('handover_sent'));
+        } catch (error) {
+            setStatus(error instanceof Error ? error.message : String(error));
+            setHandoverRequestFor(null);
+        }
+        clearAlerts('handover', channelId);
     };
 
     const startBroadcast = async () => {
@@ -204,9 +274,12 @@ export default function Interpreter() {
                 setStatus(t('openai_live'));
             }
             setIsLive(true);
+            setHandoverAsk(null);
         } catch (error) {
             setIsLive(false);
             setStatus(error instanceof Error ? error.message : String(error));
+            // Someone else is on this channel: the next interpreter can ask them to hand over.
+            if (mode === 'human' && (error as { code?: string }).code === 'channel_taken') setHandoverAsk('offer');
             realtimeTranslationService.stop();
             voiceService.stopBroadcast();
         } finally {
@@ -214,6 +287,18 @@ export default function Interpreter() {
             setStarting(false);
         }
     };
+
+    useEffect(() => { startRef.current = startBroadcast; });
+
+    const accessLeftMs = authorizedChannelId && interpreterExpiresAt ? interpreterExpiresAt - now : null;
+    const accessEnding = accessLeftMs !== null && accessLeftMs < 15 * 60_000;
+    const accessEndsAt = interpreterExpiresAt
+        ? new Date(interpreterExpiresAt).toLocaleTimeString(intlLocale(locale), { hour: '2-digit', minute: '2-digit' })
+        : '';
+    useEffect(() => {
+        if (accessEnding) raiseAlert('access_ending', t('access_ending', { time: accessEndsAt }));
+        else clearAlerts('access_ending');
+    }, [accessEnding, accessEndsAt, t]);
 
     const toggleMute = () => {
         const next = !isMuted; setIsMuted(next);
@@ -320,8 +405,28 @@ export default function Interpreter() {
                     <p className={isLive ? 'text-accent' : 'text-muted'}>{status}</p>
                     {isLive && <p className="text-muted">{t('listeners_connected', { count: listeners })}</p>}
                     {isLive && isMuted && <p className="text-danger">{t('mute_warning')}</p>}
+                    {accessEnding && <p className="address-warning">{t('access_ending', { time: accessEndsAt })}</p>}
                     {isLive && originalActive && <p className="text-muted">{t('original_mute_note')}</p>}
                 </div>
+
+                {isLive && handoverRequestFor && (
+                    <div className="glass-panel handover-panel">
+                        <p>{t('handover_requested', { channel: languageName(handoverRequestFor) })}</p>
+                        <button type="button" className="btn-primary" onClick={() => void handOver()}>{t('handover_accept')}</button>
+                    </div>
+                )}
+                {!isLive && handoverAsk === 'offer' && (
+                    <div className="glass-panel handover-panel">
+                        <p>{t('handover_offer', { channel: languageName(humanChannelId) })}</p>
+                        <button type="button" className="btn-primary" onClick={() => void askHandover()}>{t('handover_ask')}</button>
+                    </div>
+                )}
+                {!isLive && handoverAsk === 'waiting' && (
+                    <div className="glass-panel handover-panel">
+                        <p>{t('handover_waiting', { channel: languageName(humanChannelId) })}</p>
+                        <button type="button" className="btn-secondary" onClick={cancelHandoverAsk}>{t('cancel')}</button>
+                    </div>
+                )}
 
                 <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
                     <button className={isLive ? 'btn-danger' : 'btn-primary'} disabled={starting} onClick={() => void (isLive ? stopBroadcast() : startBroadcast())}>{isLive ? <><Square size={18} /> {t('stop_audio')}</> : <><Radio size={18} /> {t('start_broadcast')}</>}</button>

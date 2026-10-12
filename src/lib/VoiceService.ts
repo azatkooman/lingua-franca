@@ -1,11 +1,19 @@
 import * as mediasoupClient from 'mediasoup-client';
 import { realtimeSocket } from './realtimeSocket';
 import { translateNow as tr, type TranslationKey } from './i18n';
+import { raiseAlert } from './alerts';
 
 export const SYSTEM_AUDIO_DEVICE_ID = '__lingua_franca_system_audio__';
 type StatusCallback = (status: string) => void;
 /** What a broadcast carries, so recordings and the dashboard can label it. */
-export type BroadcastRole = 'original' | 'translation' | 'interpreter';
+export type BroadcastRole = 'original' | 'translation' | 'interpreter' | 'test';
+/** Why this device lost a channel: the operator took it, or this interpreter handed it over. */
+export type ReplacedReason = 'takeover' | 'handover';
+/** Two interpreters taking turns on one channel. */
+export type HandoverEvent =
+    | { type: 'requested'; channelId: string }
+    | { type: 'approved'; channelId: string; free?: boolean }
+    | { type: 'cancelled'; channelId: string };
 /**
  * Listener connection states as codes, not sentences. Listener phones are the audience most
  * likely to use Russian, and English status text went straight onto their screens.
@@ -81,7 +89,8 @@ export class VoiceService {
     private onMuteStatusChange?: (muted: boolean) => void;
     private onConnectionsChange?: (count: number) => void;
     private onPublishStatus: StatusCallback = () => undefined;
-    private replacedHandlers = new Set<(channelId: string) => void>();
+    private replacedHandlers = new Set<(channelId: string, reason: ReplacedReason) => void>();
+    private handoverHandlers = new Set<(event: HandoverEvent) => void>();
     private listenerCounts = new Map<string, number>();
     private muted = false;
     private handlersBound = false;
@@ -102,10 +111,44 @@ export class VoiceService {
     isDesktopApp() { return /\bElectron\//i.test(navigator.userAgent); }
     isPublishing() { return this.producers.size > 0; }
 
-    /** Fires when the operator takes over a channel this device was publishing. */
-    onProducerReplaced(handler: (channelId: string) => void) {
+    /** Fires when the operator takes over a channel this device was publishing, or it was handed over. */
+    onProducerReplaced(handler: (channelId: string, reason: ReplacedReason) => void) {
         this.replacedHandlers.add(handler);
         return () => { this.replacedHandlers.delete(handler); };
+    }
+
+    /** Handover requests, approvals and cancellations for this device. */
+    onHandover(handler: (event: HandoverEvent) => void) {
+        this.bindHandlers();
+        this.handoverHandlers.add(handler);
+        return () => { this.handoverHandlers.delete(handler); };
+    }
+
+    /** Asks the interpreter on air to hand `channelId` over to this device. */
+    async requestHandover(channelId: string) {
+        this.bindHandlers();
+        await realtimeSocket.connect();
+        const result = await realtimeSocket.request<{ ok?: boolean; free?: boolean; own?: boolean; requested?: boolean; error?: string; code?: string }>('requestHandover', { channelId });
+        if (result.error) throw this.serverError(result);
+        return result;
+    }
+
+    async acceptHandover(channelId: string) {
+        const result = await realtimeSocket.request<{ ok?: boolean; error?: string }>('acceptHandover', { channelId });
+        if (result.error) throw new Error(result.error);
+    }
+
+    cancelHandover(channelId: string) {
+        realtimeSocket.emit('cancelHandover', { channelId }, () => undefined);
+    }
+
+    /** "I can't hear": tells the operator, and tries a fresh connection straight away. */
+    async reportCantHear() {
+        const channelId = this.currentListenerChannelId;
+        if (!channelId) return;
+        realtimeSocket.emit('listenerReport', { channelId }, () => undefined);
+        this.handleStreamLoss();
+        await this.reconnectListener();
     }
 
     // Phone interpreters see these too. They used to get English text telling them to open
@@ -198,14 +241,23 @@ export class VoiceService {
         realtimeSocket.on<{ channelId: string }>('producerClosed', ({ channelId }) => {
             if (this.currentListenerChannelId === channelId) this.handleStreamLoss();
         });
-        realtimeSocket.on<{ channelId: string }>('producerReplaced', ({ channelId }) => {
+        realtimeSocket.on<{ channelId: string; reason?: ReplacedReason }>('producerReplaced', ({ channelId, reason }) => {
             if (!this.producers.has(channelId)) return;
             // The server already closed this producer when the operator took the channel
             // over, so tear down locally without asking it to close the channel again.
             this.intended.delete(channelId);
             this.dropChannel(channelId);
             this.onConnectionsChange?.(this.totalListeners());
-            this.replacedHandlers.forEach((handler) => handler(channelId));
+            this.replacedHandlers.forEach((handler) => handler(channelId, reason === 'handover' ? 'handover' : 'takeover'));
+        });
+        realtimeSocket.on<{ channelId: string }>('handoverRequested', ({ channelId }) => {
+            this.handoverHandlers.forEach((handler) => handler({ type: 'requested', channelId }));
+        });
+        realtimeSocket.on<{ channelId: string; free?: boolean }>('handoverApproved', ({ channelId, free }) => {
+            this.handoverHandlers.forEach((handler) => handler({ type: 'approved', channelId, free }));
+        });
+        realtimeSocket.on<{ channelId: string }>('handoverCancelled', ({ channelId }) => {
+            this.handoverHandlers.forEach((handler) => handler({ type: 'cancelled', channelId }));
         });
         realtimeSocket.on<CaptionSegment & { channelId: string }>('translationText', ({ channelId, ...segment }) => {
             if (this.currentListenerChannelId === channelId) this.onTranslationTextReceived?.(segment);
@@ -284,10 +336,12 @@ export class VoiceService {
 
     /** The server's reason in this device's language when it gave a code, else its own text. */
     private serverError(result: { error?: string; code?: string; channel?: string }) {
-        if (result.code === 'login_required') return new Error(tr('server_login_required'));
-        if (result.code === 'wrong_channel') return new Error(tr('server_wrong_channel'));
-        if (result.code === 'channel_taken') return new Error(tr('server_channel_taken', { channel: result.channel || '' }));
-        return new Error(result.error || 'No producer ID returned.');
+        const message = result.code === 'login_required' ? tr('server_login_required')
+            : result.code === 'wrong_channel' ? tr('server_wrong_channel')
+                : result.code === 'channel_taken' ? tr('server_channel_taken', { channel: result.channel || '' })
+                    : result.error || 'No producer ID returned.';
+        // The code travels with the error: "channel_taken" lets the screen offer a handover.
+        return Object.assign(new Error(message), { code: result.code });
     }
 
     /** A send transport whose producer is announced to the server with `appData`. */
@@ -353,6 +407,8 @@ export class VoiceService {
         producer.on('trackended', () => {
             this.stopChannel(channelId);
             this.onPublishStatus(tr('voice_input_ended'));
+            // A channel just went off air on its own: the operator must notice now, not later.
+            raiseAlert('input_ended', tr('voice_input_ended'), { channelId });
         });
         onStatus(tr('voice_broadcasting'));
     }
@@ -512,6 +568,11 @@ export class VoiceService {
             realtimeSocket.emit('setProducerPaused', { channelId, paused: muted });
         }
         for (const track of this.sourceStream?.getAudioTracks() || []) track.enabled = !muted;
+    }
+
+    /** Tells the server these AI channels stopped (or restarted) running up OpenAI time. */
+    setAiPaused(channelIds: string[], paused: boolean) {
+        realtimeSocket.emit('setAiPaused', { channelIds, paused }, () => undefined);
     }
 
     sendTranslationText(channelId: string, segment: { segmentId: string; text: string; originalText: string; final: boolean }) {

@@ -8,6 +8,7 @@ import { useGoBack } from '../lib/navigation';
 import { isInternationalNumber } from '../lib/phoneNumbers';
 import { fetchAdminHealth, listenerUrl, readPhoneLink, savePhoneLink, usesPlainLink, type HealthInfo, type PhoneLink } from '../lib/listenerLinks';
 import LiveDashboard from '../components/LiveDashboard';
+import PreflightCard from '../components/PreflightCard';
 import RecordingsCard from '../components/RecordingsCard';
 import './Admin.css';
 
@@ -53,6 +54,8 @@ export default function Admin() {
     const [contactDraft, setContactDraft] = useState<ContactInfo | null>(null);
     const [message, setMessage] = useState('');
     const [busy, setBusy] = useState(false);
+    // The AI budget as typed, until saved.
+    const [budgetDraft, setBudgetDraft] = useState<string | null>(null);
 
     const refreshHealth = () => fetchAdminHealth(settingsService.getAdminToken()).then(setHealth);
 
@@ -183,6 +186,7 @@ export default function Admin() {
             )}
 
             <LiveDashboard />
+            <PreflightCard settings={settings} />
 
             <div className="card fade-in highlight-card">
                 <div className="card-header"><Monitor size={20} /><h3>{t('system_status')}</h3></div>
@@ -368,6 +372,26 @@ export default function Admin() {
                         <button className="btn-secondary mt-4" disabled={busy} onClick={() => void run(() => settingsService.clearOpenAiApiKey(), t('openai_key_removed'))}><Trash2 size={18} /> {t('remove_openai_key')}</button>
                     </div>
                 )}
+
+                <label className="mt-4">{t('ai_budget_label')}</label>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <input className="custom-input" type="number" min="0" step="1" inputMode="decimal" placeholder="0"
+                        value={budgetDraft ?? (settings.aiBudgetUsd ? String(settings.aiBudgetUsd) : '')}
+                        onChange={(event) => setBudgetDraft(event.target.value)} />
+                    <button className="btn-secondary" disabled={busy || budgetDraft === null} onClick={() => void run(async () => {
+                        await settingsService.setAiBudget(Number(budgetDraft) || 0);
+                        setBudgetDraft(null);
+                    }, t('ai_budget_saved'))}>{t('save')}</button>
+                </div>
+                <p className="text-muted">{t('ai_budget_hint')}</p>
+
+                <label className="mt-4">{t('ai_silence_label')}</label>
+                <select className="custom-select" value={settings.aiSilencePauseMinutes} disabled={busy}
+                    onChange={(event) => void run(() => settingsService.setSilencePause(Number(event.target.value)), t('ai_silence_saved'))}>
+                    <option value={0}>{t('ai_silence_off')}</option>
+                    {[2, 5, 10].map((minutes) => <option key={minutes} value={minutes}>{t('ai_silence_minutes', { minutes })}</option>)}
+                </select>
+                <p className="text-muted">{t('ai_silence_hint')}</p>
             </div>
 
             <RecordingsCard settings={settings} />

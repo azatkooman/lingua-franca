@@ -25,6 +25,7 @@ const ADVICE: Partial<Record<`${PreflightCheck['id']}_${'warn' | 'fail'}`, Trans
     network_warn: 'pf_network_warn',
     network_fail: 'pf_network_fail',
     certificate_warn: 'pf_certificate_warn',
+    microphone_warn: 'pf_microphone_warn',
     microphone_fail: 'pf_microphone_fail',
     secure_storage_warn: 'pf_secure_storage_warn',
     disk_warn: 'pf_disk_warn',

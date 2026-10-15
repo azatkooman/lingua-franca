@@ -7,6 +7,8 @@ import { fetchAdminHealth, listenerUrl, readPhoneLink, type HealthInfo } from '.
 import { startTestTone, stopTestTone, subscribeTestTone } from '../lib/testTone';
 
 const LABEL: Record<PreflightCheck['id'], TranslationKey> = {
+    admin_pin: 'pf_admin_pin',
+    settings_file: 'pf_settings_file',
     media: 'pf_media',
     listener_port: 'pf_listener_port',
     network: 'pf_network',
@@ -19,6 +21,9 @@ const LABEL: Record<PreflightCheck['id'], TranslationKey> = {
 
 // What to do about a check that did not pass. Absent for a pass.
 const ADVICE: Partial<Record<`${PreflightCheck['id']}_${'warn' | 'fail'}`, TranslationKey>> = {
+    admin_pin_fail: 'pf_admin_pin_fail',
+    settings_file_warn: 'pf_settings_file_warn',
+    settings_file_fail: 'pf_settings_file_fail',
     media_warn: 'pf_media_warn',
     media_fail: 'pf_media_fail',
     listener_port_warn: 'pf_listener_port_warn',
@@ -76,6 +81,7 @@ export default function PreflightCard({ settings }: { settings: AdminSettings })
     const detail = (check: PreflightCheck) => {
         if (check.id === 'disk' && /^\d+$/.test(check.detail)) return t('pf_disk_free', { size: (Number(check.detail) / 1024 ** 3).toFixed(1) });
         if (check.id === 'openai' && check.detail === 'not_configured') return '';
+        if (check.id === 'settings_file') return '';
         return check.detail;
     };
 

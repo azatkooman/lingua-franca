@@ -415,8 +415,9 @@ export class VoiceService {
 
     /**
      * Swaps the audio on a live channel without making listeners renegotiate. Used when the
-     * OpenAI leg reconnects, and with `null` to send silence while it does. Returns false when
-     * the channel is not published from this device.
+     * OpenAI leg reconnects, and with a silent track while it does (`null` would stop the
+     * packets, and phones would take that for a dead stream). Returns false when the channel
+     * is not published from this device.
      */
     async replaceTrack(channelId: string, track: MediaStreamTrack | null) {
         const producer = this.producers.get(channelId);

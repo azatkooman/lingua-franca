@@ -25,11 +25,14 @@ const { io } = require('socket.io-client');
 process.env.LINGUA_FRANCA_SESSION_SWEEP_MS = '1000';
 let microphoneStatus = 'granted';
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'lingua-franca-smoke-'));
-// A settings file from an older build that still has the retired text-fallback settings.
+// A settings file from an older build that still has the retired text-fallback settings. It
+// survives only as the backup: the main file is damaged, as after a power cut mid-write.
 const settingsFile = path.join(userData, 'lingua-franca-settings.json');
-fs.writeFileSync(settingsFile, JSON.stringify({
+fs.writeFileSync(`${settingsFile}.bak`, JSON.stringify({
     aiProvider: 'gemini', glossary: 'Pastor Ivanov', geminiApiKey: 'plain-gemini-key',
+    event: { name: 'From the backup' },
 }));
+fs.writeFileSync(settingsFile, '{"languages": [{"name": "Eng');
 let markReady;
 const ready = new Promise((resolve) => { markReady = resolve; });
 
@@ -278,6 +281,26 @@ async function run() {
         return 'secrets absent';
     });
 
+    await check('a damaged settings file falls back to the backup and says so', async () => {
+        const { body } = await json('/api/admin/settings', { headers: authed(token) });
+        assert.equal(body.settingsRecovery, 'backup');
+        assert.equal(body.event.name, 'From the backup');
+        assert.ok(fs.readdirSync(userData).some((name) => name.startsWith('lingua-franca-settings.json.corrupt-')), 'the damaged file is kept');
+        assert.doesNotThrow(() => JSON.parse(fs.readFileSync(settingsFile, 'utf8')), 'the main file is whole again');
+        const { body: preflight } = await json('/api/admin/preflight', { headers: authed(token) });
+        assert.equal(preflight.checks.find((entry) => entry.id === 'settings_file')?.status, 'warn');
+        return 'backup loaded, damaged copy kept';
+    });
+
+    await check('the factory PIN is flagged until it is changed', async () => {
+        const { body } = await json('/api/admin/settings', { headers: authed(token) });
+        assert.equal(body.pinIsDefault, true);
+        const { body: preflight } = await json('/api/admin/preflight', { headers: authed(token) });
+        assert.equal(preflight.checks[0].id, 'admin_pin');
+        assert.equal(preflight.checks[0].status, 'fail');
+        return 'flagged in settings and the pre-service check';
+    });
+
     await check('the plain listener port serves the channel list and health', async () => {
         const settings = await fetch(`${LISTENER_BASE}/api/settings`);
         assert.equal(settings.status, 200);
@@ -315,6 +338,24 @@ async function run() {
             assert.equal(response.headers.get('location'), `https://127.0.0.1:4173${page}`);
         }
         return '302 to https://…:4173';
+    });
+
+    await check('the plain listener port refuses the API and sign-in pages in any letter case', async () => {
+        for (const [method, route, body] of [['POST', '/API/admin/login', { pin: '1234' }], ['POST', '/Api/Admin/Login', { pin: '1234' }], ['GET', '/API/admin/settings']]) {
+            const response = await fetch(`${LISTENER_BASE}${route}`, {
+                method, headers: authed(token), body: body ? JSON.stringify(body) : undefined,
+            });
+            assert.equal(response.status, 403, `${method} ${route} returned ${response.status}`);
+        }
+        for (const page of ['/ADMIN', '/Interpreter?code=123456']) {
+            const response = await fetch(`${LISTENER_BASE}${page}`, { redirect: 'manual' });
+            assert.equal(response.status, 302, `${page} returned ${response.status}`);
+        }
+        // Routes are case-sensitive everywhere now, so the uppercase path reaches no handler.
+        const { status, body } = await json('/API/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: '1234' }) });
+        assert.equal(status, 404);
+        assert.equal(body.token, undefined);
+        return 'uppercase refused, pages redirected';
     });
 
     await check('malformed signalling from any phone never throws inside the server', async () => {
@@ -637,6 +678,25 @@ async function run() {
         return '400';
     });
 
+    await check('a refused settings change changes nothing at all', async () => {
+        const before = (await json('/api/admin/settings', { headers: authed(token) })).body;
+        const attempts = [
+            { languages: [before.languages[0]], event: { name: 'Half applied' }, adminPin: '12', currentPin: '1234' },
+            { languages: [before.languages[0]], event: { name: 'Half applied' }, adminPin: '5678', currentPin: '0000' },
+        ];
+        for (const attempt of attempts) {
+            const { status } = await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify(attempt) });
+            assert.ok([400, 403].includes(status), `refused with ${status}`);
+        }
+        const after = (await json('/api/admin/settings', { headers: authed(token) })).body;
+        assert.equal(after.languages.length, before.languages.length, 'no channel was removed');
+        assert.equal(after.event.name, before.event.name, 'the event was not edited');
+        assert.equal(after.pinIsDefault, true, 'the PIN was not changed');
+        // Clear the wrong-PIN attempt, so the lockout checks later start from zero.
+        assert.ok(await login());
+        return 'channels, event and PIN untouched';
+    });
+
     await check('a PIN shorter than four digits is refused', async () => {
         const { status } = await json('/api/admin/settings', {
             method: 'PATCH', headers: authed(token), body: JSON.stringify({ adminPin: '12' }),
@@ -858,6 +918,32 @@ async function run() {
         return 'transport closed on the server';
     });
 
+    await check('listener counts go to the broadcaster and operators, not to every phone', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const { body: settings } = await json('/api/settings');
+        const channel = settings.languages[1].id;
+        const operator = await connect(token);
+        assert.ok((await produce(operator, channel, 4646)).id);
+        const listener = await connect('', LISTENER_BASE);
+        const bystander = await connect('', LISTENER_BASE);
+        let bystanderCounts = 0;
+        bystander.on('listenerCount', () => { bystanderCounts += 1; });
+        try {
+            const counted = waitFor(operator, 'listenerCount');
+            const capabilities = await new Promise((resolve) => listener.emit('getRouterRtpCapabilities', resolve));
+            const transport = await ask(listener, 'createWebRtcTransport', { type: 'consumer' });
+            assert.ok((await ask(listener, 'consume', { transportId: transport.id, rtpCapabilities: capabilities, channelId: channel })).id);
+            assert.equal((await counted).count, 1);
+            await sleep(300);
+            assert.equal(bystanderCounts, 0, 'a phone that is only listening is not sent counts');
+        } finally {
+            listener.close();
+            bystander.close();
+            await ask(operator, 'closeProducer', { channelId: channel });
+        }
+        return 'operator told, phones not';
+    });
+
     await check('a phone that stops listening is no longer counted', async () => {
         if (!sfuReady) return 'skipped (no media worker)';
         const { body: settings } = await json('/api/settings');
@@ -1048,16 +1134,22 @@ async function run() {
         return '401';
     });
 
-    await check('changing the PIN signs out every other operator session', async () => {
+    await check('changing the PIN needs the current one, never accepts 1234, and signs out every other session', async () => {
+        const patch = (body) => json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify(body) });
+        assert.equal((await patch({ adminPin: '246810' })).status, 403, 'no current PIN');
+        assert.equal((await patch({ adminPin: '246810', currentPin: '1111' })).status, 403, 'wrong current PIN');
+        assert.equal((await patch({ adminPin: '1234', currentPin: '1234' })).status, 400, 'the factory PIN again');
         const other = await login();
         assert.ok(other);
-        const { status } = await json('/api/admin/settings', {
-            method: 'PATCH', headers: authed(token), body: JSON.stringify({ adminPin: '246810' }),
-        });
+        const { status, body } = await patch({ adminPin: '246810', currentPin: '1234' });
         assert.equal(status, 200);
+        assert.equal(body.pinIsDefault, false, 'no longer the factory PIN');
         assert.equal((await json('/api/admin/settings', { headers: authed(other) })).status, 401, 'the other session ended');
         assert.equal((await json('/api/admin/settings', { headers: authed(token) })).status, 200, 'the changing session stays');
-        return 'other 401, self 200';
+        const { body: preflight } = await json('/api/admin/preflight', { headers: authed(token) });
+        assert.equal(preflight.checks.find((entry) => entry.id === 'admin_pin').status, 'ok');
+        assert.ok(await login('246810'), 'the new PIN signs in');
+        return 'current PIN required; other 401, self 200';
     });
 
     await check('certificate mode can be reverted to self-signed', async () => {
@@ -1087,6 +1179,11 @@ async function run() {
     await check('restarting the app requires an operator session', async () => {
         assert.equal((await json('/api/admin/restart', { method: 'POST' })).status, 401);
         return '401';
+    });
+
+    await check('every save keeps the previous settings file as a backup', async () => {
+        assert.doesNotThrow(() => JSON.parse(fs.readFileSync(`${settingsFile}.bak`, 'utf8')));
+        return 'backup readable';
     });
 
     await check('an unknown API route returns JSON, not the SPA shell', async () => {

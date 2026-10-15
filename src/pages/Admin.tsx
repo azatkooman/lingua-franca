@@ -42,6 +42,7 @@ export default function Admin() {
     const [languageName, setLanguageName] = useState('');
     const [languageCode, setLanguageCode] = useState('');
     const [languageDescription, setLanguageDescription] = useState('');
+    const [currentPin, setCurrentPin] = useState('');
     const [newPin, setNewPin] = useState('');
     const [confirmPin, setConfirmPin] = useState('');
     const [openaiKey, setOpenaiKey] = useState('');
@@ -131,9 +132,11 @@ export default function Admin() {
     const changePin = async () => {
         if (newPin !== confirmPin) { setMessage(t('pins_mismatch')); return; }
         if (!/^\d{4,12}$/.test(newPin)) { setMessage(t('pin_length')); return; }
+        if (newPin === '1234') { setMessage(t('pin_not_default')); return; }
         await run(async () => {
-            await settingsService.setAdminPin(newPin);
-            setNewPin(''); setConfirmPin('');
+            // Still the factory PIN: the operator just typed it to get here, so it is not asked again.
+            await settingsService.setAdminPin(settings?.pinIsDefault ? '1234' : currentPin, newPin);
+            setCurrentPin(''); setNewPin(''); setConfirmPin('');
         }, t('pin_changed'));
     };
 
@@ -148,6 +151,24 @@ export default function Admin() {
     const contact: ContactInfo = contactDraft ?? settings.contact ?? { name: '', phone: '', whatsapp: '', telegram: '', email: '' };
 
     const sfuText = health ? (health.sfu === 'ready' ? t('status_ready') : t('status_unavailable')) : t('status_checking');
+    const pinFields = (
+        <>
+            {!settings.pinIsDefault && (<>
+                <label>{t('current_pin')}</label>
+                <input className="custom-input" type="password" inputMode="numeric" autoComplete="current-password" maxLength={12}
+                    value={currentPin} onChange={(event) => setCurrentPin(event.target.value.replace(/\D/g, '').slice(0, 12))} />
+            </>)}
+            <label className="mt-4">{t('new_pin')}</label>
+            <input className="custom-input" type="password" inputMode="numeric" autoComplete="new-password" maxLength={12}
+                value={newPin} onChange={(event) => setNewPin(event.target.value.replace(/\D/g, '').slice(0, 12))} />
+            <label className="mt-4">{t('confirm_pin')}</label>
+            <input className="custom-input" type="password" inputMode="numeric" autoComplete="new-password" maxLength={12}
+                value={confirmPin} onChange={(event) => setConfirmPin(event.target.value.replace(/\D/g, '').slice(0, 12))} />
+            <button className="btn-primary mt-4" disabled={newPin.length < 4 || (!settings.pinIsDefault && currentPin.length < 4) || busy}
+                onClick={() => void changePin()}>{t('save')}</button>
+        </>
+    );
+
     const showRestart = restartNeeded || health?.portMode === 'range' || Boolean(health?.addressDrift);
 
     return (
@@ -162,6 +183,25 @@ export default function Admin() {
             </header>
 
             {message && <div className="glass-panel" style={{ padding: '0.8rem 1rem', marginBottom: '1rem' }}>{message}</div>}
+
+            {settings.settingsRecovery && (
+                <div className="glass-panel" role="alert" style={{ padding: '0.8rem 1rem', marginBottom: '1rem', color: 'var(--danger)' }}>
+                    {t(settings.settingsRecovery === 'backup' ? 'settings_recovered_backup' : 'settings_recovered_defaults')}
+                </div>
+            )}
+
+            {/* Anyone in the room could guess 1234, so nothing else is usable until it changes. */}
+            {settings.pinIsDefault && (
+                <div className="admin-blocker" role="dialog" aria-modal="true" aria-labelledby="default-pin-title">
+                    <div className="card fade-in highlight-card admin-blocker-card">
+                        <div className="card-header"><ShieldAlert size={20} /><h3 id="default-pin-title">{t('default_pin_title')}</h3></div>
+                        <p className="text-muted">{t('default_pin_hint')}</p>
+                        {message && <p style={{ color: 'var(--danger)' }}>{message}</p>}
+                        {pinFields}
+                        <button className="btn-secondary mt-4" onClick={() => void settingsService.logout()}><LogOut size={18} /> {t('sign_out')}</button>
+                    </div>
+                </div>
+            )}
 
             {showRestart && (
                 <div className="glass-panel" style={{ padding: '0.8rem 1rem', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
@@ -410,13 +450,7 @@ export default function Admin() {
             <div className="card fade-in">
                 <div className="card-header"><Save size={20} /><h3>{t('security')}</h3></div>
                 <p className="text-muted">{t('security_hint')}</p>
-                <label>{t('new_pin')}</label>
-                <input className="custom-input" type="password" inputMode="numeric" autoComplete="new-password" maxLength={12}
-                    value={newPin} onChange={(event) => setNewPin(event.target.value.replace(/\D/g, '').slice(0, 12))} />
-                <label className="mt-4">{t('confirm_pin')}</label>
-                <input className="custom-input" type="password" inputMode="numeric" autoComplete="new-password" maxLength={12}
-                    value={confirmPin} onChange={(event) => setConfirmPin(event.target.value.replace(/\D/g, '').slice(0, 12))} />
-                <button className="btn-primary mt-4" disabled={newPin.length < 4 || busy} onClick={() => void changePin()}>{t('save')}</button>
+                {!settings.pinIsDefault && pinFields}
             </div>
         </div>
     );

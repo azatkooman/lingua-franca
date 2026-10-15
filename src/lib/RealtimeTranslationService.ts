@@ -101,6 +101,11 @@ class RealtimeTranslationService {
     private loudChecks = 0;
     private pausedForSilence = false;
     private silenceBusy = false;
+    // What a channel carries while its OpenAI leg is closed (the silence pause) or
+    // reconnecting. Detaching the track instead stopped all RTP, and every phone's
+    // no-audio watchdog then tore down its stream and reconnected, all at once.
+    private fillerContext: AudioContext | null = null;
+    private fillerTrack: MediaStreamTrack | null = null;
 
     async start(
         sourceLanguage: Language,
@@ -148,8 +153,25 @@ class RealtimeTranslationService {
                 onStatus(`The original speech will not be recorded: ${error instanceof Error ? error.message : String(error)}`);
             });
         }
+        // Made now, while the click that started translation still counts as a user gesture,
+        // so the audio context runs; a suspended one would send no packets either.
+        this.silentTrack();
         await Promise.all(targets.map((target) => this.startTarget(target)));
         this.startSilenceWatch(settingsService.getAdminSettings()?.aiSilencePauseMinutes ?? 0);
+    }
+
+    /** A live track of digital silence, shared by every channel waiting on OpenAI. Null if audio is unavailable. */
+    private silentTrack(): MediaStreamTrack | null {
+        if (this.fillerTrack?.readyState === 'live') return this.fillerTrack;
+        try {
+            this.fillerContext ??= new AudioContext();
+            void this.fillerContext.resume().catch(() => undefined);
+            this.fillerTrack = this.fillerContext.createMediaStreamDestination().stream.getAudioTracks()[0] ?? null;
+        } catch (error) {
+            console.warn('Could not create the silence track:', error);
+            this.fillerTrack = null;
+        }
+        return this.fillerTrack;
     }
 
     /** Watches the input's loudness for the silence pause; does nothing when it is off. */
@@ -204,7 +226,7 @@ class RealtimeTranslationService {
             this.reconnectAttempts.clear();
             const ids = [...this.targets.keys()];
             for (const id of ids) {
-                await voiceService.replaceTrack(id, null).catch(() => false);
+                await voiceService.replaceTrack(id, this.silentTrack()).catch(() => false);
                 const session = this.sessions.get(id);
                 this.sessions.delete(id);
                 if (session) this.closeSession(session);
@@ -447,12 +469,14 @@ class RealtimeTranslationService {
             context.onStatus(`OpenAI ${target.name} could not reconnect. Switch to Human mode, or stop and start again.`);
             // This channel is now silent for good. A status line is easy to miss mid-service.
             raiseAlert('ai_failed', tr('ai_failed_alert', { channel: target.name }), { channelId: targetId });
+            // No OpenAI leg is open any more, so the dashboard stops counting its cost.
+            voiceService.setAiPaused([targetId], true);
             return;
         }
         context.onStatus(`OpenAI ${target.name} connection lost. Reconnecting (attempt ${attempt} of ${RECONNECT_DELAYS_MS.length})…`);
-        // Detach the dying track before closing its connection: listeners hear silence and
-        // stay connected, rather than the channel ending when that track does.
-        await voiceService.replaceTrack(targetId, null).catch(() => false);
+        // Swap in silence before closing the dying connection: listeners stay connected and
+        // keep receiving packets, rather than the channel ending when that track does.
+        await voiceService.replaceTrack(targetId, this.silentTrack()).catch(() => false);
         if (current) this.closeSession(current);
         this.sessions.delete(targetId);
         try {
@@ -519,6 +543,10 @@ class RealtimeTranslationService {
         this.context = null;
         this.sourceStream?.getTracks().forEach((track) => track.stop());
         this.sourceStream = null;
+        this.fillerTrack?.stop();
+        this.fillerTrack = null;
+        void this.fillerContext?.close().catch(() => undefined);
+        this.fillerContext = null;
         this.muted = false;
     }
 }

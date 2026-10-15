@@ -14,7 +14,8 @@ const {
     isValidEmail, normalizeContact, normalizeDuckDnsDomain, normalizeEvent, normalizeLanguages, publicSettings,
     selectLocalAddress,
 } = require('./lib/settings.cjs');
-const { TranscriptStore } = require('./lib/transcript.cjs');
+const { CAPTION_IDLE_MS, TranscriptStore } = require('./lib/transcript.cjs');
+const { readSettingsFile, writeSettingsFile } = require('./lib/settings-file.cjs');
 const { ListenerReports } = require('./lib/listener-reports.cjs');
 const { certificateCoversHost, certificateDetails: readCertificateDetails } = require('./lib/certificates.cjs');
 const { RecordingStore, ROLES, TranscriptLog } = require('./lib/recordings.cjs');
@@ -76,6 +77,12 @@ let dynamicDnsTimer;
 let media = { worker: null, router: null, webRtcServer: null, error: '', portMode: 'unknown' };
 let certificateState = { type: 'self-signed', hostname: '', expiresAt: '', error: '' };
 let secureStorageAvailable = true;
+// How the settings were loaded: null normally, 'backup' or 'defaults' after a damaged file.
+// Admin and the pre-service check say so, since 'defaults' means the PIN is 1234 again.
+let settingsRecovery = null;
+// True while the operator PIN is still the factory 1234. Admin asks for a new one first.
+let pinIsDefault = false;
+const DEFAULT_PIN = '1234';
 let addressDrift = '';
 // Set once the server runs, so quitting can finish every open recording file properly.
 let stopAllRecordings = () => undefined;
@@ -113,26 +120,24 @@ function migrateSecret(settings, plainKey, encryptedKey) {
 }
 
 function loadSettings() {
-    let loaded = {};
-    try { if (fs.existsSync(settingsPath())) loaded = JSON.parse(fs.readFileSync(settingsPath(), 'utf8')); }
-    catch (error) { console.error('Failed to load settings, falling back to defaults:', error.message); }
+    const { loaded, recovery, corruptCopy } = readSettingsFile(settingsPath());
+    settingsRecovery = recovery;
+    if (recovery) console.error(`Settings file was damaged (kept as ${corruptCopy}); loaded ${recovery === 'backup' ? 'the backup' : 'defaults'}.`);
     const settings = { ...DEFAULT_SETTINGS, ...loaded };
     settings.languages = normalizeLanguages(loaded.languages);
     if (!settings.languages.length) settings.languages = normalizeLanguages(DEFAULT_SETTINGS.languages);
     migrateSecret(settings, 'openaiApiKey', 'openaiApiKeyEncrypted');
     // Translation is OpenAI only; forget the old text-fallback settings and any Gemini key.
     dropRetiredSettings(settings);
-    if (!settings.adminPinHash || !settings.adminPinSalt) setPin(settings, settings.adminPin || '1234');
+    if (!settings.adminPinHash || !settings.adminPinSalt) setPin(settings, settings.adminPin || DEFAULT_PIN);
     delete settings.adminPin;
+    pinIsDefault = verifyPin(settings, DEFAULT_PIN);
     settings.languages.forEach((language) => delete language.activePeerId);
     return settings;
 }
 
 function saveSettings(settings) {
-    fs.mkdirSync(path.dirname(settingsPath()), { recursive: true, mode: 0o700 });
-    const temporary = `${settingsPath()}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(settings, null, 2), { mode: 0o600 });
-    fs.renameSync(temporary, settingsPath());
+    writeSettingsFile(settingsPath(), settings);
 }
 
 /* ---------------------------------------------------------------- network */
@@ -529,6 +534,11 @@ async function startServers(isDev) {
 
     const expressApp = express();
     expressApp.disable('x-powered-by');
+    // Routes matched case-insensitively by default, so /API/admin/login reached the real login
+    // handler while the listener-port check below looked only for lowercase /api/. Routing is
+    // case-sensitive now, and that check compares a lowercased path anyway. Set before the
+    // first use(), which is when Express builds its router.
+    expressApp.set('case sensitive routing', true);
     expressApp.use((request, response, next) => {
         if (!isAllowedHost(request.headers.host, settings)) {
             return response.status(403).json({ error: 'Unrecognized host name.' });
@@ -544,11 +554,12 @@ async function startServers(isDev) {
     // HTTP, and it sends the sign-in pages to the HTTPS address before anything is typed.
     expressApp.use((request, response, next) => {
         if (request.socket.localPort !== LISTENER_PORT) return next();
-        if (request.path.startsWith('/api/')) {
+        const requestPath = request.path.toLowerCase();
+        if (requestPath.startsWith('/api/') || requestPath === '/api') {
             if (request.method === 'GET' && LISTENER_API.has(request.path)) return next();
             return response.status(403).json({ error: 'This address is for listening only. Use the secure address to sign in or broadcast.' });
         }
-        if (/^\/(admin|interpreter)(\/|$)/.test(request.path)) {
+        if (/^\/(admin|interpreter)(\/|$)/.test(requestPath)) {
             return response.redirect(302, `https://${request.hostname}:${HTTPS_PORT}${request.originalUrl}`);
         }
         next();
@@ -636,6 +647,9 @@ async function startServers(isDev) {
         next();
     };
 
+    // The operator's view of the settings, with what only this run knows: whether the PIN is
+    // still the factory one and whether the settings file had to be recovered.
+    const adminView = () => ({ ...adminSettings(settings, liveChannels), pinIsDefault, settingsRecovery });
     const emitSettings = () => io.emit('settingsChanged', publicSettings(settings, liveChannels));
     const setChannelState = (channelId, mode, role) => {
         if (mode) liveChannels.set(channelId, { mode, role, updatedAt: Date.now() });
@@ -644,7 +658,15 @@ async function startServers(isDev) {
     };
     // socket id -> { channelId, transportId } of what that phone is listening to right now.
     const countListeners = (channelId) => [...listenerChannels.values()].filter((entry) => entry.channelId === channelId).length;
-    const emitListenerCount = (channelId) => io.emit('listenerCount', { channelId, count: countListeners(channelId) });
+    // Only the channel's broadcaster and the operators show this number. Sending it to every
+    // socket meant each phone that joined pushed a message to every other phone in the room.
+    const emitListenerCount = (channelId, count = countListeners(channelId)) => {
+        const owner = producerOwners.get(channelId)?.socketId;
+        for (const target of io.of('/').sockets.values()) {
+            const operator = Boolean(target.data.token && adminSessions.has(target.data.token));
+            if (operator || target.id === owner) target.emit('listenerCount', { channelId, count });
+        }
+    };
     // Seconds of OpenAI time one broadcast has run up so far: from when it last started
     // billing (it stops while paused for silence) or the dashboard's last reset, whichever is later.
     const billedSeconds = (info, now = Date.now()) => (info?.role === 'translation' && info.billedSince
@@ -764,8 +786,8 @@ async function startServers(isDev) {
         return revoked.size;
     };
 
-    const persist = (response) => {
-        try { saveSettings(settings); return true; }
+    const persist = (response, value = settings) => {
+        try { saveSettings(value); return true; }
         catch (error) {
             console.error('Failed to save settings:', error);
             response.status(500).json({ error: `Could not save settings: ${error.message}` });
@@ -1032,22 +1054,44 @@ async function startServers(isDev) {
                 // being replaced is told, instead of carrying on into a producer nobody hears.
                 const isTest = appData?.role === 'test';
                 if (isTest && publisher.role !== 'admin') throw new Error('Only the operator can play a test tone.');
-                const previousOwner = producerOwners.get(channelId);
-                // A handover the current interpreter approved for this device lets it take over.
-                const handover = handovers.get(channelId);
-                const handedOver = Boolean(handover?.approved && handover.socketId === socket.id && Date.now() - handover.at < HANDOVER_MS);
-                if (producers.has(channelId) && !ownsChannel(channelId)) {
-                    if (publisher.role !== 'admin' && !handedOver) {
+                // Asked before and again after the new producer exists: the old broadcast is
+                // only ended once its replacement is ready, and whatever changed meanwhile (the
+                // channel taken by someone else, access revoked) is caught before the swap.
+                const takeover = (who) => {
+                    // A handover the current interpreter approved for this device lets it take over.
+                    const handover = handovers.get(channelId);
+                    const handedOver = Boolean(handover?.approved && handover.socketId === socket.id && Date.now() - handover.at < HANDOVER_MS);
+                    if (producers.has(channelId) && !ownsChannel(channelId) && who.role !== 'admin' && !handedOver) {
                         throw coded(`${language.name} is already being broadcast. Ask the operator to stop it first.`, 'channel_taken', { channel: language.name });
                     }
-                    if (previousOwner) io.to(previousOwner.socketId).emit('producerReplaced', { channelId, reason: handedOver ? 'handover' : 'takeover' });
+                    return handedOver;
+                };
+                takeover(publisher);
+                const producer = await transport.produce({ kind, rtpParameters, appData: { channelId } });
+                let handedOver;
+                try {
+                    const still = socketPublisher();
+                    if (!still) throw coded('Broadcaster login required.', 'login_required');
+                    if (!findLanguage(settings.languages, channelId)) throw new Error('Unknown channel.');
+                    if (producer.closed) throw new Error('The connection closed before the broadcast started.');
+                    handedOver = takeover(still);
+                } catch (error) {
+                    try { producer.close(); } catch { /* already closed */ }
+                    throw error;
+                }
+                const previousOwner = producerOwners.get(channelId);
+                if (producers.has(channelId) && previousOwner && !ownsChannel(channelId)) {
+                    io.to(previousOwner.socketId).emit('producerReplaced', { channelId, reason: handedOver ? 'handover' : 'takeover' });
                 }
                 // Settled either way: whoever goes on air now ends any pending request.
                 handovers.delete(channelId);
                 closeProducerFor(channelId);
-                const producer = await transport.produce({ kind, rtpParameters, appData: { channelId } });
+                // A new broadcast after a long quiet spell is a new service, not a continuation.
+                if (!isTest) transcripts.clearIfIdle(channelId, CAPTION_IDLE_MS);
                 producers.set(channelId, producer);
                 producerOwners.set(channelId, { socketId: socket.id, token: socketToken() || '', role: publisher.role });
+                // Phones already waiting on the channel count from the first second.
+                emitListenerCount(channelId);
                 const role = isTest ? 'test' : ROLES.includes(appData?.role) ? appData.role : appData?.mode === 'ai' ? 'translation' : 'interpreter';
                 setChannelState(channelId, appData?.mode === 'ai' && !isTest ? 'ai-active' : 'sfu-active', role);
                 broadcastInfo.set(channelId, { role, since: Date.now(), billedSince: role === 'translation' ? Date.now() : null });
@@ -1130,7 +1174,7 @@ async function startServers(isDev) {
                 if (previousChannel && previousChannel !== channelId) emitListenerCount(previousChannel);
                 const count = countListeners(channelId);
                 peakListeners.set(channelId, Math.max(peakListeners.get(channelId) || 0, count));
-                io.emit('listenerCount', { channelId, count });
+                emitListenerCount(channelId, count);
                 consumer.on('transportclose', () => consumer.close());
                 consumer.on('producerclose', () => consumer.close());
                 // Lets a listener distinguish "the interpreter muted themselves" from "the
@@ -1164,7 +1208,10 @@ async function startServers(isDev) {
         // What was said recently on a channel. Captions are public to every listener anyway,
         // so this needs no session, and it works on the plain listener port.
         on('getTranscript', ({ channelId } = {}, callback) => {
-            callback?.({ segments: transcripts.recent(String(channelId || '').slice(0, 80)) });
+            const id = String(channelId || '').slice(0, 80);
+            // Off air and quiet for a while: last service's words are not "what was just said".
+            if (!producers.has(id)) transcripts.clearIfIdle(id, CAPTION_IDLE_MS);
+            callback?.({ segments: transcripts.recent(id) });
         });
 
         socket.on('disconnect', () => {
@@ -1347,50 +1394,76 @@ async function startServers(isDev) {
         }
     });
 
-    expressApp.get('/api/admin/settings', requireAdmin, (_request, response) =>
-        response.json(adminSettings(settings, liveChannels)));
+    expressApp.get('/api/admin/settings', requireAdmin, (_request, response) => response.json(adminView()));
 
     expressApp.patch('/api/admin/settings', requireAdmin, (request, response) => {
         const patch = request.body || {};
+        // Everything that can be refused is checked before anything changes, so a refused
+        // request never leaves channels removed or the event edited with the PIN unchanged.
+        let languages = null;
         if (Array.isArray(patch.languages)) {
-            const next = normalizeLanguages(patch.languages);
-            if (!next.length) return response.status(400).json({ error: 'Keep at least one language channel.' });
+            languages = normalizeLanguages(patch.languages);
+            if (!languages.length) return response.status(400).json({ error: 'Keep at least one language channel.' });
+        }
+        const pinChanged = patch.adminPin !== undefined;
+        if (pinChanged) {
+            if (!isValidPin(patch.adminPin)) return response.status(400).json({ error: 'The PIN must be 4 to 12 digits.' });
+            // A session left open on a shared computer must not be enough to take the PIN over.
+            // Wrong guesses count toward the same lockout as the sign-in screen.
+            const address = request.ip || 'unknown';
+            const blocked = adminThrottle.status(address);
+            if (blocked.blocked) return response.status(429).json({ error: `Too many attempts. Try again in ${Math.ceil(blocked.retryAfterMs / 1000)} seconds.` });
+            if (!verifyPin(settings, patch.currentPin || '')) {
+                adminThrottle.fail(address);
+                return response.status(403).json({ error: 'The current PIN is not correct.' });
+            }
+            if (String(patch.adminPin) === DEFAULT_PIN) return response.status(400).json({ error: 'Choose a PIN other than 1234.' });
+        }
+        let openaiApiKeyEncrypted = '';
+        try {
+            if (typeof patch.openaiApiKey === 'string' && patch.openaiApiKey.trim()) openaiApiKeyEncrypted = protectSecret(patch.openaiApiKey.trim());
+        } catch (error) { return response.status(503).json({ error: error.message }); }
+
+        // Applied to a copy and saved; the live settings change only once the file has.
+        const next = structuredClone(settings);
+        if (languages) next.languages = languages;
+        if (patch.event && typeof patch.event === 'object') next.event = normalizeEvent(patch.event);
+        if (patch.contact && typeof patch.contact === 'object') next.contact = normalizeContact(patch.contact);
+        if (pinChanged) setPin(next, String(patch.adminPin));
+        if (INTERFACE_LANGUAGES.includes(patch.interfaceLanguage)) next.interfaceLanguage = patch.interfaceLanguage;
+        // Lets an operator go back to the local certificate. The trusted key and cert are
+        // left on disk so re-enabling does not need a fresh issuance from the CA.
+        if (patch.certificateMode === 'self-signed') next.certificateMode = 'self-signed';
+        if (typeof patch.preferredAddress === 'string') next.preferredAddress = patch.preferredAddress.slice(0, 64);
+        if (typeof patch.recordingEnabled === 'boolean') next.recordingEnabled = patch.recordingEnabled;
+        if (typeof patch.transcriptsEnabled === 'boolean') next.transcriptsEnabled = patch.transcriptsEnabled;
+        if (patch.aiBudgetUsd !== undefined) next.aiBudgetUsd = normalizeBudget(patch.aiBudgetUsd);
+        if (patch.aiSilencePauseMinutes !== undefined) next.aiSilencePauseMinutes = normalizeSilencePause(patch.aiSilencePauseMinutes);
+        if (openaiApiKeyEncrypted) next.openaiApiKeyEncrypted = openaiApiKeyEncrypted;
+        if (patch.clearOpenaiApiKey === true) next.openaiApiKeyEncrypted = '';
+        if (!persist(response, next)) return;
+        for (const key of Object.keys(settings)) delete settings[key];
+        Object.assign(settings, next);
+
+        if (languages) {
             // A channel that disappears must stop broadcasting; ids survive renames, so this
             // only fires on a genuine removal.
-            const keptIds = new Set(next.map((language) => language.id));
+            const keptIds = new Set(languages.map((language) => language.id));
             for (const channelId of [...producers.keys()]) if (!keptIds.has(channelId)) closeProducerFor(channelId);
             for (const channelId of [...liveChannels.keys()]) if (!keptIds.has(channelId)) liveChannels.delete(channelId);
             transcripts.retain(keptIds);
-            settings.languages = next;
         }
-        if (patch.event && typeof patch.event === 'object') settings.event = normalizeEvent(patch.event);
-        if (patch.contact && typeof patch.contact === 'object') settings.contact = normalizeContact(patch.contact);
-        let pinChanged = false;
-        if (patch.adminPin !== undefined) {
-            if (!isValidPin(patch.adminPin)) return response.status(400).json({ error: 'The PIN must be 4 to 12 digits.' });
-            setPin(settings, String(patch.adminPin));
-            pinChanged = true;
+        if (patch.aiBudgetUsd !== undefined) budgetAlerted = 0;
+        if (pinChanged) {
+            pinIsDefault = false;
+            adminThrottle.succeed(request.ip || 'unknown');
+            // A PIN change is usually a response to the old PIN leaking, so every other operator
+            // session opened with it ends here. The session making the change stays signed in.
+            revokeSessions(adminSessions, requestToken(request));
         }
-        if (INTERFACE_LANGUAGES.includes(patch.interfaceLanguage)) settings.interfaceLanguage = patch.interfaceLanguage;
-        // Lets an operator go back to the local certificate. The trusted key and cert are
-        // left on disk so re-enabling does not need a fresh issuance from the CA.
-        if (patch.certificateMode === 'self-signed') settings.certificateMode = 'self-signed';
-        if (typeof patch.preferredAddress === 'string') settings.preferredAddress = patch.preferredAddress.slice(0, 64);
-        if (typeof patch.recordingEnabled === 'boolean') settings.recordingEnabled = patch.recordingEnabled;
-        if (typeof patch.transcriptsEnabled === 'boolean') settings.transcriptsEnabled = patch.transcriptsEnabled;
-        if (patch.aiBudgetUsd !== undefined) { settings.aiBudgetUsd = normalizeBudget(patch.aiBudgetUsd); budgetAlerted = 0; }
-        if (patch.aiSilencePauseMinutes !== undefined) settings.aiSilencePauseMinutes = normalizeSilencePause(patch.aiSilencePauseMinutes);
-        try {
-            if (typeof patch.openaiApiKey === 'string' && patch.openaiApiKey.trim()) settings.openaiApiKeyEncrypted = protectSecret(patch.openaiApiKey.trim());
-        } catch (error) { return response.status(503).json({ error: error.message }); }
-        if (patch.clearOpenaiApiKey === true) settings.openaiApiKeyEncrypted = '';
-        if (!persist(response)) return;
-        // A PIN change is usually a response to the old PIN leaking, so every other operator
-        // session opened with it ends here. The session making the change stays signed in.
-        if (pinChanged) revokeSessions(adminSessions, requestToken(request));
         if (typeof patch.recordingEnabled === 'boolean') syncRecordings();
         emitSettings();
-        response.json(adminSettings(settings, liveChannels));
+        response.json(adminView());
     });
 
     // What the operator's dashboard shows: each channel's state and audience, recordings in
@@ -1459,6 +1532,10 @@ async function startServers(isDev) {
     expressApp.get('/api/admin/preflight', requireAdmin, async (_request, response) => {
         const checks = [];
         const add = (id, status, detail = '') => checks.push({ id, status, detail: String(detail || '') });
+        // Anyone in the room could guess 1234, and a recovered settings file may have lost the
+        // OpenAI key or other choices, so both come first.
+        add('admin_pin', pinIsDefault ? 'fail' : 'ok');
+        if (settingsRecovery) add('settings_file', settingsRecovery === 'backup' ? 'warn' : 'fail', settingsRecovery);
         add('media', !media.router ? 'fail' : media.portMode === 'multiplexed' ? 'ok' : 'warn', media.router ? media.portMode : media.error);
         add('listener_port', listenerPortError ? 'warn' : 'ok', listenerPortError || String(LISTENER_PORT));
         const adapter = networkAddresses().find((entry) => entry.address === localAddress);
@@ -1555,7 +1632,8 @@ async function startServers(isDev) {
         setTimeout(() => { app.relaunch(); app.quit(); }, 300);
     });
 
-    expressApp.use('/api', (_request, response) => response.status(404).json({ error: 'Not found.' }));
+    // Any letter case: routing is case-sensitive, and /API/... must not fall through to the page.
+    expressApp.use((request, response, next) => (/^\/api(\/|$)/i.test(request.path) ? response.status(404).json({ error: 'Not found.' }) : next()));
 
     if (!isDev) {
         expressApp.use(express.static(path.join(__dirname, 'dist')));
@@ -1709,3 +1787,6 @@ app.on('before-quit', () => {
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
 process.on('unhandledRejection', (reason) => console.error('Unhandled rejection:', reason));
+// A stray exception in a socket or timer callback would otherwise end the whole app mid-service,
+// taking every channel off air. Logging it and carrying on is the lesser harm for a live event.
+process.on('uncaughtException', (error) => console.error('Uncaught exception:', error));

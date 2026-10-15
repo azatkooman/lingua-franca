@@ -58,11 +58,15 @@ export interface AdminSettings extends AppSettings {
     aiBudgetUsd: number;
     /** Minutes without speech before the OpenAI legs close; 0 = never. */
     aiSilencePauseMinutes: number;
+    /** The operator PIN is still the factory 1234; Admin asks for a new one before anything else. */
+    pinIsDefault?: boolean;
+    /** Set when the settings file was damaged: 'backup' was loaded, or 'defaults'. */
+    settingsRecovery?: 'backup' | 'defaults' | null;
 }
 
 /** One check in the pre-service list. */
 export interface PreflightCheck {
-    id: 'media' | 'listener_port' | 'network' | 'certificate' | 'microphone' | 'secure_storage' | 'disk' | 'openai';
+    id: 'admin_pin' | 'settings_file' | 'media' | 'listener_port' | 'network' | 'certificate' | 'microphone' | 'secure_storage' | 'disk' | 'openai';
     status: 'ok' | 'warn' | 'fail';
     detail: string;
 }
@@ -378,7 +382,7 @@ class SettingsService {
         await this.patchAdminSettings({ languages: languages.filter((language) => language.id !== id) });
     }
 
-    async setAdminPin(adminPin: string) { await this.patchAdminSettings({ adminPin }); }
+    async setAdminPin(currentPin: string, adminPin: string) { await this.patchAdminSettings({ currentPin, adminPin }); }
     /** The interface language a phone uses until it picks EN or RU itself. */
     async setInterfaceLanguage(interfaceLanguage: InterfaceLanguage) { await this.patchAdminSettings({ interfaceLanguage }); }
     async setEvent(event: EventInfo) { await this.patchAdminSettings({ event }); }

@@ -9,6 +9,7 @@ import { isInternationalNumber } from '../lib/phoneNumbers';
 import { fetchAdminHealth, listenerUrl, readPhoneLink, savePhoneLink, usesPlainLink, type HealthInfo, type PhoneLink } from '../lib/listenerLinks';
 import LiveDashboard from '../components/LiveDashboard';
 import PreflightCard from '../components/PreflightCard';
+import AiStyleCard from '../components/AiStyleCard';
 import RecordingsCard from '../components/RecordingsCard';
 import './Admin.css';
 
@@ -408,7 +409,7 @@ export default function Admin() {
                 <button className="btn-primary mt-4" disabled={!openaiKey || busy} onClick={() => void run(async () => { await settingsService.setOpenAiApiKey(openaiKey); setOpenaiKey(''); }, t('openai_key_saved'))}>{t('save_openai_key')}</button>
                 {settings.openaiConfigured && (
                     <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-                        <button className="btn-secondary mt-4" disabled={busy} onClick={() => void run(async () => { await settingsService.createRealtimeSession('ru', 'en'); }, t('openai_test_passed'))}>{t('test_openai')}</button>
+                        <button className="btn-secondary mt-4" disabled={busy} onClick={() => void run(async () => { await settingsService.createRealtimeSession('ru', 'en', settings.aiEngine); }, t('openai_test_passed'))}>{t('test_openai')}</button>
                         <button className="btn-secondary mt-4" disabled={busy} onClick={() => void run(() => settingsService.clearOpenAiApiKey(), t('openai_key_removed'))}><Trash2 size={18} /> {t('remove_openai_key')}</button>
                     </div>
                 )}
@@ -431,8 +432,10 @@ export default function Admin() {
                     <option value={0}>{t('ai_silence_off')}</option>
                     {[2, 5, 10].map((minutes) => <option key={minutes} value={minutes}>{t('ai_silence_minutes', { minutes })}</option>)}
                 </select>
-                <p className="text-muted">{t('ai_silence_hint')}</p>
+                <p className="text-muted">{t(settings.aiEngine === 'steady' ? 'ai_silence_steady' : 'ai_silence_hint')}</p>
             </div>
+
+            <AiStyleCard settings={settings} />
 
             <RecordingsCard settings={settings} />
 

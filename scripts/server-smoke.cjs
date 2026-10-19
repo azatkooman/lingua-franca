@@ -21,6 +21,17 @@ const fs = require('fs');
 const dgram = require('dgram');
 const mediasoup = require('mediasoup');
 const { io } = require('socket.io-client');
+const { zip } = require('./test-zip.cjs');
+
+// OpenAI is never contacted: its calls are answered here and kept, so a check can see exactly
+// what the app asked for.
+const openaiCalls = [];
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (url, init = {}) => {
+    if (!String(url).startsWith('https://api.openai.com/')) return realFetch(url, init);
+    openaiCalls.push({ url: String(url), body: init.body ? JSON.parse(init.body) : null });
+    return new Response(JSON.stringify({ value: 'ek_smoke', expires_at: 0 }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+};
 
 process.env.LINGUA_FRANCA_SESSION_SWEEP_MS = '1000';
 let microphoneStatus = 'granted';
@@ -566,6 +577,97 @@ async function run() {
         const odd = (await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ aiBudgetUsd: -3, aiSilencePauseMinutes: 7 }) })).body;
         assert.deepEqual([odd.aiBudgetUsd, odd.aiSilencePauseMinutes], [0, 0]);
         return 'rounded; invalid becomes off';
+    });
+
+    await check('the AI translation style is stored, and notes are cut to the limit', async () => {
+        const patch = async (body) => (await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify(body) })).body;
+        const saved = await patch({ aiEngine: 'steady', aiVoice: 'cedar', aiPace: 'smoother', aiInstructions: 'Say "Lord".', aiNotes: `Pastor Ivanov\r\n${'x'.repeat(25_000)}` });
+        assert.deepEqual([saved.aiEngine, saved.aiVoice, saved.aiPace, saved.aiInstructions], ['steady', 'cedar', 'smoother', 'Say "Lord".']);
+        assert.equal(saved.aiNotes.length, 20_000);
+        assert.ok(saved.aiNotes.startsWith('Pastor Ivanov\n'));
+        const odd = await patch({ aiEngine: 'other', aiVoice: 'robot', aiPace: 'warp' });
+        assert.deepEqual([odd.aiEngine, odd.aiVoice, odd.aiPace], ['translate', 'marin', 'balanced']);
+        assert.equal((await patch({ aiEngine: 'steady', aiNotes: 'Slide 1: John 3:16' })).aiNotes, 'Slide 1: John 3:16');
+        return 'stored, normalised, 20,000 characters at most';
+    });
+
+    await check('Steady voice asks OpenAI for an interpreter with the notes; Fast keeps the translation model', async () => {
+        const session = (engine) => json('/api/realtime/session', {
+            method: 'POST', headers: authed(token), body: JSON.stringify({ sourceLanguage: 'ru', targetLanguage: 'en', engine }),
+        });
+        assert.equal((await session('steady')).status, 409, 'no key yet');
+        assert.equal((await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ openaiApiKey: 'sk-smoke' }) })).status, 200);
+        try {
+            const steady = await session('steady');
+            assert.deepEqual([steady.status, steady.body.engine, steady.body.value], [200, 'steady', 'ek_smoke']);
+            const asked = openaiCalls.at(-1);
+            assert.equal(asked.url, 'https://api.openai.com/v1/realtime/client_secrets');
+            const config = asked.body.session;
+            assert.equal(config.audio.output.voice, 'marin', 'the voice saved last');
+            assert.equal(config.audio.input.turn_detection.create_response, false);
+            assert.equal(config.audio.input.turn_detection.eagerness, 'medium');
+            assert.match(config.instructions, /in Russian\. Say everything they say in English/);
+            assert.match(config.instructions, /Slide 1: John 3:16/);
+            const fast = await session('translate');
+            assert.deepEqual([fast.status, fast.body.engine], [200, 'translate']);
+            assert.equal(openaiCalls.at(-1).url, 'https://api.openai.com/v1/realtime/translations/client_secrets');
+            assert.equal(openaiCalls.at(-1).body.session.model, 'gpt-realtime-translate');
+            assert.equal('instructions' in openaiCalls.at(-1).body.session, false);
+        } finally {
+            await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ clearOpenaiApiKey: true }) });
+        }
+        return 'client_secrets with instructions; translations/client_secrets without';
+    });
+
+    await check('slides and Word files become notes, for the operator only', async () => {
+        const upload = (name, body, headers = authed(token), base = BASE) => fetch(`${base}/api/admin/ai-notes/extract?name=${encodeURIComponent(name)}`, {
+            method: 'POST', headers: { ...headers, 'Content-Type': 'application/octet-stream' }, body,
+        });
+        const deck = zip({
+            'ppt/slides/slide1.xml': '<p:sld><a:p><a:r><a:t>Благодать на благодать</a:t></a:r></a:p></p:sld>',
+            'ppt/slides/slide2.xml': '<p:sld><a:p><a:r><a:t>John 1:16</a:t></a:r></a:p></p:sld>',
+        });
+        const read = await upload('Sermon.pptx', deck);
+        assert.equal(read.status, 200);
+        assert.equal((await read.json()).text, 'Slide 1:\nБлагодать на благодать\n\nSlide 2:\nJohn 1:16');
+        const pdf = await upload('notes.pdf', Buffer.from('%PDF-1.7'));
+        assert.equal(pdf.status, 422);
+        assert.match((await pdf.json()).error, /paste/);
+        assert.equal((await upload('Sermon.pptx', deck, {})).status, 401);
+        assert.equal((await upload('Sermon.pptx', deck, authed(token), LISTENER_BASE)).status, 403);
+        return 'pptx read; pdf explained; 401 without a session; 403 on the listener port';
+    });
+
+    await check('Steady voice cost comes from its usage reports, only from its own broadcaster', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const { body: settings } = await json('/api/settings');
+        const channel = settings.languages[1].id;
+        const operator = await connect(token);
+        const transport = await ask(operator, 'createWebRtcTransport', { type: 'producer' });
+        const produced = await ask(operator, 'produce', {
+            transportId: transport.id, kind: 'audio', rtpParameters: opusRtp(4747), appData: { channelId: channel, mode: 'ai', role: 'translation', engine: 'steady' },
+        });
+        assert.ok(produced.id, produced.error);
+        const live = async () => (await json('/api/admin/live', { headers: authed(token) })).body;
+        try {
+            const before = await live();
+            const row = before.channels.find((entry) => entry.id === channel);
+            assert.deepEqual([row.steady, row.aiPaused], [true, false]);
+            const usage = { input_token_details: { audio_tokens: 1000, text_tokens: 0 }, output_token_details: { audio_tokens: 1000, text_tokens: 0 } };
+            assert.equal((await ask(operator, 'aiUsage', { channelId: channel, usage })).ok, true);
+            assert.equal((await ask(operator, 'aiUsage', { channelId: channel, transcribedSeconds: 60 })).ok, true);
+            const phone = await connect('', LISTENER_BASE);
+            assert.ok((await ask(phone, 'aiUsage', { channelId: channel, usage })).error, 'a phone cannot report usage');
+            phone.close();
+            const after = await live();
+            // 1000 audio tokens in ($0.032) and out ($0.064), plus a minute transcribed ($0.017).
+            assert.ok(Math.abs(after.aiCostUsd - before.aiCostUsd - 0.113) < 0.002, `cost rose by ${after.aiCostUsd - before.aiCostUsd}`);
+            assert.equal((await ask(operator, 'setAiPaused', { channelIds: [channel], paused: true })).ok, true);
+            assert.equal((await live()).channels.find((entry) => entry.id === channel).aiPaused, false, 'never shown as paused');
+        } finally {
+            await ask(operator, 'closeProducer', { channelId: channel });
+        }
+        return 'priced from tokens; phones ignored';
     });
 
     await check('a test tone is never recorded', async () => {

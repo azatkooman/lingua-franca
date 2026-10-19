@@ -1,4 +1,4 @@
-import { settingsService, type Language } from './SettingsService';
+import { settingsService, type AiEngine, type Language } from './SettingsService';
 import { voiceService } from './VoiceService';
 import { translateNow as tr } from './i18n';
 import { clearAlerts, raiseAlert } from './alerts';
@@ -32,6 +32,8 @@ interface ActiveSession {
     flush: () => void;
     /** Cancels the OpenAI connection setup if it is still in progress. */
     abort: AbortController;
+    /** Clears this connection's own timers when it closes. */
+    cleanup: (() => void)[];
 }
 
 interface StartContext {
@@ -74,6 +76,17 @@ const SILENCE_RMS = 0.003;
 const SILENCE_CHECK_MS = 250;
 // Sound this many checks in a row (half a second) reopens the OpenAI connections.
 const RESUME_AFTER_CHECKS = 2;
+// OpenAI ends a conversational session after 60 minutes. Steady voice opens a fresh one after
+// 50, at the first quiet moment, and at 58 whatever is happening.
+const STEADY_RENEW_AFTER_MS = 50 * 60_000;
+const STEADY_RENEW_BY_MS = 58 * 60_000;
+// If OpenAI never says it finished speaking a translation, the next one goes ahead after this.
+const STEADY_SPEAKING_LIMIT_MS = 30_000;
+// Where each engine is reached once it has a client secret.
+const CALLS_URL: Record<AiEngine, string> = {
+    translate: 'https://api.openai.com/v1/realtime/translations/calls',
+    steady: 'https://api.openai.com/v1/realtime/calls',
+};
 
 class RealtimeTranslationService {
     private sessions = new Map<string, ActiveSession>();
@@ -106,6 +119,9 @@ class RealtimeTranslationService {
     // no-audio watchdog then tore down its stream and reconnected, all at once.
     private fillerContext: AudioContext | null = null;
     private fillerTrack: MediaStreamTrack | null = null;
+    // Fixed for a whole run, so a change in Admin mid-service never switches a reconnecting
+    // channel to the other model.
+    private engine: AiEngine = 'translate';
 
     async start(
         sourceLanguage: Language,
@@ -114,10 +130,11 @@ class RealtimeTranslationService {
         onStatus: (message: string) => void,
         onUpdate: (update: TranslationUpdate) => void,
         onListeners: (count: number) => void,
-        options: { floorChannel?: boolean } = {},
+        options: { floorChannel?: boolean; engine?: AiEngine } = {},
     ) {
         if (!targets.length) throw new Error('Select at least one target language.');
         if (!settingsService.getAdminSettings()?.openaiConfigured) throw new Error('Add an OpenAI API key in Admin settings first.');
+        this.engine = options.engine ?? settingsService.getAdminSettings()?.aiEngine ?? 'translate';
         this.stopping = false;
         this.muted = false;
         this.pausedForSilence = false;
@@ -157,7 +174,9 @@ class RealtimeTranslationService {
         // so the audio context runs; a suspended one would send no packets either.
         this.silentTrack();
         await Promise.all(targets.map((target) => this.startTarget(target)));
-        this.startSilenceWatch(settingsService.getAdminSettings()?.aiSilencePauseMinutes ?? 0);
+        // Steady voice costs nothing while nobody speaks (it is billed per sentence), so the
+        // silence pause would only lose the first words after a quiet spell.
+        if (this.engine === 'translate') this.startSilenceWatch(settingsService.getAdminSettings()?.aiSilencePauseMinutes ?? 0);
     }
 
     /** A live track of digital silence, shared by every channel waiting on OpenAI. Null if audio is unavailable. */
@@ -260,7 +279,8 @@ class RealtimeTranslationService {
         const context = this.context;
         if (!context) throw new Error('Translation is not running.');
         context.onStatus(`Connecting OpenAI ${target.name}…`);
-        const { value: clientSecret } = await settingsService.createRealtimeSession(context.sourceLanguage.code, target.code);
+        const engine = this.engine;
+        const { value: clientSecret } = await settingsService.createRealtimeSession(context.sourceLanguage.code, target.code, engine);
         if (!clientSecret) throw new Error(`OpenAI did not return a client secret for ${target.name}.`);
         // Stopped meanwhile: opening an OpenAI connection now would keep billing with nobody to stop it.
         if (this.stopping || this.context !== context) throw new Error(tr('voice_stopped'));
@@ -275,7 +295,7 @@ class RealtimeTranslationService {
         const session: ActiveSession = {
             peer, target, sourceTrack, translatedText: '', originalText: '', startedAt: performance.now(),
             segmentKey: `${target.id}-${Date.now().toString(36)}`, segment: 1, flush: () => undefined,
-            abort: new AbortController(),
+            abort: new AbortController(), cleanup: [],
         };
         this.sessions.set(target.id, session);
         const isCurrent = () => !this.stopping && this.sessions.get(target.id) === session;
@@ -299,7 +319,7 @@ class RealtimeTranslationService {
             // keep every listener attached instead of making them all renegotiate.
             void voiceService.replaceTrack(target.id, track).then((replaced) => {
                 if (replaced) { context.onStatus(`OpenAI ${target.name} reconnected`); return; }
-                return voiceService.publishTrack(target.id, track, 'ai', context.onStatus, context.onListeners, 'translation');
+                return voiceService.publishTrack(target.id, track, 'ai', context.onStatus, context.onListeners, 'translation', engine);
             }).catch((error) => {
                 context.onStatus(`Could not publish ${target.name}: ${error instanceof Error ? error.message : String(error)}`);
             });
@@ -357,22 +377,113 @@ class RealtimeTranslationService {
         session.flush = finishSegment;
 
         const events = peer.createDataChannel('oai-events');
+        const send = (event: object) => { if (events.readyState === 'open') events.send(JSON.stringify(event)); };
         events.onopen = () => {
-            events.send(JSON.stringify({
+            // Steady voice is configured in full when its client secret is made.
+            if (engine === 'steady') return;
+            send({
                 type: 'session.update',
-                session: { audio: { input: { transcription: { model: INPUT_TRANSCRIPTION_MODEL } } } },
-            }));
+                session: { audio: { input: { transcription: { model: INPUT_TRANSCRIPTION_MODEL }, noise_reduction: { type: 'near_field' } } } },
+            });
         };
+
+        // Steady voice: the app asks for each translation itself, one at a time, like an
+        // interpreter who finishes a sentence before starting the next. Speech that ends while
+        // a translation is still being spoken waits, and is translated together afterwards.
+        const steady = {
+            pendingTurn: false, responding: false, speaking: false, userSpeaking: false, speechStartMs: 0, speakingTimer: 0,
+            // Speech items whose transcript arrived in pieces; any other arrives whole at the end.
+            streamedItems: new Set<string>(),
+        };
+        const respondIfReady = () => {
+            if (!steady.pendingTurn || steady.responding || steady.speaking || !isCurrent()) return;
+            steady.pendingTurn = false;
+            steady.responding = true;
+            send({ type: 'response.create' });
+        };
+        const setSpeaking = (speaking: boolean) => {
+            steady.speaking = speaking;
+            window.clearTimeout(steady.speakingTimer);
+            if (speaking) steady.speakingTimer = window.setTimeout(() => { steady.speaking = false; respondIfReady(); }, STEADY_SPEAKING_LIMIT_MS);
+            else respondIfReady();
+        };
+        session.cleanup.push(() => window.clearTimeout(steady.speakingTimer));
+        if (engine === 'steady') {
+            // A fresh session before OpenAI's 60-minute limit, at the first quiet moment.
+            const openedAt = performance.now();
+            const renewTimer = window.setInterval(() => {
+                if (!isCurrent()) return;
+                const age = performance.now() - openedAt;
+                const quiet = !steady.pendingTurn && !steady.responding && !steady.speaking && !steady.userSpeaking;
+                if (age >= STEADY_RENEW_BY_MS || (age >= STEADY_RENEW_AFTER_MS && quiet)) {
+                    window.clearInterval(renewTimer);
+                    void this.renewTarget(target.id);
+                }
+            }, 1000);
+            session.cleanup.push(() => window.clearInterval(renewTimer));
+        }
+
         events.onmessage = ({ data }) => {
             try {
-                const event = JSON.parse(String(data)) as { type?: string; delta?: string; error?: { message?: string } };
-                if (event.type === 'session.output_transcript.delta') {
+                const event = JSON.parse(String(data)) as {
+                    type?: string; delta?: string; audio_start_ms?: number; audio_end_ms?: number; item_id?: string; transcript?: string;
+                    response?: { usage?: unknown }; error?: { message?: string; code?: string };
+                };
+                const translatedType = engine === 'steady' ? 'response.output_audio_transcript.delta' : 'session.output_transcript.delta';
+                const originalType = engine === 'steady' ? 'conversation.item.input_audio_transcription.delta' : 'session.input_transcript.delta';
+                if (engine === 'steady') {
+                    switch (event.type) {
+                        case 'input_audio_buffer.speech_started':
+                            steady.userSpeaking = true;
+                            steady.speechStartMs = event.audio_start_ms ?? 0;
+                            break;
+                        case 'input_audio_buffer.speech_stopped':
+                            steady.userSpeaking = false;
+                            // The transcription of the original is billed by the second.
+                            if (event.audio_end_ms !== undefined && event.audio_end_ms > steady.speechStartMs) {
+                                voiceService.reportAiUsage(target.id, { transcribedSeconds: (event.audio_end_ms - steady.speechStartMs) / 1000 });
+                            }
+                            break;
+                        case 'input_audio_buffer.committed':
+                            steady.pendingTurn = true;
+                            respondIfReady();
+                            break;
+                        case 'response.created':
+                            steady.responding = true;
+                            // Each translation is its own caption line.
+                            if (session.translatedText) finishSegment();
+                            break;
+                        case 'response.done':
+                            steady.responding = false;
+                            if (event.response?.usage) voiceService.reportAiUsage(target.id, { usage: event.response.usage });
+                            respondIfReady();
+                            break;
+                        case 'output_audio_buffer.started':
+                            setSpeaking(true);
+                            break;
+                        case 'output_audio_buffer.stopped':
+                        case 'output_audio_buffer.cleared':
+                            setSpeaking(false);
+                            break;
+                        case 'conversation.item.input_audio_transcription.delta':
+                            if (event.item_id) steady.streamedItems.add(event.item_id);
+                            break;
+                        case 'conversation.item.input_audio_transcription.completed':
+                            // Not every transcription model streams; take the whole text then.
+                            if (event.item_id && !steady.streamedItems.delete(event.item_id) && event.transcript) {
+                                event.type = 'conversation.item.input_audio_transcription.delta';
+                                event.delta = `${session.originalText ? ' ' : ''}${event.transcript}`;
+                            }
+                            break;
+                    }
+                }
+                if (event.type === translatedType) {
                     session.translatedText += event.delta || '';
                     // Translation is flowing again, so a later drop starts its backoff afresh.
                     this.reconnectAttempts.delete(target.id);
                 }
-                if (event.type === 'session.input_transcript.delta') session.originalText += event.delta || '';
-                if (event.type === 'session.output_transcript.delta' || event.type === 'session.input_transcript.delta') {
+                if (event.type === originalType) session.originalText += event.delta || '';
+                if (event.type === translatedType || event.type === originalType) {
                     const update: TranslationUpdate = {
                         segmentId: `${session.segmentKey}-${session.segment}`,
                         targetId: target.id,
@@ -399,7 +510,12 @@ class RealtimeTranslationService {
                     if (session.translatedText.length > SEGMENT_MAX_CHARS && SENTENCE_END.test(session.translatedText)) finishSegment();
                     else idleTimer = window.setTimeout(onIdle, SEGMENT_IDLE_MS);
                 }
-                if (event.type === 'error') context.onStatus(`OpenAI ${target.name}: ${event.error?.message || 'unknown error'}`);
+                if (event.type === 'error') {
+                    // Asked for a translation while one was still running: it is asked for again
+                    // when that one finishes.
+                    if (event.error?.code === 'conversation_already_has_active_response') { steady.pendingTurn = true; return; }
+                    context.onStatus(`OpenAI ${target.name}: ${event.error?.message || 'unknown error'}`);
+                }
             } catch (error) { console.error('Invalid OpenAI realtime event:', error); }
         };
 
@@ -408,7 +524,7 @@ class RealtimeTranslationService {
             await peer.setLocalDescription(offer);
             const deadline = window.setTimeout(() => session.abort.abort(new Error(`OpenAI ${target.name} did not answer in time.`)), SDP_TIMEOUT_MS);
             try {
-                const answer = await fetch('https://api.openai.com/v1/realtime/translations/calls', {
+                const answer = await fetch(CALLS_URL[engine], {
                     method: 'POST',
                     headers: { Authorization: `Bearer ${clientSecret}`, 'Content-Type': 'application/sdp' },
                     body: offer.sdp,
@@ -433,6 +549,7 @@ class RealtimeTranslationService {
         // Whatever was being said is kept as a finished line rather than lost.
         session.flush();
         session.flush = () => undefined;
+        session.cleanup.splice(0).forEach((cleanup) => cleanup());
         session.abort.abort();
         if (session.player) {
             session.player.pause();
@@ -454,6 +571,26 @@ class RealtimeTranslationService {
             void this.reconnectTarget(targetId);
         }, Math.max(minimumDelayMs, backoff));
         this.reconnectTimers.set(targetId, timer);
+    }
+
+    /**
+     * Swaps a Steady voice connection for a fresh one before OpenAI's session limit ends it.
+     * Listeners hear silence for the second or two this takes, at a quiet moment.
+     */
+    private async renewTarget(targetId: string) {
+        const target = this.targets.get(targetId);
+        const context = this.context;
+        const current = this.sessions.get(targetId);
+        if (this.stopping || this.pausedForSilence || !target || !context || !current) return;
+        await voiceService.replaceTrack(targetId, this.silentTrack()).catch(() => false);
+        this.closeSession(current);
+        if (this.sessions.get(targetId) === current) this.sessions.delete(targetId);
+        try {
+            await this.startTarget(target);
+        } catch (error) {
+            context.onStatus(`OpenAI ${target.name} reconnect failed: ${error instanceof Error ? error.message : String(error)}`);
+            this.scheduleReconnect(targetId);
+        }
     }
 
     private async reconnectTarget(targetId: string) {

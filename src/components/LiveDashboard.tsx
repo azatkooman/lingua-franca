@@ -111,8 +111,8 @@ export default function LiveDashboard() {
                         })}
                     </ul>
                     {(status.aiSeconds > 0 || status.budgetUsd > 0) && (
-                        <p className={`live-ai ${status.budgetUsd > 0 && status.aiSeconds / 60 * status.aiPricePerMinute >= status.budgetUsd * 0.8 ? 'over-budget' : ''}`}>
-                            {t('live_ai_usage', { time: formatDuration(status.aiSeconds, locale), cost: money(status.aiSeconds / 60 * status.aiPricePerMinute) })}
+                        <p className={`live-ai ${status.budgetUsd > 0 && status.aiCostUsd >= status.budgetUsd * 0.8 ? 'over-budget' : ''}`}>
+                            {t('live_ai_usage', { time: formatDuration(status.aiSeconds, locale), cost: money(status.aiCostUsd) })}
                             {status.budgetUsd > 0 && <> · {t('live_budget', { budget: money(status.budgetUsd) })}</>}
                             <small className="text-muted">{t('live_ai_hint', { price: money(status.aiPricePerMinute, 3) })}</small>
                         </p>

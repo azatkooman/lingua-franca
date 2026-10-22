@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Cpu, Mic, Radio, RefreshCw, ShieldAlert, Square } from 'lucide-react';
 import { SYSTEM_AUDIO_DEVICE_ID, voiceService } from '../lib/VoiceService';
-import { settingsService, type AdminSettings, type AiEngine, type AppSettings } from '../lib/SettingsService';
+import { settingsService, type AdminSettings, type AppSettings } from '../lib/SettingsService';
 import { realtimeTranslationService, type TranslationUpdate } from '../lib/RealtimeTranslationService';
 import { intlLocale, useTranslation } from '../lib/i18n';
 import { clearAlerts, raiseAlert } from '../lib/alerts';
@@ -268,7 +268,7 @@ export default function Interpreter() {
                 const source = languages.find((language) => language.id === sourceChannelId);
                 const targetLanguages = languages.filter((language) => targetIds.has(language.id) && language.id !== sourceChannelId);
                 if (!source || !targetLanguages.length) throw new Error(t('choose_source_target'));
-                await realtimeTranslationService.start(source, targetLanguages, selectedMic, setStatus, updateTranscript, setListeners, { floorChannel, engine: admin?.aiEngine });
+                await realtimeTranslationService.start(source, targetLanguages, selectedMic, setStatus, updateTranscript, setListeners, { floorChannel });
                 const stream = voiceService.getBroadcastStream();
                 if (stream) meterCleanup.current = voiceService.createLevelMeter(stream, setSignalLevel);
                 setStatus(t('openai_live'));
@@ -378,13 +378,6 @@ export default function Interpreter() {
                             {!admin?.openaiConfigured && <p style={{ color: 'var(--danger)' }}><ShieldAlert size={16} /> {t('openai_key_missing')}</p>}
                             <p className="text-muted">{t('ai_mode_hint')}</p>
                         </div>
-                        <label>{t('ai_style_title')}</label>
-                        <select className="custom-select" value={admin?.aiEngine ?? 'translate'} disabled={isLive || !admin}
-                            onChange={(event) => void settingsService.setAiStyle({ aiEngine: event.target.value as AiEngine }).catch((error: unknown) => setStatus(error instanceof Error ? error.message : String(error)))}>
-                            <option value="translate">{t('ai_engine_translate')}</option>
-                            <option value="steady">{t('ai_engine_steady')}</option>
-                        </select>
-                        <p className="text-muted">{t(admin?.aiEngine === 'steady' ? 'ai_engine_steady_hint' : 'ai_engine_translate_hint')}</p>
                         <label>{t('source_lang')}</label>
                         <select className="custom-select" value={sourceChannelId} disabled={isLive} onChange={(event) => setSourceChannelId(event.target.value)}>
                             {languages.map((language) => <option key={language.id} value={language.id}>{language.name}</option>)}

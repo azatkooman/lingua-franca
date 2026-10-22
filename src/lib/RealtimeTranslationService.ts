@@ -1,4 +1,4 @@
-import { settingsService, type AiEngine, type Language } from './SettingsService';
+import { settingsService, type Language } from './SettingsService';
 import { voiceService } from './VoiceService';
 import { translateNow as tr } from './i18n';
 import { clearAlerts, raiseAlert } from './alerts';
@@ -53,7 +53,7 @@ const ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
 const RECONNECT_DELAYS_MS = [1000, 3000, 5000, 10_000, 20_000, 30_000, 30_000];
 // "disconnected" often recovers by itself within a few seconds; only rebuild if it has not.
 const DISCONNECT_GRACE_MS = 5000;
-// OpenAI's translation API sends transcript deltas but never says where a sentence ends. A
+// GPT-Live sends transcript deltas but never says where a sentence ends. A
 // caption line is finished after this much quiet, or early at a sentence end once it is long.
 const SEGMENT_IDLE_MS = 1400;
 const SEGMENT_MAX_CHARS = 280;
@@ -68,26 +68,11 @@ const SENTENCE_END = /[.!?…。！？]["»”')\]]*\s*$/;
 // few characters, and each one used to go out with the whole sentence so far; finished
 // sentences are still sent at once.
 const PARTIAL_CAPTION_INTERVAL_MS = 250;
-// The original speech is transcribed only when asked for (input transcription). Without it the
-// Original box and the original channel's captions stayed empty.
-const INPUT_TRANSCRIPTION_MODEL = 'gpt-realtime-whisper';
 // Below this loudness (RMS of the input, roughly -50 dBFS) counts as silence for the pause.
 const SILENCE_RMS = 0.003;
 const SILENCE_CHECK_MS = 250;
 // Sound this many checks in a row (half a second) reopens the OpenAI connections.
 const RESUME_AFTER_CHECKS = 2;
-// OpenAI ends a conversational session after 60 minutes. Steady voice opens a fresh one after
-// 50, at the first quiet moment, and at 58 whatever is happening.
-const STEADY_RENEW_AFTER_MS = 50 * 60_000;
-const STEADY_RENEW_BY_MS = 58 * 60_000;
-// If OpenAI never says it finished speaking a translation, the next one goes ahead after this.
-const STEADY_SPEAKING_LIMIT_MS = 30_000;
-// Where each engine is reached once it has a client secret.
-const CALLS_URL: Record<AiEngine, string> = {
-    translate: 'https://api.openai.com/v1/realtime/translations/calls',
-    steady: 'https://api.openai.com/v1/realtime/calls',
-};
-
 class RealtimeTranslationService {
     private sessions = new Map<string, ActiveSession>();
     private sourceStream: MediaStream | null = null;
@@ -119,9 +104,6 @@ class RealtimeTranslationService {
     // no-audio watchdog then tore down its stream and reconnected, all at once.
     private fillerContext: AudioContext | null = null;
     private fillerTrack: MediaStreamTrack | null = null;
-    // Fixed for a whole run, so a change in Admin mid-service never switches a reconnecting
-    // channel to the other model.
-    private engine: AiEngine = 'translate';
 
     async start(
         sourceLanguage: Language,
@@ -130,11 +112,10 @@ class RealtimeTranslationService {
         onStatus: (message: string) => void,
         onUpdate: (update: TranslationUpdate) => void,
         onListeners: (count: number) => void,
-        options: { floorChannel?: boolean; engine?: AiEngine } = {},
+        options: { floorChannel?: boolean } = {},
     ) {
         if (!targets.length) throw new Error('Select at least one target language.');
         if (!settingsService.getAdminSettings()?.openaiConfigured) throw new Error('Add an OpenAI API key in Admin settings first.');
-        this.engine = options.engine ?? settingsService.getAdminSettings()?.aiEngine ?? 'translate';
         this.stopping = false;
         this.muted = false;
         this.pausedForSilence = false;
@@ -174,9 +155,7 @@ class RealtimeTranslationService {
         // so the audio context runs; a suspended one would send no packets either.
         this.silentTrack();
         await Promise.all(targets.map((target) => this.startTarget(target)));
-        // Steady voice costs nothing while nobody speaks (it is billed per sentence), so the
-        // silence pause would only lose the first words after a quiet spell.
-        if (this.engine === 'translate') this.startSilenceWatch(settingsService.getAdminSettings()?.aiSilencePauseMinutes ?? 0);
+        this.startSilenceWatch(settingsService.getAdminSettings()?.aiSilencePauseMinutes ?? 0);
     }
 
     /** A live track of digital silence, shared by every channel waiting on OpenAI. Null if audio is unavailable. */
@@ -279,11 +258,6 @@ class RealtimeTranslationService {
         const context = this.context;
         if (!context) throw new Error('Translation is not running.');
         context.onStatus(`Connecting OpenAI ${target.name}…`);
-        const engine = this.engine;
-        const { value: clientSecret } = await settingsService.createRealtimeSession(context.sourceLanguage.code, target.code, engine);
-        if (!clientSecret) throw new Error(`OpenAI did not return a client secret for ${target.name}.`);
-        // Stopped meanwhile: opening an OpenAI connection now would keep billing with nobody to stop it.
-        if (this.stopping || this.context !== context) throw new Error(tr('voice_stopped'));
         const [inputTrack] = this.sourceStream?.getAudioTracks() ?? [];
         if (!inputTrack) throw new Error('The selected input produced no audio track.');
         const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -319,7 +293,7 @@ class RealtimeTranslationService {
             // keep every listener attached instead of making them all renegotiate.
             void voiceService.replaceTrack(target.id, track).then((replaced) => {
                 if (replaced) { context.onStatus(`OpenAI ${target.name} reconnected`); return; }
-                return voiceService.publishTrack(target.id, track, 'ai', context.onStatus, context.onListeners, 'translation', engine);
+                return voiceService.publishTrack(target.id, track, 'ai', context.onStatus, context.onListeners, 'translation');
             }).catch((error) => {
                 context.onStatus(`Could not publish ${target.name}: ${error instanceof Error ? error.message : String(error)}`);
             });
@@ -378,105 +352,11 @@ class RealtimeTranslationService {
 
         const events = peer.createDataChannel('oai-events');
         const send = (event: object) => { if (events.readyState === 'open') events.send(JSON.stringify(event)); };
-        events.onopen = () => {
-            // Steady voice is configured in full when its client secret is made.
-            if (engine === 'steady') return;
-            send({
-                type: 'session.update',
-                session: { audio: { input: { transcription: { model: INPUT_TRANSCRIPTION_MODEL }, noise_reduction: { type: 'near_field' } } } },
-            });
-        };
-
-        // Steady voice: the app asks for each translation itself, one at a time, like an
-        // interpreter who finishes a sentence before starting the next. Speech that ends while
-        // a translation is still being spoken waits, and is translated together afterwards.
-        const steady = {
-            pendingTurn: false, responding: false, speaking: false, userSpeaking: false, speechStartMs: 0, speakingTimer: 0,
-            // Speech items whose transcript arrived in pieces; any other arrives whole at the end.
-            streamedItems: new Set<string>(),
-        };
-        const respondIfReady = () => {
-            if (!steady.pendingTurn || steady.responding || steady.speaking || !isCurrent()) return;
-            steady.pendingTurn = false;
-            steady.responding = true;
-            send({ type: 'response.create' });
-        };
-        const setSpeaking = (speaking: boolean) => {
-            steady.speaking = speaking;
-            window.clearTimeout(steady.speakingTimer);
-            if (speaking) steady.speakingTimer = window.setTimeout(() => { steady.speaking = false; respondIfReady(); }, STEADY_SPEAKING_LIMIT_MS);
-            else respondIfReady();
-        };
-        session.cleanup.push(() => window.clearTimeout(steady.speakingTimer));
-        if (engine === 'steady') {
-            // A fresh session before OpenAI's 60-minute limit, at the first quiet moment.
-            const openedAt = performance.now();
-            const renewTimer = window.setInterval(() => {
-                if (!isCurrent()) return;
-                const age = performance.now() - openedAt;
-                const quiet = !steady.pendingTurn && !steady.responding && !steady.speaking && !steady.userSpeaking;
-                if (age >= STEADY_RENEW_BY_MS || (age >= STEADY_RENEW_AFTER_MS && quiet)) {
-                    window.clearInterval(renewTimer);
-                    void this.renewTarget(target.id);
-                }
-            }, 1000);
-            session.cleanup.push(() => window.clearInterval(renewTimer));
-        }
-
         events.onmessage = ({ data }) => {
             try {
-                const event = JSON.parse(String(data)) as {
-                    type?: string; delta?: string; audio_start_ms?: number; audio_end_ms?: number; item_id?: string; transcript?: string;
-                    response?: { usage?: unknown }; error?: { message?: string; code?: string };
-                };
-                const translatedType = engine === 'steady' ? 'response.output_audio_transcript.delta' : 'session.output_transcript.delta';
-                const originalType = engine === 'steady' ? 'conversation.item.input_audio_transcription.delta' : 'session.input_transcript.delta';
-                if (engine === 'steady') {
-                    switch (event.type) {
-                        case 'input_audio_buffer.speech_started':
-                            steady.userSpeaking = true;
-                            steady.speechStartMs = event.audio_start_ms ?? 0;
-                            break;
-                        case 'input_audio_buffer.speech_stopped':
-                            steady.userSpeaking = false;
-                            // The transcription of the original is billed by the second.
-                            if (event.audio_end_ms !== undefined && event.audio_end_ms > steady.speechStartMs) {
-                                voiceService.reportAiUsage(target.id, { transcribedSeconds: (event.audio_end_ms - steady.speechStartMs) / 1000 });
-                            }
-                            break;
-                        case 'input_audio_buffer.committed':
-                            steady.pendingTurn = true;
-                            respondIfReady();
-                            break;
-                        case 'response.created':
-                            steady.responding = true;
-                            // Each translation is its own caption line.
-                            if (session.translatedText) finishSegment();
-                            break;
-                        case 'response.done':
-                            steady.responding = false;
-                            if (event.response?.usage) voiceService.reportAiUsage(target.id, { usage: event.response.usage });
-                            respondIfReady();
-                            break;
-                        case 'output_audio_buffer.started':
-                            setSpeaking(true);
-                            break;
-                        case 'output_audio_buffer.stopped':
-                        case 'output_audio_buffer.cleared':
-                            setSpeaking(false);
-                            break;
-                        case 'conversation.item.input_audio_transcription.delta':
-                            if (event.item_id) steady.streamedItems.add(event.item_id);
-                            break;
-                        case 'conversation.item.input_audio_transcription.completed':
-                            // Not every transcription model streams; take the whole text then.
-                            if (event.item_id && !steady.streamedItems.delete(event.item_id) && event.transcript) {
-                                event.type = 'conversation.item.input_audio_transcription.delta';
-                                event.delta = `${session.originalText ? ' ' : ''}${event.transcript}`;
-                            }
-                            break;
-                    }
-                }
+                const event = JSON.parse(String(data)) as { type?: string; delta?: string; reason?: string; error?: { message?: string } };
+                const translatedType = 'session.output_transcript.delta';
+                const originalType = 'session.input_transcript.delta';
                 if (event.type === translatedType) {
                     session.translatedText += event.delta || '';
                     // Translation is flowing again, so a later drop starts its backoff afresh.
@@ -510,12 +390,16 @@ class RealtimeTranslationService {
                     if (session.translatedText.length > SEGMENT_MAX_CHARS && SENTENCE_END.test(session.translatedText)) finishSegment();
                     else idleTimer = window.setTimeout(onIdle, SEGMENT_IDLE_MS);
                 }
-                if (event.type === 'error') {
-                    // Asked for a translation while one was still running: it is asked for again
-                    // when that one finishes.
-                    if (event.error?.code === 'conversation_already_has_active_response') { steady.pendingTurn = true; return; }
-                    context.onStatus(`OpenAI ${target.name}: ${event.error?.message || 'unknown error'}`);
+                // GPT-Live ends a session itself at its time limit, or when a safety filter
+                // stops it. Anything but our own close is reconnected, like a dropped connection.
+                if (event.type === 'session.closed') {
+                    if (event.reason !== 'close_requested' && isCurrent()) {
+                        context.onStatus(`OpenAI ${target.name} session ended (${event.reason || 'unknown'}). Reconnecting…`);
+                        this.scheduleReconnect(target.id);
+                    }
+                    return;
                 }
+                if (event.type === 'error') context.onStatus(`OpenAI ${target.name}: ${event.error?.message || 'unknown error'}`);
             } catch (error) { console.error('Invalid OpenAI realtime event:', error); }
         };
 
@@ -524,14 +408,10 @@ class RealtimeTranslationService {
             await peer.setLocalDescription(offer);
             const deadline = window.setTimeout(() => session.abort.abort(new Error(`OpenAI ${target.name} did not answer in time.`)), SDP_TIMEOUT_MS);
             try {
-                const answer = await fetch(CALLS_URL[engine], {
-                    method: 'POST',
-                    headers: { Authorization: `Bearer ${clientSecret}`, 'Content-Type': 'application/sdp' },
-                    body: offer.sdp,
-                    signal: session.abort.signal,
-                });
-                if (!answer.ok) throw new Error(`OpenAI ${target.name} session failed: ${await answer.text()}`);
-                const sdp = await answer.text();
+                // The app's server starts the GPT-Live session with this offer and the API key.
+                const { sdp } = await settingsService.createLiveSession(context.sourceLanguage.code, target.code, offer.sdp || '', session.abort.signal);
+                // Ends the session on OpenAI's side too when this connection is closed.
+                session.cleanup.push(() => send({ type: 'session.close' }));
                 if (!isCurrent()) throw new Error(tr('voice_stopped'));
                 await peer.setRemoteDescription({ type: 'answer', sdp });
             } finally {
@@ -573,26 +453,6 @@ class RealtimeTranslationService {
         this.reconnectTimers.set(targetId, timer);
     }
 
-    /**
-     * Swaps a Steady voice connection for a fresh one before OpenAI's session limit ends it.
-     * Listeners hear silence for the second or two this takes, at a quiet moment.
-     */
-    private async renewTarget(targetId: string) {
-        const target = this.targets.get(targetId);
-        const context = this.context;
-        const current = this.sessions.get(targetId);
-        if (this.stopping || this.pausedForSilence || !target || !context || !current) return;
-        await voiceService.replaceTrack(targetId, this.silentTrack()).catch(() => false);
-        this.closeSession(current);
-        if (this.sessions.get(targetId) === current) this.sessions.delete(targetId);
-        try {
-            await this.startTarget(target);
-        } catch (error) {
-            context.onStatus(`OpenAI ${target.name} reconnect failed: ${error instanceof Error ? error.message : String(error)}`);
-            this.scheduleReconnect(targetId);
-        }
-    }
-
     private async reconnectTarget(targetId: string) {
         const target = this.targets.get(targetId);
         const context = this.context;
@@ -621,6 +481,23 @@ class RealtimeTranslationService {
         } catch (error) {
             context.onStatus(`OpenAI ${target.name} reconnect failed: ${error instanceof Error ? error.message : String(error)}`);
             this.scheduleReconnect(targetId);
+        }
+    }
+
+    /**
+     * Checks that a GPT-Live session starts with the saved settings (key, voice,
+     * instructions), for the Test button in Admin. OpenAI bills 15 seconds for it.
+     */
+    async testLiveConnection(sourceCode: string, targetCode: string) {
+        const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+        try {
+            peer.addTransceiver('audio', { direction: 'sendrecv' });
+            peer.createDataChannel('oai-events');
+            await peer.setLocalDescription(await peer.createOffer());
+            const { sdp } = await settingsService.createLiveSession(sourceCode, targetCode, peer.localDescription?.sdp || '');
+            await peer.setRemoteDescription({ type: 'answer', sdp });
+        } finally {
+            peer.close();
         }
     }
 

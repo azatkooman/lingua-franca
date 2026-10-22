@@ -2,7 +2,6 @@ import * as mediasoupClient from 'mediasoup-client';
 import { realtimeSocket } from './realtimeSocket';
 import { translateNow as tr, type TranslationKey } from './i18n';
 import { raiseAlert } from './alerts';
-import type { AiEngine } from './SettingsService';
 
 export const SYSTEM_AUDIO_DEVICE_ID = '__lingua_franca_system_audio__';
 type StatusCallback = (status: string) => void;
@@ -60,7 +59,7 @@ export class VoiceService {
     // What should be on air from this device, kept apart from the current producers and
     // transports: those are rebuilt after a dropped link, and a failed rebuild must not forget
     // the broadcast it was rebuilding.
-    private intended = new Map<string, { track: MediaStreamTrack; mode: 'human' | 'ai'; role?: BroadcastRole; engine?: AiEngine }>();
+    private intended = new Map<string, { track: MediaStreamTrack; mode: 'human' | 'ai'; role?: BroadcastRole }>();
     private recordOnlyIntent: { channelId: string; track: MediaStreamTrack } | null = null;
     // Human mode can also put the speaker's own voice on its channel, from a second input.
     // The interpreter's mute button leaves that channel playing.
@@ -372,19 +371,17 @@ export class VoiceService {
         onStatus: StatusCallback = () => undefined,
         onConnectionsChange: (count: number) => void = () => undefined,
         role?: BroadcastRole,
-        // Which OpenAI model makes an AI channel's audio; the server bills Steady voice by the token.
-        engine?: AiEngine,
     ) {
         const generation = this.broadcastGeneration;
         await this.loadDevice();
         this.onConnectionsChange = onConnectionsChange;
         this.onPublishStatus = onStatus;
         onStatus(tr('voice_connecting'));
-        this.intended.set(channelId, { track, mode, role, engine });
+        this.intended.set(channelId, { track, mode, role });
         // Abandoned when the broadcast was stopped meanwhile, or this channel was handed a
         // newer track (an OpenAI reconnect) by a later call.
         const superseded = () => generation !== this.broadcastGeneration || this.intended.get(channelId)?.track !== track;
-        const transport = await this.openSendTransport({ channelId, mode, role, engine });
+        const transport = await this.openSendTransport({ channelId, mode, role });
         if (superseded()) { this.closeTransport(transport); throw new Error(tr('voice_stopped')); }
         this.sendTransports.set(channelId, transport);
         let producer: mediasoupClient.types.Producer;
@@ -454,14 +451,14 @@ export class VoiceService {
                     catch (error) { failed = true; console.warn('Could not resume recording the original:', error); }
                 }
             }
-            for (const [channelId, { track, mode, role, engine }] of [...this.intended]) {
+            for (const [channelId, { track, mode, role }] of [...this.intended]) {
                 if (generation !== this.broadcastGeneration) return;
                 this.dropChannel(channelId);
                 // An AI leg that is mid-reconnect has no live track yet; it publishes on its own
                 // once the new OpenAI connection delivers audio.
                 if (track.readyState !== 'live') continue;
                 try {
-                    await this.publishTrack(channelId, track, mode, this.onPublishStatus, this.onConnectionsChange, role, engine);
+                    await this.publishTrack(channelId, track, mode, this.onPublishStatus, this.onConnectionsChange, role);
                 } catch (error) {
                     if (generation !== this.broadcastGeneration) return;
                     failed = true;
@@ -577,11 +574,6 @@ export class VoiceService {
     /** Tells the server these AI channels stopped (or restarted) running up OpenAI time. */
     setAiPaused(channelIds: string[], paused: boolean) {
         realtimeSocket.emit('setAiPaused', { channelIds, paused }, () => undefined);
-    }
-
-    /** OpenAI's usage report for one Steady voice sentence, for the dashboard's cost. */
-    reportAiUsage(channelId: string, report: { usage?: unknown; transcribedSeconds?: number }) {
-        realtimeSocket.emit('aiUsage', { channelId, ...report }, () => undefined);
     }
 
     sendTranslationText(channelId: string, segment: { segmentId: string; text: string; originalText: string; final: boolean }) {

@@ -1,15 +1,13 @@
 import { useRef, useState } from 'react';
 import { FileText, Save, Sparkles, Trash2 } from 'lucide-react';
-import { AI_VOICES, LIVE_VOICES, MAX_AI_INSTRUCTIONS, MAX_AI_NOTES, settingsService, type AdminSettings, type AiEngine } from '../lib/SettingsService';
+import { AI_VOICES, LIVE_VOICES, MAX_AI_INSTRUCTIONS, MAX_AI_NOTES, settingsService, type AdminSettings } from '../lib/SettingsService';
 import { useTranslation } from '../lib/i18n';
 
-const ENGINE_LABEL = { translate: 'ai_engine_translate', live: 'ai_engine_live', steady: 'ai_engine_steady' } as const;
-const ENGINE_HINT = { translate: 'ai_engine_translate_hint', live: 'ai_engine_live_hint', steady: 'ai_engine_steady_hint' } as const;
 const capitalise = (voice: string) => voice[0].toUpperCase() + voice.slice(1);
 
 /**
- * How AI translation sounds: the fast interpreting model, Live voice (GPT-Live, the ChatGPT
- * app's voice) or Steady voice, plus the instructions and service notes the last two read.
+ * The AI translator (GPT-Live): its voice, plus the instructions and service notes it reads
+ * to get names, terms and Bible references right.
  */
 export default function AiStyleCard({ settings }: { settings: AdminSettings }) {
     const { t } = useTranslation();
@@ -22,10 +20,6 @@ export default function AiStyleCard({ settings }: { settings: AdminSettings }) {
 
     const instructions = instructionsDraft ?? settings.aiInstructions;
     const notes = notesDraft ?? settings.aiNotes;
-    const steady = settings.aiEngine === 'steady';
-    const live = settings.aiEngine === 'live';
-    // A GPT-Live voice kept from Live voice is not one Steady voice has; it uses marin then.
-    const voice = steady && !(AI_VOICES as readonly string[]).includes(settings.aiVoice) ? 'marin' : settings.aiVoice;
 
     const run = async (action: () => Promise<unknown>, success: string) => {
         setBusy(true); setMessage('');
@@ -33,8 +27,6 @@ export default function AiStyleCard({ settings }: { settings: AdminSettings }) {
         catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
         finally { setBusy(false); }
     };
-
-    const chooseEngine = (aiEngine: AiEngine) => void run(() => settingsService.setAiStyle({ aiEngine }), t('ai_style_saved'));
 
     const loadFile = (file: File | undefined) => {
         if (!file) return;
@@ -56,46 +48,19 @@ export default function AiStyleCard({ settings }: { settings: AdminSettings }) {
     return (
         <div className="card fade-in">
             <div className="card-header"><Sparkles size={20} /><h3>{t('ai_style_title')}</h3></div>
+            <p className="text-muted">{t('ai_style_hint')}</p>
             {message && <p className="text-muted" role="status">{message}</p>}
 
-            <div className="ai-engine-options" role="radiogroup" aria-label={t('ai_style_title')}>
-                {(['translate', 'live', 'steady'] as const).map((engine) => (
-                    <label key={engine} className={`ai-engine-option ${settings.aiEngine === engine ? 'selected' : ''}`}>
-                        <input type="radio" name="ai-engine" checked={settings.aiEngine === engine} disabled={busy} onChange={() => chooseEngine(engine)} />
-                        <span>
-                            <strong>{t(ENGINE_LABEL[engine])}</strong>
-                            <small className="text-muted">{t(ENGINE_HINT[engine])}</small>
-                        </span>
-                    </label>
+            <label htmlFor="ai-voice">{t('ai_voice_label')}</label>
+            <select id="ai-voice" className="custom-select" value={settings.aiVoice} disabled={busy}
+                onChange={(event) => void run(() => settingsService.setAiStyle({ aiVoice: event.target.value }), t('ai_style_saved'))}>
+                {AI_VOICES.map((name, index) => (
+                    <option key={name} value={name}>{capitalise(name)}{index < 2 ? ` (${t('ai_voice_recommended')})` : ''}</option>
                 ))}
-            </div>
-            <p className="text-muted">{t('ai_engine_applies')}</p>
-
-            {(steady || live) && (
-                <div className="ai-steady-options">
-                    <div>
-                        <label>{t('ai_voice_label')}</label>
-                        <select className="custom-select" value={voice} disabled={busy}
-                            onChange={(event) => void run(() => settingsService.setAiStyle({ aiVoice: event.target.value }), t('ai_style_saved'))}>
-                            {AI_VOICES.map((name, index) => (
-                                <option key={name} value={name}>{capitalise(name)}{index < 2 ? ` (${t('ai_voice_recommended')})` : ''}</option>
-                            ))}
-                            {live && Object.entries(LIVE_VOICES).map(([name, accent]) => (
-                                <option key={name} value={name}>{capitalise(name)} ({accent})</option>
-                            ))}
-                        </select>
-                    </div>
-                    {steady && <div>
-                        <label>{t('ai_pace_label')}</label>
-                        <select className="custom-select" value={settings.aiPace} disabled={busy}
-                            onChange={(event) => void run(() => settingsService.setAiStyle({ aiPace: event.target.value as AdminSettings['aiPace'] }), t('ai_style_saved'))}>
-                            <option value="faster">{t('ai_pace_faster')}</option>
-                            <option value="balanced">{t('ai_pace_balanced')}</option>
-                            <option value="smoother">{t('ai_pace_smoother')}</option>
-                        </select>
-                    </div>}
-                </div>
-            )}
+                {Object.entries(LIVE_VOICES).map(([name, accent]) => (
+                    <option key={name} value={name}>{capitalise(name)} ({accent})</option>
+                ))}
+            </select>
 
             <label className="mt-4" htmlFor="ai-instructions">{t('ai_instructions_label')}</label>
             <textarea id="ai-instructions" className="custom-input" rows={4} maxLength={MAX_AI_INSTRUCTIONS}

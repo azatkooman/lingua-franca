@@ -32,7 +32,7 @@ globalThis.fetch = async (url, init = {}) => {
     openaiCalls.push({ url: String(url), body: init.body ? JSON.parse(init.body) : null });
     const reply = String(url).endsWith('/v1/live/sessions')
         ? { status: 201, body: { session: { id: 'live_smoke' }, transport: { type: 'webrtc', sdp: 'v=0 answer' } } }
-        : { status: 200, body: { value: 'ek_smoke', expires_at: 0 } };
+        : { status: 200, body: { id: 'gpt-live-1', object: 'model' } };
     return new Response(JSON.stringify(reply.body), { status: reply.status, headers: { 'Content-Type': 'application/json' } });
 };
 
@@ -582,43 +582,22 @@ async function run() {
         return 'rounded; invalid becomes off';
     });
 
-    await check('the AI translation style is stored, and notes are cut to the limit', async () => {
+    await check('the translator voice and notes are stored, and notes are cut to the limit', async () => {
         const patch = async (body) => (await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify(body) })).body;
-        const saved = await patch({ aiEngine: 'steady', aiVoice: 'cedar', aiPace: 'smoother', aiInstructions: 'Say "Lord".', aiNotes: `Pastor Ivanov\r\n${'x'.repeat(25_000)}` });
-        assert.deepEqual([saved.aiEngine, saved.aiVoice, saved.aiPace, saved.aiInstructions], ['steady', 'cedar', 'smoother', 'Say "Lord".']);
+        const saved = await patch({ aiVoice: 'gleam', aiInstructions: 'Say "Lord".', aiNotes: `Pastor Ivanov\r\n${'x'.repeat(25_000)}` });
+        assert.deepEqual([saved.aiVoice, saved.aiInstructions], ['gleam', 'Say "Lord".']);
         assert.equal(saved.aiNotes.length, 20_000);
         assert.ok(saved.aiNotes.startsWith('Pastor Ivanov\n'));
-        const odd = await patch({ aiEngine: 'other', aiVoice: 'robot', aiPace: 'warp' });
-        assert.deepEqual([odd.aiEngine, odd.aiVoice, odd.aiPace], ['translate', 'marin', 'balanced']);
-        assert.equal((await patch({ aiEngine: 'steady', aiNotes: 'Slide 1: John 3:16' })).aiNotes, 'Slide 1: John 3:16');
+        assert.equal((await patch({ aiVoice: 'robot' })).aiVoice, 'marin');
+        assert.equal((await patch({ aiNotes: 'Slide 1: John 3:16' })).aiNotes, 'Slide 1: John 3:16');
         return 'stored, normalised, 20,000 characters at most';
     });
 
-    await check('Steady voice asks OpenAI for an interpreter with the notes; Fast keeps the translation model', async () => {
-        const session = (engine) => json('/api/realtime/session', {
-            method: 'POST', headers: authed(token), body: JSON.stringify({ sourceLanguage: 'ru', targetLanguage: 'en', engine }),
-        });
-        assert.equal((await session('steady')).status, 409, 'no key yet');
+    await check('AI translation starts GPT-Live through this server, with the notes', async () => {
+        const live = (body, headers = authed(token)) => json('/api/realtime/live', { method: 'POST', headers, body: JSON.stringify(body) });
+        assert.equal((await live({ sourceLanguage: 'ru', targetLanguage: 'en', sdp: 'v=0 offer' })).status, 409, 'no key yet');
         assert.equal((await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ openaiApiKey: 'sk-smoke' }) })).status, 200);
         try {
-            const steady = await session('steady');
-            assert.deepEqual([steady.status, steady.body.engine, steady.body.value], [200, 'steady', 'ek_smoke']);
-            const asked = openaiCalls.at(-1);
-            assert.equal(asked.url, 'https://api.openai.com/v1/realtime/client_secrets');
-            const config = asked.body.session;
-            assert.equal(config.audio.output.voice, 'marin', 'the voice saved last');
-            assert.equal(config.audio.input.turn_detection.create_response, false);
-            assert.equal(config.audio.input.turn_detection.eagerness, 'medium');
-            assert.match(config.instructions, /in Russian\. Say everything they say in English/);
-            assert.match(config.instructions, /Slide 1: John 3:16/);
-            const fast = await session('translate');
-            assert.deepEqual([fast.status, fast.body.engine], [200, 'translate']);
-            assert.equal(openaiCalls.at(-1).url, 'https://api.openai.com/v1/realtime/translations/client_secrets');
-            assert.equal(openaiCalls.at(-1).body.session.model, 'gpt-realtime-translate');
-            assert.equal('instructions' in openaiCalls.at(-1).body.session, false);
-            assert.equal((await session('live')).status, 400, 'Live voice has its own route');
-            // Live voice: the screen's WebRTC offer goes through this server to OpenAI.
-            const live = (body) => json('/api/realtime/live', { method: 'POST', headers: authed(token), body: JSON.stringify(body) });
             assert.equal((await live({ sourceLanguage: 'ru', targetLanguage: 'en' })).status, 400, 'an offer is required');
             const answered = await live({ sourceLanguage: 'ru', targetLanguage: 'en', sdp: 'v=0 offer' });
             assert.deepEqual([answered.status, answered.body.sdp, answered.body.sessionId], [200, 'v=0 answer', 'live_smoke']);
@@ -626,13 +605,20 @@ async function run() {
             assert.equal(sent.url, 'https://api.openai.com/v1/live/sessions');
             assert.deepEqual(sent.body.transport, { type: 'webrtc', sdp: 'v=0 offer' });
             assert.equal(sent.body.session.model, 'gpt-live-1');
+            assert.equal(sent.body.session.audio.output.voice, 'marin', 'the voice saved last');
             assert.match(sent.body.session.instructions, /^ENGLISH ONLY\./);
+            assert.match(sent.body.session.instructions, /Translate the speaker's Russian speech into English/);
             assert.match(sent.body.session.instructions, /Slide 1: John 3:16/);
-            assert.equal((await fetch(`${BASE}/api/realtime/live`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"sdp":"v=0"}' })).status, 401);
+            assert.equal((await live({ sdp: 'v=0' }, { 'Content-Type': 'application/json' })).status, 401);
+            assert.equal((await json('/api/realtime/session', { method: 'POST', headers: authed(token), body: '{}' })).status, 404, 'the old models are gone');
+            // The pre-service check looks the model up rather than opening a session.
+            const { body: preflight } = await json('/api/admin/preflight', { headers: authed(token) });
+            assert.equal(preflight.checks.find((entry) => entry.id === 'openai').status, 'ok');
+            assert.equal(openaiCalls.at(-1).url, 'https://api.openai.com/v1/models/gpt-live-1');
         } finally {
             await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ clearOpenaiApiKey: true }) });
         }
-        return 'client_secrets with instructions; translations/client_secrets without; live/sessions with the offer';
+        return 'live/sessions with the offer, voice and notes';
     });
 
     await check('slides and Word files become notes, for the operator only', async () => {
@@ -654,7 +640,7 @@ async function run() {
         return 'pptx read; pdf explained; 401 without a session; 403 on the listener port';
     });
 
-    await check('Live voice time is costed at its own per-minute rate', async () => {
+    await check('AI time is costed by the minute, and not while paused for silence', async () => {
         if (!sfuReady) return 'skipped (no media worker)';
         const { body: settings } = await json('/api/settings');
         const channel = settings.languages[1].id;
@@ -663,14 +649,13 @@ async function run() {
         const live = async () => (await json('/api/admin/live', { headers: authed(token) })).body;
         const before = (await live()).aiCostUsd;
         assert.ok((await ask(operator, 'produce', {
-            transportId: transport.id, kind: 'audio', rtpParameters: opusRtp(4848), appData: { channelId: channel, mode: 'ai', role: 'translation', engine: 'live' },
+            transportId: transport.id, kind: 'audio', rtpParameters: opusRtp(4848), appData: { channelId: channel, mode: 'ai', role: 'translation' },
         })).id);
         try {
             // Long enough to show in the cost, which is rounded to a tenth of a cent.
             await sleep(2500);
-            const row = (await live()).channels.find((entry) => entry.id === channel);
-            assert.deepEqual([row.steady, row.aiPaused], [false, false]);
-            // Silence pause stops the clock, as for Fast translation.
+            assert.equal((await live()).channels.find((entry) => entry.id === channel).aiPaused, false);
+            // The silence pause stops the clock.
             assert.equal((await ask(operator, 'setAiPaused', { channelIds: [channel], paused: true })).ok, true);
             assert.equal((await live()).channels.find((entry) => entry.id === channel).aiPaused, true);
             const paused = (await live()).aiCostUsd;
@@ -682,38 +667,6 @@ async function run() {
             await ask(operator, 'closeProducer', { channelId: channel });
         }
         return 'per-minute rate; paused time not counted';
-    });
-
-    await check('Steady voice cost comes from its usage reports, only from its own broadcaster', async () => {
-        if (!sfuReady) return 'skipped (no media worker)';
-        const { body: settings } = await json('/api/settings');
-        const channel = settings.languages[1].id;
-        const operator = await connect(token);
-        const transport = await ask(operator, 'createWebRtcTransport', { type: 'producer' });
-        const produced = await ask(operator, 'produce', {
-            transportId: transport.id, kind: 'audio', rtpParameters: opusRtp(4747), appData: { channelId: channel, mode: 'ai', role: 'translation', engine: 'steady' },
-        });
-        assert.ok(produced.id, produced.error);
-        const live = async () => (await json('/api/admin/live', { headers: authed(token) })).body;
-        try {
-            const before = await live();
-            const row = before.channels.find((entry) => entry.id === channel);
-            assert.deepEqual([row.steady, row.aiPaused], [true, false]);
-            const usage = { input_token_details: { audio_tokens: 1000, text_tokens: 0 }, output_token_details: { audio_tokens: 1000, text_tokens: 0 } };
-            assert.equal((await ask(operator, 'aiUsage', { channelId: channel, usage })).ok, true);
-            assert.equal((await ask(operator, 'aiUsage', { channelId: channel, transcribedSeconds: 60 })).ok, true);
-            const phone = await connect('', LISTENER_BASE);
-            assert.ok((await ask(phone, 'aiUsage', { channelId: channel, usage })).error, 'a phone cannot report usage');
-            phone.close();
-            const after = await live();
-            // 1000 audio tokens in ($0.032) and out ($0.064), plus a minute transcribed ($0.017).
-            assert.ok(Math.abs(after.aiCostUsd - before.aiCostUsd - 0.113) < 0.002, `cost rose by ${after.aiCostUsd - before.aiCostUsd}`);
-            assert.equal((await ask(operator, 'setAiPaused', { channelIds: [channel], paused: true })).ok, true);
-            assert.equal((await live()).channels.find((entry) => entry.id === channel).aiPaused, false, 'never shown as paused');
-        } finally {
-            await ask(operator, 'closeProducer', { channelId: channel });
-        }
-        return 'priced from tokens; phones ignored';
     });
 
     await check('a test tone is never recorded', async () => {

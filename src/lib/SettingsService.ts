@@ -45,11 +45,9 @@ const publicPart = (settings: AppSettings): AppSettings => ({
     contact: settings.contact,
 });
 
-/** Operator-only configuration, fetched separately once an admin session exists. */
-export type AiEngine = 'translate' | 'live' | 'steady';
-/** OpenAI's voices for Steady and Live voice; it recommends the first two. */
+/** OpenAI's standard voices for AI translation; it recommends the first two. */
 export const AI_VOICES = ['marin', 'cedar', 'alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse'] as const;
-/** GPT-Live's extra English voices, with their accent, offered for Live voice only. */
+/** GPT-Live's extra English voices, with their accent. */
 export const LIVE_VOICES: Record<string, string> = {
     gleam: 'North American', meridian: 'North American', vesper: 'British', willow: 'Irish', stone: 'Irish',
     quartz: 'Australian', ripple: 'Australian', delta: 'Southern U.S.', cinder: 'Southern U.S.', beacon: 'Filipino',
@@ -58,6 +56,7 @@ export const LIVE_VOICES: Record<string, string> = {
 export const MAX_AI_INSTRUCTIONS = 4000;
 export const MAX_AI_NOTES = 20_000;
 
+/** Operator-only configuration, fetched separately once an admin session exists. */
 export interface AdminSettings extends AppSettings {
     openaiConfigured: boolean;
     preferredAddress: string;
@@ -70,13 +69,11 @@ export interface AdminSettings extends AppSettings {
     aiBudgetUsd: number;
     /** Minutes without speech before the OpenAI legs close; 0 = never. */
     aiSilencePauseMinutes: number;
-    /** 'translate': the interpreting model (fastest). 'live': GPT-Live, the ChatGPT app's voice. 'steady': the conversational model. Live and Steady keep one voice and read the notes. */
-    aiEngine: AiEngine;
+    /** The one voice GPT-Live translates in, for the whole service. */
     aiVoice: string;
-    aiPace: 'faster' | 'balanced' | 'smoother';
-    /** Steady voice only: names, terms and style. */
+    /** Names, terms and style for the translator. */
     aiInstructions: string;
-    /** Steady voice only: the sermon outline, slide text or other notes for this service. */
+    /** The sermon outline, slide text or other notes for this service. */
     aiNotes: string;
     /** The operator PIN is still the factory 1234; Admin asks for a new one before anything else. */
     pinIsDefault?: boolean;
@@ -108,15 +105,13 @@ export interface LiveChannel {
     accessEndsAt: number | null;
     /** An AI channel whose OpenAI connection is closed for silence. */
     aiPaused: boolean;
-    /** An AI channel translated by Steady voice. */
-    steady: boolean;
 }
 
 export interface LiveStatus {
     channels: LiveChannel[];
     totalListeners: number;
     aiSeconds: number;
-    /** Both engines together: per-minute time plus Steady voice's reported usage. */
+    /** AI time so far, priced by the minute. */
     aiCostUsd: number;
     aiPricePerMinute: number;
     budgetUsd: number;
@@ -434,11 +429,11 @@ class SettingsService {
 
     async setAiBudget(aiBudgetUsd: number) { await this.patchAdminSettings({ aiBudgetUsd }); }
     async setSilencePause(aiSilencePauseMinutes: number) { await this.patchAdminSettings({ aiSilencePauseMinutes }); }
-    async setAiStyle(style: Partial<Pick<AdminSettings, 'aiEngine' | 'aiVoice' | 'aiPace' | 'aiInstructions' | 'aiNotes'>>) {
+    async setAiStyle(style: Partial<Pick<AdminSettings, 'aiVoice' | 'aiInstructions' | 'aiNotes'>>) {
         await this.patchAdminSettings(style);
     }
 
-    /** Starts a Live voice (GPT-Live) session from this screen's WebRTC offer; returns OpenAI's answer. */
+    /** Starts a GPT-Live session from this screen's WebRTC offer; returns OpenAI's answer. */
     async createLiveSession(sourceLanguage: string, targetLanguage: string, sdp: string, signal?: AbortSignal) {
         const response = await this.adminRequest('/api/realtime/live', {
             method: 'POST', body: JSON.stringify({ sourceLanguage, targetLanguage, sdp }), signal,
@@ -446,7 +441,7 @@ class SettingsService {
         return response.json() as Promise<{ sdp: string; sessionId: string }>;
     }
 
-    /** The text of a slide deck, Word document or text file, for the Steady voice notes. */
+    /** The text of a slide deck, Word document or text file, for the translator's notes. */
     async extractNotes(file: File) {
         const response = await this.adminRequest(`/api/admin/ai-notes/extract?name=${encodeURIComponent(file.name)}`, {
             method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file,
@@ -496,13 +491,6 @@ class SettingsService {
             method: 'POST', body: JSON.stringify({ domain, token, email }),
         });
         return response.json() as Promise<{ ok: boolean; publicHost: string }>;
-    }
-
-    async createRealtimeSession(sourceLanguage: string, targetLanguage: string, engine: AiEngine = 'translate') {
-        const response = await this.adminRequest('/api/realtime/session', {
-            method: 'POST', body: JSON.stringify({ sourceLanguage, targetLanguage, engine }),
-        });
-        return response.json() as Promise<{ value: string; engine: AiEngine }>;
     }
 
     /** Relaunches the desktop app. Every broadcast stops until it is back. */

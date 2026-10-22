@@ -10,6 +10,7 @@ import { fetchAdminHealth, listenerUrl, readPhoneLink, savePhoneLink, usesPlainL
 import LiveDashboard from '../components/LiveDashboard';
 import PreflightCard from '../components/PreflightCard';
 import AiStyleCard from '../components/AiStyleCard';
+import { realtimeTranslationService } from '../lib/RealtimeTranslationService';
 import RecordingsCard from '../components/RecordingsCard';
 import './Admin.css';
 
@@ -409,7 +410,11 @@ export default function Admin() {
                 <button className="btn-primary mt-4" disabled={!openaiKey || busy} onClick={() => void run(async () => { await settingsService.setOpenAiApiKey(openaiKey); setOpenaiKey(''); }, t('openai_key_saved'))}>{t('save_openai_key')}</button>
                 {settings.openaiConfigured && (
                     <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-                        <button className="btn-secondary mt-4" disabled={busy} onClick={() => void run(async () => { await settingsService.createRealtimeSession('ru', 'en', settings.aiEngine); }, t('openai_test_passed'))}>{t('test_openai')}</button>
+                        <button className="btn-secondary mt-4" disabled={busy} onClick={() => void run(async () => {
+                            // Each style is checked with its own model and the saved voice and notes.
+                            if (settings.aiEngine === 'live') await realtimeTranslationService.testLiveConnection('ru', 'en');
+                            else await settingsService.createRealtimeSession('ru', 'en', settings.aiEngine);
+                        }, t('openai_test_passed'))}>{t('test_openai')}</button>
                         <button className="btn-secondary mt-4" disabled={busy} onClick={() => void run(() => settingsService.clearOpenAiApiKey(), t('openai_key_removed'))}><Trash2 size={18} /> {t('remove_openai_key')}</button>
                     </div>
                 )}

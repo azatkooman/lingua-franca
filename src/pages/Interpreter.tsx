@@ -382,9 +382,10 @@ export default function Interpreter() {
                         <select className="custom-select" value={admin?.aiEngine ?? 'translate'} disabled={isLive || !admin}
                             onChange={(event) => void settingsService.setAiStyle({ aiEngine: event.target.value as AiEngine }).catch((error: unknown) => setStatus(error instanceof Error ? error.message : String(error)))}>
                             <option value="translate">{t('ai_engine_translate')}</option>
+                            <option value="live">{t('ai_engine_live')}</option>
                             <option value="steady">{t('ai_engine_steady')}</option>
                         </select>
-                        <p className="text-muted">{t(admin?.aiEngine === 'steady' ? 'ai_engine_steady_hint' : 'ai_engine_translate_hint')}</p>
+                        <p className="text-muted">{t(admin?.aiEngine === 'steady' ? 'ai_engine_steady_hint' : admin?.aiEngine === 'live' ? 'ai_engine_live_hint' : 'ai_engine_translate_hint')}</p>
                         <label>{t('source_lang')}</label>
                         <select className="custom-select" value={sourceChannelId} disabled={isLive} onChange={(event) => setSourceChannelId(event.target.value)}>
                             {languages.map((language) => <option key={language.id} value={language.id}>{language.name}</option>)}

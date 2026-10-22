@@ -1,11 +1,15 @@
 import { useRef, useState } from 'react';
 import { FileText, Save, Sparkles, Trash2 } from 'lucide-react';
-import { AI_VOICES, MAX_AI_INSTRUCTIONS, MAX_AI_NOTES, settingsService, type AdminSettings, type AiEngine } from '../lib/SettingsService';
+import { AI_VOICES, LIVE_VOICES, MAX_AI_INSTRUCTIONS, MAX_AI_NOTES, settingsService, type AdminSettings, type AiEngine } from '../lib/SettingsService';
 import { useTranslation } from '../lib/i18n';
 
+const ENGINE_LABEL = { translate: 'ai_engine_translate', live: 'ai_engine_live', steady: 'ai_engine_steady' } as const;
+const ENGINE_HINT = { translate: 'ai_engine_translate_hint', live: 'ai_engine_live_hint', steady: 'ai_engine_steady_hint' } as const;
+const capitalise = (voice: string) => voice[0].toUpperCase() + voice.slice(1);
+
 /**
- * How AI translation sounds: the fast interpreting model, or Steady voice (the conversational
- * model with one fixed voice), plus the instructions and service notes Steady voice reads.
+ * How AI translation sounds: the fast interpreting model, Live voice (GPT-Live, the ChatGPT
+ * app's voice) or Steady voice, plus the instructions and service notes the last two read.
  */
 export default function AiStyleCard({ settings }: { settings: AdminSettings }) {
     const { t } = useTranslation();
@@ -19,6 +23,9 @@ export default function AiStyleCard({ settings }: { settings: AdminSettings }) {
     const instructions = instructionsDraft ?? settings.aiInstructions;
     const notes = notesDraft ?? settings.aiNotes;
     const steady = settings.aiEngine === 'steady';
+    const live = settings.aiEngine === 'live';
+    // A GPT-Live voice kept from Live voice is not one Steady voice has; it uses marin then.
+    const voice = steady && !(AI_VOICES as readonly string[]).includes(settings.aiVoice) ? 'marin' : settings.aiVoice;
 
     const run = async (action: () => Promise<unknown>, success: string) => {
         setBusy(true); setMessage('');
@@ -52,30 +59,33 @@ export default function AiStyleCard({ settings }: { settings: AdminSettings }) {
             {message && <p className="text-muted" role="status">{message}</p>}
 
             <div className="ai-engine-options" role="radiogroup" aria-label={t('ai_style_title')}>
-                {(['translate', 'steady'] as const).map((engine) => (
+                {(['translate', 'live', 'steady'] as const).map((engine) => (
                     <label key={engine} className={`ai-engine-option ${settings.aiEngine === engine ? 'selected' : ''}`}>
                         <input type="radio" name="ai-engine" checked={settings.aiEngine === engine} disabled={busy} onChange={() => chooseEngine(engine)} />
                         <span>
-                            <strong>{t(engine === 'steady' ? 'ai_engine_steady' : 'ai_engine_translate')}</strong>
-                            <small className="text-muted">{t(engine === 'steady' ? 'ai_engine_steady_hint' : 'ai_engine_translate_hint')}</small>
+                            <strong>{t(ENGINE_LABEL[engine])}</strong>
+                            <small className="text-muted">{t(ENGINE_HINT[engine])}</small>
                         </span>
                     </label>
                 ))}
             </div>
             <p className="text-muted">{t('ai_engine_applies')}</p>
 
-            {steady && (
+            {(steady || live) && (
                 <div className="ai-steady-options">
                     <div>
                         <label>{t('ai_voice_label')}</label>
-                        <select className="custom-select" value={settings.aiVoice} disabled={busy}
+                        <select className="custom-select" value={voice} disabled={busy}
                             onChange={(event) => void run(() => settingsService.setAiStyle({ aiVoice: event.target.value }), t('ai_style_saved'))}>
-                            {AI_VOICES.map((voice, index) => (
-                                <option key={voice} value={voice}>{voice[0].toUpperCase() + voice.slice(1)}{index < 2 ? ` (${t('ai_voice_recommended')})` : ''}</option>
+                            {AI_VOICES.map((name, index) => (
+                                <option key={name} value={name}>{capitalise(name)}{index < 2 ? ` (${t('ai_voice_recommended')})` : ''}</option>
+                            ))}
+                            {live && Object.entries(LIVE_VOICES).map(([name, accent]) => (
+                                <option key={name} value={name}>{capitalise(name)} ({accent})</option>
                             ))}
                         </select>
                     </div>
-                    <div>
+                    {steady && <div>
                         <label>{t('ai_pace_label')}</label>
                         <select className="custom-select" value={settings.aiPace} disabled={busy}
                             onChange={(event) => void run(() => settingsService.setAiStyle({ aiPace: event.target.value as AdminSettings['aiPace'] }), t('ai_style_saved'))}>
@@ -83,7 +93,7 @@ export default function AiStyleCard({ settings }: { settings: AdminSettings }) {
                             <option value="balanced">{t('ai_pace_balanced')}</option>
                             <option value="smoother">{t('ai_pace_smoother')}</option>
                         </select>
-                    </div>
+                    </div>}
                 </div>
             )}
 

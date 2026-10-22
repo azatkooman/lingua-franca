@@ -46,9 +46,14 @@ const publicPart = (settings: AppSettings): AppSettings => ({
 });
 
 /** Operator-only configuration, fetched separately once an admin session exists. */
-export type AiEngine = 'translate' | 'steady';
-/** OpenAI's voices for Steady voice; it recommends the first two. */
+export type AiEngine = 'translate' | 'live' | 'steady';
+/** OpenAI's voices for Steady and Live voice; it recommends the first two. */
 export const AI_VOICES = ['marin', 'cedar', 'alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse'] as const;
+/** GPT-Live's extra English voices, with their accent, offered for Live voice only. */
+export const LIVE_VOICES: Record<string, string> = {
+    gleam: 'North American', meridian: 'North American', vesper: 'British', willow: 'Irish', stone: 'Irish',
+    quartz: 'Australian', ripple: 'Australian', delta: 'Southern U.S.', cinder: 'Southern U.S.', beacon: 'Filipino',
+};
 /** Matches the server's limits, so the screen can say when notes will be cut. */
 export const MAX_AI_INSTRUCTIONS = 4000;
 export const MAX_AI_NOTES = 20_000;
@@ -65,7 +70,7 @@ export interface AdminSettings extends AppSettings {
     aiBudgetUsd: number;
     /** Minutes without speech before the OpenAI legs close; 0 = never. */
     aiSilencePauseMinutes: number;
-    /** 'translate': the interpreting model (fastest). 'steady': the conversational model, one voice, reads the notes. */
+    /** 'translate': the interpreting model (fastest). 'live': GPT-Live, the ChatGPT app's voice. 'steady': the conversational model. Live and Steady keep one voice and read the notes. */
     aiEngine: AiEngine;
     aiVoice: string;
     aiPace: 'faster' | 'balanced' | 'smoother';
@@ -431,6 +436,14 @@ class SettingsService {
     async setSilencePause(aiSilencePauseMinutes: number) { await this.patchAdminSettings({ aiSilencePauseMinutes }); }
     async setAiStyle(style: Partial<Pick<AdminSettings, 'aiEngine' | 'aiVoice' | 'aiPace' | 'aiInstructions' | 'aiNotes'>>) {
         await this.patchAdminSettings(style);
+    }
+
+    /** Starts a Live voice (GPT-Live) session from this screen's WebRTC offer; returns OpenAI's answer. */
+    async createLiveSession(sourceLanguage: string, targetLanguage: string, sdp: string, signal?: AbortSignal) {
+        const response = await this.adminRequest('/api/realtime/live', {
+            method: 'POST', body: JSON.stringify({ sourceLanguage, targetLanguage, sdp }), signal,
+        });
+        return response.json() as Promise<{ sdp: string; sessionId: string }>;
     }
 
     /** The text of a slide deck, Word document or text file, for the Steady voice notes. */

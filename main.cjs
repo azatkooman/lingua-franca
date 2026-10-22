@@ -17,7 +17,7 @@ const {
 } = require('./lib/settings.cjs');
 const { CAPTION_IDLE_MS, TranscriptStore } = require('./lib/transcript.cjs');
 const { readSettingsFile, writeSettingsFile } = require('./lib/settings-file.cjs');
-const { TRANSCRIPTION_PER_SECOND, responseCostUsd, steadySession } = require('./lib/ai-instructions.cjs');
+const { TRANSCRIPTION_PER_SECOND, liveSession, responseCostUsd, steadySession } = require('./lib/ai-instructions.cjs');
 const { DocumentError, documentText } = require('./lib/document-text.cjs');
 const { ListenerReports } = require('./lib/listener-reports.cjs');
 const { certificateCoversHost, certificateDetails: readCertificateDetails } = require('./lib/certificates.cjs');
@@ -57,6 +57,8 @@ const SESSION_SWEEP_MS = Number(process.env.LINGUA_FRANCA_SESSION_SWEEP_MS) || 3
 // ($0.034) plus gpt-realtime-whisper ($0.017), which transcribes the original speech for its
 // captions. Only used for the rough cost shown on the operator's dashboard.
 const AI_PRICE_PER_MINUTE = 0.034 + 0.017;
+// GPT-Live (Live voice): $0.05 a minute of session time, billed per second, transcripts included.
+const LIVE_PRICE_PER_MINUTE = 0.05;
 // Captions go only to phones watching that channel, not to every connected phone.
 const CAPTION_ROOM = 'captions:';
 // Bounds what one device can hold open. A listener needs one transport (two briefly while
@@ -615,10 +617,11 @@ async function startServers(isDev) {
     // is recorded but not broadcast. Never consumable, never shown as live.
     const recordOnlyProducers = new Map();
     const peakListeners = new Map();
-    // AI time and cost since the app started or the dashboard was reset. The translation model
-    // is billed by the minute (aiSeconds); Steady voice by the token, which its broadcaster
-    // reports after each sentence (tokenUsd), so its time (steadySeconds) is only shown.
-    const usage = { aiSeconds: 0, steadySeconds: 0, tokenUsd: 0, since: Date.now() };
+    // AI time and cost since the app started or the dashboard was reset. Fast and Live voice
+    // are billed by the minute, each at its own rate (aiSeconds, timeUsd); Steady voice by the
+    // token, which its broadcaster reports after each sentence (tokenUsd), so its time
+    // (steadySeconds) is only shown.
+    const usage = { aiSeconds: 0, timeUsd: 0, steadySeconds: 0, tokenUsd: 0, since: Date.now() };
     // "I can't hear" taps from phones, per channel, for the dashboard and the operator alert.
     const listenerReports = new ListenerReports();
     // channelId -> { socketId, approved, at }: the broadcaster waiting to take a channel over
@@ -686,12 +689,21 @@ async function startServers(isDev) {
         }
         return { billed, steady };
     };
-    const aiCostUsd = (now = Date.now()) => aiTime(now).billed / 60 * AI_PRICE_PER_MINUTE + usage.tokenUsd;
+    const aiCostUsd = (now = Date.now()) => {
+        let total = usage.timeUsd + usage.tokenUsd;
+        for (const info of broadcastInfo.values()) if (!info.tokenMetered) total += billedSeconds(info, now) / 60 * info.pricePerMinute;
+        return total;
+    };
+    // Moves a broadcast's running time into the totals, as when it ends or pauses for silence.
+    const bankTime = (info) => {
+        const seconds = billedSeconds(info);
+        if (info?.tokenMetered) { usage.steadySeconds += seconds; return; }
+        usage.aiSeconds += seconds;
+        usage.timeUsd += seconds / 60 * (info?.pricePerMinute ?? AI_PRICE_PER_MINUTE);
+    };
     // Adds a finished AI broadcast's time to the running total before forgetting it.
     const endBroadcast = (channelId) => {
-        const info = broadcastInfo.get(channelId);
-        if (info?.tokenMetered) usage.steadySeconds += billedSeconds(info);
-        else usage.aiSeconds += billedSeconds(info);
+        bankTime(broadcastInfo.get(channelId));
         broadcastInfo.delete(channelId);
     };
     // Only operator sessions; a socket on the plain listener port never holds a token.
@@ -988,7 +1000,7 @@ async function startServers(isDev) {
             for (const id of ids) {
                 const info = broadcastInfo.get(id);
                 if (info?.role !== 'translation' || info.tokenMetered || !ownsChannel(id)) continue;
-                if (paused && info.billedSince) { usage.aiSeconds += billedSeconds(info); info.billedSince = null; }
+                if (paused && info.billedSince) { bankTime(info); info.billedSince = null; }
                 if (!paused && !info.billedSince) info.billedSince = Date.now();
             }
             callback({ ok: true });
@@ -1125,6 +1137,7 @@ async function startServers(isDev) {
                     role, since: Date.now(), billedSince: role === 'translation' ? Date.now() : null,
                     // Steady voice is billed by the token, reported by its broadcaster.
                     tokenMetered: role === 'translation' && appData?.engine === 'steady',
+                    pricePerMinute: appData?.engine === 'live' ? LIVE_PRICE_PER_MINUTE : AI_PRICE_PER_MINUTE,
                 });
                 startRecording(channelId, producer, role);
                 producer.on('transportclose', () => {
@@ -1540,7 +1553,7 @@ async function startServers(isDev) {
     // Starts the dashboard's listener peaks and AI time afresh, for an app left running between
     // events. Before, both only reset when the app restarted, so they added up across services.
     expressApp.post('/api/admin/live/reset', requireAdmin, (_request, response) => {
-        Object.assign(usage, { aiSeconds: 0, steadySeconds: 0, tokenUsd: 0, since: Date.now() });
+        Object.assign(usage, { aiSeconds: 0, timeUsd: 0, steadySeconds: 0, tokenUsd: 0, since: Date.now() });
         budgetAlerted = 0;
         listenerReports.clear();
         peakListeners.clear();
@@ -1649,6 +1662,7 @@ async function startServers(isDev) {
         const apiKey = revealSecret(settings.openaiApiKeyEncrypted);
         if (!apiKey) return response.status(409).json({ error: 'Add an OpenAI API key in Admin settings first.' });
         const engine = normalizeAiEngine(request.body?.engine);
+        if (engine === 'live') return response.status(400).json({ error: 'Live voice connects through /api/realtime/live.' });
         const sourceCode = String(request.body?.sourceLanguage || '').slice(0, 16);
         const targetCode = String(request.body?.targetLanguage || 'en').slice(0, 16);
         const session = engine === 'steady'
@@ -1668,6 +1682,38 @@ async function startServers(isDev) {
             });
             const body = await upstream.json().catch(() => ({}));
             response.status(upstream.status).json({ ...body, engine });
+        } catch (error) { response.status(502).json({ error: `OpenAI connection failed: ${error.message}` }); }
+    });
+
+    // Live voice (GPT-Live) is connected through this server rather than with a short-lived key:
+    // the screen sends its WebRTC offer here, the session starts with the API key, and the
+    // answer goes back. Creating a session bills its first 15 seconds up front.
+    expressApp.post('/api/realtime/live', requireAdmin, async (request, response) => {
+        const apiKey = revealSecret(settings.openaiApiKeyEncrypted);
+        if (!apiKey) return response.status(409).json({ error: 'Add an OpenAI API key in Admin settings first.' });
+        const sdp = typeof request.body?.sdp === 'string' ? request.body.sdp : '';
+        if (!sdp.trim() || sdp.length > 100_000) return response.status(400).json({ error: 'A WebRTC offer is required.' });
+        const session = liveSession({
+            sourceCode: String(request.body?.sourceLanguage || '').slice(0, 16),
+            targetCode: String(request.body?.targetLanguage || 'en').slice(0, 16),
+            voice: settings.aiVoice, instructions: settings.aiInstructions, notes: settings.aiNotes,
+        });
+        try {
+            const upstream = await fetchWithTimeout('https://api.openai.com/v1/live/sessions', {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json',
+                    'OpenAI-Safety-Identifier': crypto.createHash('sha256').update(requestToken(request)).digest('hex'),
+                },
+                body: JSON.stringify({ session, transport: { type: 'webrtc', sdp } }),
+            });
+            const body = await upstream.json().catch(() => ({}));
+            if (!upstream.ok || typeof body?.transport?.sdp !== 'string') {
+                return response.status(upstream.ok ? 502 : upstream.status).json({
+                    error: `OpenAI Live voice: ${body?.error?.message || `HTTP ${upstream.status}`}`,
+                });
+            }
+            response.json({ sdp: body.transport.sdp, sessionId: String(body.session?.id || '') });
         } catch (error) { response.status(502).json({ error: `OpenAI connection failed: ${error.message}` }); }
     });
 

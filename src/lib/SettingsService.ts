@@ -103,6 +103,11 @@ export interface LiveChannel {
     reports: number;
     /** When the phone interpreter on air loses access; null for anyone else. */
     accessEndsAt: number | null;
+    /**
+     * Sound lost on the way: averaged over the listening phones that reported in the last half
+     * minute (Wi-Fi), and for an AI channel on its internet link to OpenAI. Shares of 0 to 1.
+     */
+    quality?: { phones: number; loss: number; poor: number; link: { received: number; sent: number } | null };
     /** An AI channel whose OpenAI connection is closed for silence. */
     aiPaused: boolean;
 }

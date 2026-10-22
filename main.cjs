@@ -20,6 +20,7 @@ const { readSettingsFile, writeSettingsFile } = require('./lib/settings-file.cjs
 const { LIVE_MODEL, liveSession } = require('./lib/ai-instructions.cjs');
 const { DocumentError, documentText } = require('./lib/document-text.cjs');
 const { ListenerReports } = require('./lib/listener-reports.cjs');
+const { AudioQuality } = require('./lib/audio-quality.cjs');
 const { certificateCoversHost, certificateDetails: readCertificateDetails } = require('./lib/certificates.cjs');
 const { RecordingStore, ROLES, TranscriptLog } = require('./lib/recordings.cjs');
 const { startChannelRecording } = require('./lib/recorder.cjs');
@@ -619,6 +620,8 @@ async function startServers(isDev) {
     const usage = { aiSeconds: 0, since: Date.now() };
     // "I can't hear" taps from phones, per channel, for the dashboard and the operator alert.
     const listenerReports = new ListenerReports();
+    // Sound lost on the way to phones (Wi-Fi) and between this computer and OpenAI (internet).
+    const audioQuality = new AudioQuality();
     // channelId -> { socketId, approved, at }: the broadcaster waiting to take a channel over
     // from the interpreter on it (two interpreters taking turns).
     const handovers = new Map();
@@ -683,6 +686,7 @@ async function startServers(isDev) {
     const aiCostUsd = (now = Date.now()) => aiSpentSeconds(now) / 60 * AI_PRICE_PER_MINUTE;
     // Adds a finished AI broadcast's time to the running total before forgetting it.
     const endBroadcast = (channelId) => {
+        audioQuality.forgetLink(channelId);
         usage.aiSeconds += billedSeconds(broadcastInfo.get(channelId));
         broadcastInfo.delete(channelId);
     };
@@ -867,6 +871,7 @@ async function startServers(isDev) {
                 const listening = listenerChannels.get(socket.id);
                 if (listening?.transportId !== transport.id) return;
                 listenerChannels.delete(socket.id);
+                audioQuality.forgetPhone(socket.id);
                 emitListenerCount(listening.channelId);
             });
             const close = () => { try { transport.close(); } catch { /* already closed */ } };
@@ -930,6 +935,23 @@ async function startServers(isDev) {
             const { accepted, count } = listenerReports.record(language.id, socket.id);
             if (accepted) emitToOperators('listenerReports', { channelId: language.id, channelName: language.name, count });
             callback({ ok: true, accepted, count });
+        });
+
+        // A listening phone's share of sound lost on the Wi-Fi over the last ten seconds. Only
+        // for the channel it is actually receiving, so nobody can colour another channel's figure.
+        on('listenerQuality', ({ channelId, loss } = {}, callback) => {
+            const id = String(channelId || '').slice(0, 80);
+            if (listenerChannels.get(socket.id)?.channelId !== id) return callback?.({ ok: true, ignored: true });
+            callback?.({ ok: true, accepted: audioQuality.reportPhone(socket.id, id, loss) });
+        });
+
+        // The AI broadcaster's internet link to OpenAI for one channel: sound lost coming back
+        // with the translation, and going out with the speech.
+        on('aiLinkQuality', ({ channelId, received, sent } = {}, callback) => {
+            const id = String(channelId || '').slice(0, 80);
+            if (!socketIsAdmin()) return callback?.({ error: 'Administrator login required.' });
+            if (broadcastInfo.get(id)?.role !== 'translation' || !ownsChannel(id)) return callback?.({ ok: true, ignored: true });
+            callback?.({ ok: true, accepted: audioQuality.reportLink(id, { received, sent }) });
         });
 
         // Two interpreters taking turns: the next one asks, the one on air approves, and the
@@ -1228,6 +1250,7 @@ async function startServers(isDev) {
             listenerChannels.delete(socket.id);
             if (listening) emitListenerCount(listening.channelId);
             listenerReports.forget(socket.id);
+            audioQuality.forgetPhone(socket.id);
             // A device that asked to take a channel over and left: tell the one on air.
             for (const [channelId, pending] of [...handovers]) {
                 if (pending.socketId !== socket.id) continue;
@@ -1492,6 +1515,8 @@ async function startServers(isDev) {
                     recording: recordingChannels.has(language.id),
                     // Phones on this channel that tapped "I can't hear" in the last two minutes.
                     reports: listenerReports.count(language.id),
+                    // Sound lost on phones' Wi-Fi, and on an AI channel's internet link to OpenAI.
+                    quality: audioQuality.summary(language.id),
                     // A phone interpreter's access ends at a fixed time; the operator can extend it.
                     accessEndsAt: owner?.role === 'interpreter' ? interpreterSessions.expiresAt(owner.token) || null : null,
                     aiPaused: info?.role === 'translation' && !info.billedSince,
@@ -1718,6 +1743,7 @@ async function startServers(isDev) {
         for (const owner of producerOwners.values()) if (owner.role === 'admin') keepAdminSession(owner.token);
         endInterpreterBroadcasts();
         listenerReports.prune();
+        audioQuality.prune();
         // Warn the operator once at 80% of the AI budget and once when it is spent. Nothing is
         // stopped: cutting the translation mid-sermon would be worse than going over.
         const budgetUsd = normalizeBudget(settings.aiBudgetUsd);

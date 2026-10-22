@@ -640,6 +640,41 @@ async function run() {
         return 'pptx read; pdf explained; 401 without a session; 403 on the listener port';
     });
 
+    await check('the dashboard shows sound lost on phones and on the AI link, from the right senders only', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const { body: settings } = await json('/api/settings');
+        const channel = settings.languages[1].id;
+        const operator = await connect(token);
+        const transport = await ask(operator, 'createWebRtcTransport', { type: 'producer' });
+        assert.ok((await ask(operator, 'produce', {
+            transportId: transport.id, kind: 'audio', rtpParameters: opusRtp(4949), appData: { channelId: channel, mode: 'ai', role: 'translation' },
+        })).id);
+        const listening = await connect('', LISTENER_BASE);
+        const elsewhere = await connect('', LISTENER_BASE);
+        const quality = async () => (await json('/api/admin/live', { headers: authed(token) })).body.channels.find((entry) => entry.id === channel).quality;
+        try {
+            const capabilities = await new Promise((resolve) => listening.emit('getRouterRtpCapabilities', resolve));
+            const receive = await ask(listening, 'createWebRtcTransport', { type: 'consumer' });
+            assert.ok((await ask(listening, 'consume', { transportId: receive.id, rtpCapabilities: capabilities, channelId: channel })).id);
+            assert.deepEqual(await quality(), { phones: 0, loss: 0, poor: 0, link: null });
+            assert.equal((await ask(listening, 'listenerQuality', { channelId: channel, loss: 0.08 })).accepted, true);
+            assert.equal((await ask(elsewhere, 'listenerQuality', { channelId: channel, loss: 0.9 })).ignored, true, 'a phone not on the channel');
+            assert.equal((await ask(operator, 'aiLinkQuality', { channelId: channel, received: 0.012, sent: null })).accepted, true);
+            assert.ok((await ask(listening, 'aiLinkQuality', { channelId: channel, received: 1, sent: 1 })).error, 'a phone cannot report the AI link');
+            assert.deepEqual(await quality(), { phones: 1, loss: 0.08, poor: 1, link: { received: 0.012, sent: 0 } });
+            // A phone that stops listening stops counting.
+            assert.equal((await ask(listening, 'closeTransport', { transportId: receive.id })).ok, true);
+            await sleep(200);
+            assert.equal((await quality()).phones, 0);
+        } finally {
+            listening.close();
+            elsewhere.close();
+            await ask(operator, 'closeProducer', { channelId: channel });
+        }
+        assert.equal((await quality()).link, null, 'the AI link is forgotten when the broadcast ends');
+        return 'phones and AI link shown; strangers ignored';
+    });
+
     await check('AI time is costed by the minute, and not while paused for silence', async () => {
         if (!sfuReady) return 'skipped (no media worker)';
         const { body: settings } = await json('/api/settings');

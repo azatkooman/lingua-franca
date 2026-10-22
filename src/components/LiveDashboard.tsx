@@ -4,6 +4,9 @@ import { settingsService, type LiveChannel, type LiveStatus } from '../lib/Setti
 import { formatDuration, intlLocale, useTranslation, type TranslationKey } from '../lib/i18n';
 
 const POLL_MS = 3000;
+// Up to 1% lost is inaudible; from 5% small gaps or a robotic edge are heard.
+const qualityLevel = (loss: number) => (loss < 0.01 ? 'good' : loss < 0.05 ? 'fair' : 'poor');
+
 const ROLE_LABEL: Record<NonNullable<LiveChannel['role']>, TranslationKey> = {
     original: 'role_original',
     translation: 'role_translation',
@@ -61,6 +64,9 @@ export default function LiveDashboard() {
         setRefreshKey((key) => key + 1);
     };
 
+    const percent = (value: number) => new Intl.NumberFormat(intlLocale(locale), { style: 'percent', maximumFractionDigits: 1 }).format(value);
+    const describe = (loss: number) => (loss < 0.01 ? t('live_quality_good') : t('live_quality_lost', { percent: percent(loss) }));
+
     const money = (value: number, digits = 2) => new Intl.NumberFormat(intlLocale(locale), {
         style: 'currency', currency: 'USD', minimumFractionDigits: digits, maximumFractionDigits: digits,
     }).format(value);
@@ -93,6 +99,21 @@ export default function LiveDashboard() {
                                             {channel.live && channel.paused && <span className="live-muted"> · {t('live_muted')}</span>}
                                             {channel.live && channel.aiPaused && <span className="live-muted"> · {t('live_ai_paused')}</span>}
                                         </span>
+                                        {channel.live && channel.quality && (channel.quality.phones > 0 || channel.quality.link) && (
+                                            <span className="live-quality">
+                                                {channel.quality.phones > 0 && (
+                                                    <span className={`quality-${qualityLevel(channel.quality.loss)}`}>
+                                                        {t('live_wifi', { state: describe(channel.quality.loss) })}
+                                                        {channel.quality.poor > 0 && `, ${t('live_quality_poor_phones', { count: channel.quality.poor })}`}
+                                                    </span>
+                                                )}
+                                                {channel.quality.link && (
+                                                    <span className={`quality-${qualityLevel(Math.max(channel.quality.link.received, channel.quality.link.sent))}`}>
+                                                        {t('live_internet', { state: describe(Math.max(channel.quality.link.received, channel.quality.link.sent)) })}
+                                                    </span>
+                                                )}
+                                            </span>
+                                        )}
                                         {channel.accessEndsAt && (
                                             <span className={`live-access ${channel.accessEndsAt - status.now < 30 * 60_000 ? 'ending' : ''}`}>
                                                 <Clock size={13} aria-hidden="true" /> {t('live_access_ends', { time: clock(channel.accessEndsAt) })}

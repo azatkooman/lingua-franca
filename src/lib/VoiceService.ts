@@ -4,6 +4,42 @@ import { translateNow as tr, type TranslationKey } from './i18n';
 import { raiseAlert } from './alerts';
 
 export const SYSTEM_AUDIO_DEVICE_ID = '__lingua_franca_system_audio__';
+// How much audio a listening phone holds in reserve. Browsers keep this as small as they can
+// for low delay, so a brief Wi-Fi stall was heard as a gap. Half a second rides most of them
+// out, and adds nothing anyone notices to a translation that is seconds behind anyway.
+const LISTEN_BUFFER_MS = 500;
+// A listening phone tells the operator how much sound it lost about this often (in watchdog
+// checks of 2.5 seconds each).
+const QUALITY_REPORT_CHECKS = 4;
+
+/** Sound and packet counters from an inbound audio stream's stats, summed. */
+interface AudioCounters { concealed: number; samples: number; lost: number; packets: number }
+const audioCounters = (stats: RTCStatsReport): AudioCounters => {
+    const counters = { concealed: 0, samples: 0, lost: 0, packets: 0 };
+    stats.forEach((entry) => {
+        if (entry.type !== 'inbound-rtp' || (entry.kind && entry.kind !== 'audio')) return;
+        // Silent concealment is the player covering a stretch with no sound to play (a pause in
+        // the stream), not sound lost on the way.
+        counters.concealed += (entry.concealedSamples || 0) - (entry.silentConcealedSamples || 0);
+        counters.samples += entry.totalSamplesReceived || 0;
+        counters.lost += Math.max(0, entry.packetsLost || 0);
+        counters.packets += entry.packetsReceived || 0;
+    });
+    return counters;
+};
+
+/**
+ * The share of sound lost between two readings: what the player had to make up, or where a
+ * browser does not report that, the share of packets lost. Null when nothing arrived.
+ */
+export const lostShare = (before: AudioCounters, after: AudioCounters): number | null => {
+    const samples = after.samples - before.samples;
+    if (samples > 0) return Math.max(0, Math.min(1, (after.concealed - before.concealed) / samples));
+    const packets = after.packets - before.packets;
+    const lost = after.lost - before.lost;
+    return packets + lost > 0 ? Math.max(0, lost / (packets + lost)) : null;
+};
+export { audioCounters, type AudioCounters };
 type StatusCallback = (status: string) => void;
 /** What a broadcast carries, so recordings and the dashboard can label it. */
 export type BroadcastRole = 'original' | 'translation' | 'interpreter' | 'test';
@@ -190,15 +226,20 @@ export class VoiceService {
         catch (error) { console.error('Error enumerating devices:', error); throw this.mediaError(error); }
     }
 
-    async getInputStream(deviceId?: string) {
+    /**
+     * Opens the main input. `noiseSuppression: false` is for the AI: the browser's noise filter
+     * can clip quiet word endings and soft starts, which the AI then misses, and a mixer feed
+     * needs no filtering. A phone interpreter's microphone in a noisy room keeps it.
+     */
+    async getInputStream(deviceId?: string, { noiseSuppression = true }: { noiseSuppression?: boolean } = {}) {
         this.sourceStream?.getTracks().forEach((track) => track.stop());
         this.sourceStream = null;
-        this.sourceStream = await this.openInput(deviceId);
+        this.sourceStream = await this.openInput(deviceId, noiseSuppression);
         return this.sourceStream;
     }
 
     /** Opens an input without making it the main one (the original speech in Human mode). */
-    private async openInput(deviceId?: string): Promise<MediaStream> {
+    private async openInput(deviceId?: string, noiseSuppression = true): Promise<MediaStream> {
         if (!navigator.mediaDevices?.getUserMedia) throw new Error(tr('media_needs_https'));
         if (deviceId === SYSTEM_AUDIO_DEVICE_ID) {
             if (!this.isDesktopApp() || !navigator.mediaDevices.getDisplayMedia) {
@@ -214,7 +255,7 @@ export class VoiceService {
         const audio: MediaTrackConstraints = {
             deviceId: deviceId ? { exact: deviceId } : undefined,
             echoCancellation: false,
-            noiseSuppression: true,
+            noiseSuppression,
             autoGainControl: false,
             channelCount: 1,
             sampleRate: 48000,
@@ -576,6 +617,11 @@ export class VoiceService {
         realtimeSocket.emit('setAiPaused', { channelIds, paused }, () => undefined);
     }
 
+    /** How the AI channel's internet link to OpenAI is doing, for the dashboard. */
+    reportAiLink(channelId: string, link: { received: number | null; sent: number | null }) {
+        realtimeSocket.emit('aiLinkQuality', { channelId, ...link }, () => undefined);
+    }
+
     sendTranslationText(channelId: string, segment: { segmentId: string; text: string; originalText: string; final: boolean }) {
         realtimeSocket.emit('sendTranslationText', { channelId, ...segment });
     }
@@ -689,6 +735,8 @@ export class VoiceService {
             const consumer = await recvTransport.consume(consumeInfo);
             if (stale()) { consumer.close(); this.closeTransport(recvTransport); return; }
             this.consumer = consumer;
+            // Not every browser lets a page set this (older iPhones); they keep their own buffer.
+            try { consumer.rtpReceiver!.jitterBufferTarget = LISTEN_BUFFER_MS; } catch { /* not supported */ }
             this.consumer.on('transportclose', () => this.handleStreamLoss());
             this.consumer.on('trackended', () => this.handleStreamLoss());
             this.remotePaused = Boolean(consumeInfo.producerPaused);
@@ -712,13 +760,23 @@ export class VoiceService {
         window.clearInterval(this.listenWatchdog);
         let lastPackets = -1;
         let silentChecks = 0;
+        // Sound lost on the way here, reported to the operator's dashboard every few checks.
+        let reported: AudioCounters | null = null;
+        let checks = 0;
         this.listenWatchdog = window.setInterval(() => {
             if (stale() || this.consumer !== consumer || consumer.closed) { window.clearInterval(this.listenWatchdog); return; }
             void consumer.getStats().then((stats) => {
-                let packets = 0;
-                stats.forEach((entry) => { if (entry.type === 'inbound-rtp') packets += entry.packetsReceived || 0; });
+                const counters = audioCounters(stats);
+                const packets = counters.packets;
                 silentChecks = this.remotePaused || packets > lastPackets ? 0 : silentChecks + 1;
                 lastPackets = packets;
+                checks += 1;
+                if (!reported || this.remotePaused) reported = counters;
+                else if (checks % QUALITY_REPORT_CHECKS === 0) {
+                    const loss = lostShare(reported, counters);
+                    reported = counters;
+                    if (loss !== null) realtimeSocket.emit('listenerQuality', { channelId, loss }, () => undefined);
+                }
                 if (silentChecks < 2 || stale() || this.consumer !== consumer) return;
                 window.clearInterval(this.listenWatchdog);
                 console.warn(`No audio from ${channelId} for a while; reconnecting.`);

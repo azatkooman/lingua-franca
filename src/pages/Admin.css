@@ -510,6 +510,27 @@ textarea.custom-input {
     color: var(--text-muted);
 }
 
+.live-quality {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.2rem 0.75rem;
+    margin-top: 0.2rem;
+    font-size: 0.82rem;
+}
+
+.live-quality .quality-good {
+    color: var(--text-muted);
+}
+
+.live-quality .quality-fair {
+    color: #f59e0b;
+}
+
+.live-quality .quality-poor {
+    color: var(--danger);
+    font-weight: 600;
+}
+
 .live-access.ending {
     color: #f59e0b;
     font-weight: 600;

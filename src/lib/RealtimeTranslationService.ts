@@ -1,5 +1,5 @@
 import { settingsService, type Language } from './SettingsService';
-import { voiceService } from './VoiceService';
+import { audioCounters, lostShare, voiceService, type AudioCounters } from './VoiceService';
 import { translateNow as tr } from './i18n';
 import { clearAlerts, raiseAlert } from './alerts';
 
@@ -73,6 +73,8 @@ const SILENCE_RMS = 0.003;
 const SILENCE_CHECK_MS = 250;
 // Sound this many checks in a row (half a second) reopens the OpenAI connections.
 const RESUME_AFTER_CHECKS = 2;
+// How often each OpenAI connection reports how its internet link is doing, for the dashboard.
+const LINK_REPORT_MS = 10_000;
 class RealtimeTranslationService {
     private sessions = new Map<string, ActiveSession>();
     private sourceStream: MediaStream | null = null;
@@ -131,7 +133,7 @@ class RealtimeTranslationService {
         });
         this.floorChannel = options.floorChannel ? sourceLanguage : null;
         this.captionLead = targets[0]?.id ?? null;
-        this.sourceStream = await voiceService.getInputStream(deviceId);
+        this.sourceStream = await voiceService.getInputStream(deviceId, { noiseSuppression: false });
         // Stopped (or the page left) while the input was opening: release it and go no further.
         if (this.stopping) {
             this.sourceStream.getTracks().forEach((track) => track.stop());
@@ -349,6 +351,24 @@ class RealtimeTranslationService {
             session.segment += 1;
         };
         session.flush = finishSegment;
+
+        // The internet link to OpenAI: sound lost coming back with the translation (what this
+        // computer had to make up) and going out with the speech (as OpenAI reports it).
+        let linkBefore: AudioCounters | null = null;
+        const linkTimer = window.setInterval(() => {
+            if (!isCurrent()) return;
+            void peer.getStats().then((stats) => {
+                const counters = audioCounters(stats);
+                let sent: number | null = null;
+                stats.forEach((entry) => {
+                    if (entry.type === 'remote-inbound-rtp' && typeof entry.fractionLost === 'number') sent = entry.fractionLost;
+                });
+                const received = linkBefore ? lostShare(linkBefore, counters) : null;
+                linkBefore = counters;
+                if (received !== null || sent !== null) voiceService.reportAiLink(target.id, { received, sent });
+            }).catch(() => undefined);
+        }, LINK_REPORT_MS);
+        session.cleanup.push(() => window.clearInterval(linkTimer));
 
         const events = peer.createDataChannel('oai-events');
         const send = (event: object) => { if (events.readyState === 'open') events.send(JSON.stringify(event)); };

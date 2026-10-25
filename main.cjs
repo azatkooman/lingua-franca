@@ -18,6 +18,7 @@ const {
 const { CAPTION_IDLE_MS, TranscriptStore } = require('./lib/transcript.cjs');
 const { readSettingsFile, writeSettingsFile } = require('./lib/settings-file.cjs');
 const { LIVE_MODEL, liveSession } = require('./lib/ai-instructions.cjs');
+const { checkLanguage, isKnownLanguageCode } = require('./lib/languages.cjs');
 const { DocumentError, documentText } = require('./lib/document-text.cjs');
 const { ListenerReports } = require('./lib/listener-reports.cjs');
 const { AudioQuality } = require('./lib/audio-quality.cjs');
@@ -1424,6 +1425,12 @@ async function startServers(isDev) {
 
     expressApp.get('/api/admin/settings', requireAdmin, (_request, response) => response.json(adminView()));
 
+    // What a typed language code means, for the Admin form. The server's list of languages is
+    // fuller than a browser's, which cannot name rarer codes.
+    expressApp.get('/api/admin/language-check', requireAdmin, (request, response) => {
+        response.json(checkLanguage({ code: String(request.query.code || '').slice(0, 16), name: String(request.query.name || '').slice(0, 120) }));
+    });
+
     expressApp.patch('/api/admin/settings', requireAdmin, (request, response) => {
         const patch = request.body || {};
         // Everything that can be refused is checked before anything changes, so a refused
@@ -1432,6 +1439,18 @@ async function startServers(isDev) {
         if (Array.isArray(patch.languages)) {
             languages = normalizeLanguages(patch.languages);
             if (!languages.length) return response.status(400).json({ error: 'Keep at least one language channel.' });
+            // The AI translator is told the language from its code, so a new or changed code
+            // must be a real one. Channels saved earlier with an unknown code are left alone
+            // (Admin flags them), so editing another channel never fails because of them.
+            const before = new Map(settings.languages.map((language) => [language.id, language.code]));
+            const invalid = languages.find((language) => before.get(language.id) !== language.code && !isKnownLanguageCode(language.code));
+            if (invalid) {
+                return response.status(400).json({
+                    error: invalid.code
+                        ? `"${invalid.code}" is not a language code. Choose the language of ${invalid.name} from the list.`
+                        : `Choose the language of ${invalid.name} from the list.`,
+                });
+            }
         }
         const pinChanged = patch.adminPin !== undefined;
         if (pinChanged) {
@@ -1645,9 +1664,12 @@ async function startServers(isDev) {
         if (!apiKey) return response.status(409).json({ error: 'Add an OpenAI API key in Admin settings first.' });
         const sdp = typeof request.body?.sdp === 'string' ? request.body.sdp : '';
         if (!sdp.trim() || sdp.length > 100_000) return response.status(400).json({ error: 'A WebRTC offer is required.' });
+        // The broadcasting screen names the channels; the Test button only names languages.
+        const channel = (id, code) => findLanguage(settings.languages, String(id || '').slice(0, 80))
+            || { code: String(code || '').slice(0, 16), name: '' };
         const session = liveSession({
-            sourceCode: String(request.body?.sourceLanguage || '').slice(0, 16),
-            targetCode: String(request.body?.targetLanguage || 'en').slice(0, 16),
+            sourceLanguage: channel(request.body?.sourceChannel, request.body?.sourceLanguage),
+            targetLanguage: channel(request.body?.targetChannel, request.body?.targetLanguage || 'en'),
             voice: settings.aiVoice, instructions: settings.aiInstructions, notes: settings.aiNotes,
         });
         try {

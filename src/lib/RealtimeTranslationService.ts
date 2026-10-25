@@ -429,7 +429,7 @@ class RealtimeTranslationService {
             const deadline = window.setTimeout(() => session.abort.abort(new Error(`OpenAI ${target.name} did not answer in time.`)), SDP_TIMEOUT_MS);
             try {
                 // The app's server starts the GPT-Live session with this offer and the API key.
-                const { sdp } = await settingsService.createLiveSession(context.sourceLanguage.code, target.code, offer.sdp || '', session.abort.signal);
+                const { sdp } = await settingsService.createLiveSession(context.sourceLanguage, target, offer.sdp || '', session.abort.signal);
                 // Ends the session on OpenAI's side too when this connection is closed.
                 session.cleanup.push(() => send({ type: 'session.close' }));
                 if (!isCurrent()) throw new Error(tr('voice_stopped'));
@@ -514,7 +514,7 @@ class RealtimeTranslationService {
             peer.addTransceiver('audio', { direction: 'sendrecv' });
             peer.createDataChannel('oai-events');
             await peer.setLocalDescription(await peer.createOffer());
-            const { sdp } = await settingsService.createLiveSession(sourceCode, targetCode, peer.localDescription?.sdp || '');
+            const { sdp } = await settingsService.createLiveSession({ code: sourceCode }, { code: targetCode }, peer.localDescription?.sdp || '');
             await peer.setRemoteDescription({ type: 'answer', sdp });
         } finally {
             peer.close();

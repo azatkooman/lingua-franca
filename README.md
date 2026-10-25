@@ -31,6 +31,8 @@ Listeners scan the QR code, see the event name and dates, pick a language and ta
 
 Every screen has a help button (a question mark) with the organiser's contacts (set in Admin, hidden when empty), the **RU / KK / EN** interface switch, and a light / dark / system theme switch. The Kazakh text has not yet been reviewed by a native speaker.
 
+**Channel languages.** When adding a channel, choose its language from the list (names are shown in the interface language, with each language's own name), or under **Other** type a code. Typing a name such as "Chinese", "Китайский" or "中文" picks the language by itself. The AI translator is told which language to speak from the channel's code, so codes are checked: a made-up code is refused, a country code typed by mistake (`cn`, `jp`, `kz`) becomes its language (`zh`, `ja`, `kk`), and a code that means something other than the channel's name (`ch` is Chamorro, not Chinese) is flagged in the list with a one-click fix. When the code and the name disagree, the translator is told the language the name says.
+
 ## Operator tools
 
 **Live now** (top of Admin) refreshes every few seconds: each channel's state (off air, interpreter, AI translation or original, and for how long), whether it is muted or being recorded, how many phones are listening now and the most at once, and the total. When AI translation has run it also shows the time used and a rough cost, at GPT-Live's price of $0.05 per minute for each translated language. Your OpenAI bill has the exact amount.

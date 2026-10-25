@@ -56,6 +56,15 @@ export const LIVE_VOICES: Record<string, string> = {
 export const MAX_AI_INSTRUCTIONS = 4000;
 export const MAX_AI_NOTES = 20_000;
 
+/** What Admin says about a channel's language code (see lib/languages.cjs). */
+export interface LanguageCheck {
+    /** The language the code means, in English; '' when it means nothing. */
+    meaning: string;
+    problem: 'unknown' | 'mismatch' | null;
+    /** The code the channel's name points to, when there is one. */
+    suggestion: string | null;
+}
+
 /** Operator-only configuration, fetched separately once an admin session exists. */
 export interface AdminSettings extends AppSettings {
     openaiConfigured: boolean;
@@ -69,6 +78,8 @@ export interface AdminSettings extends AppSettings {
     aiBudgetUsd: number;
     /** Minutes without speech before the OpenAI legs close; 0 = never. */
     aiSilencePauseMinutes: number;
+    /** Per channel id: what its code means, and whether it is unknown or disagrees with the name. */
+    languageChecks?: Record<string, LanguageCheck>;
     /** The one voice GPT-Live translates in, for the whole service. */
     aiVoice: string;
     /** Names, terms and style for the translator. */
@@ -401,6 +412,12 @@ class SettingsService {
         });
     }
 
+    /** What a typed language code means, checked by the server (which knows more languages). */
+    async checkLanguageCode(code: string, name: string) {
+        const response = await this.adminRequest(`/api/admin/language-check?code=${encodeURIComponent(code)}&name=${encodeURIComponent(name)}`);
+        return response.json() as Promise<LanguageCheck>;
+    }
+
     async removeLanguage(id: string) {
         const languages = this.admin?.languages || this.settings.languages;
         await this.patchAdminSettings({ languages: languages.filter((language) => language.id !== id) });
@@ -439,9 +456,12 @@ class SettingsService {
     }
 
     /** Starts a GPT-Live session from this screen's WebRTC offer; returns OpenAI's answer. */
-    async createLiveSession(sourceLanguage: string, targetLanguage: string, sdp: string, signal?: AbortSignal) {
+    async createLiveSession(source: { code: string; id?: string }, target: { code: string; id?: string }, sdp: string, signal?: AbortSignal) {
+        // The channel ids let the server name each language from both its code and its name.
         const response = await this.adminRequest('/api/realtime/live', {
-            method: 'POST', body: JSON.stringify({ sourceLanguage, targetLanguage, sdp }), signal,
+            method: 'POST',
+            body: JSON.stringify({ sourceLanguage: source.code, targetLanguage: target.code, sourceChannel: source.id, targetChannel: target.id, sdp }),
+            signal,
         });
         return response.json() as Promise<{ sdp: string; sessionId: string }>;
     }

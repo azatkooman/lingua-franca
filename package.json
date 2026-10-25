@@ -29,6 +29,7 @@
     "files": [
       "dist/**/*",
       "lib/**/*.cjs",
+      "lib/**/*.json",
       "!lib/**/*.test.cjs",
       "desktop/startup.html",
       "desktop/preload.cjs",

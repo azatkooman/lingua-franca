@@ -277,6 +277,31 @@ textarea.custom-input {
     margin-bottom: 0.75rem;
 }
 
+.language-code-hint {
+    margin: 0.5rem 0 0.75rem;
+    font-size: 0.9rem;
+    color: var(--text-muted);
+}
+
+.language-code-hint.problem,
+.language-warning {
+    color: #f59e0b;
+}
+
+.language-warning {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin-top: 0.4rem;
+    font-size: 0.9rem;
+}
+
+.language-warning .btn-secondary {
+    padding: 0.35rem 0.75rem;
+    font-size: 0.85rem;
+}
+
 .language-list {
     display: grid;
     gap: 0.75rem;

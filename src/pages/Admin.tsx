@@ -5,6 +5,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { settingsService, type AdminSettings, type ContactInfo, type EventInfo, type Language } from '../lib/SettingsService';
 import { LOCALES, useTranslation, type Locale } from '../lib/i18n';
 import { useGoBack } from '../lib/navigation';
+import { codeFromName, describeLanguageCode, isListedLanguage, languageOptions } from '../lib/languages';
 import { isInternationalNumber } from '../lib/phoneNumbers';
 import { fetchAdminHealth, listenerUrl, readPhoneLink, savePhoneLink, usesPlainLink, type HealthInfo, type PhoneLink } from '../lib/listenerLinks';
 import LiveDashboard from '../components/LiveDashboard';
@@ -44,6 +45,12 @@ export default function Admin() {
     const [languageName, setLanguageName] = useState('');
     const [languageCode, setLanguageCode] = useState('');
     const [languageDescription, setLanguageDescription] = useState('');
+    // The language was chosen by hand (or comes from the channel being edited), so typing the
+    // name no longer picks it; and whether the code is typed under "Other".
+    const [languageChosen, setLanguageChosen] = useState(false);
+    const [otherCode, setOtherCode] = useState(false);
+    // The server's reading of a code typed under "Other", for codes a browser cannot name.
+    const [otherCheck, setOtherCheck] = useState<{ code: string; meaning: string } | null>(null);
     const [currentPin, setCurrentPin] = useState('');
     const [newPin, setNewPin] = useState('');
     const [confirmPin, setConfirmPin] = useState('');
@@ -87,10 +94,46 @@ export default function Admin() {
 
     const resetLanguageForm = () => {
         setEditingLang(null); setLanguageName(''); setLanguageCode(''); setLanguageDescription('');
+        setLanguageChosen(false); setOtherCode(false);
     };
 
+    // Typing a channel name such as "Chinese" or "Китайский" picks its language, until the
+    // operator chooses one themselves.
+    const changeLanguageName = (name: string) => {
+        setLanguageName(name);
+        if (languageChosen) return;
+        const found = codeFromName(name, LOCALES.map((option) => option.code));
+        setLanguageCode(found);
+        setOtherCode(false);
+    };
+
+    const chooseLanguage = (value: string) => {
+        setLanguageChosen(true);
+        if (value === '__other') { setOtherCode(true); setLanguageCode(''); return; }
+        setOtherCode(false);
+        setLanguageCode(value);
+    };
+
+    useEffect(() => {
+        if (!otherCode || !languageCode.trim() || describeLanguageCode(languageCode, locale)) return;
+        const timer = window.setTimeout(() => {
+            void settingsService.checkLanguageCode(languageCode, languageName)
+                .then((check) => setOtherCheck({ code: languageCode, meaning: check.meaning }))
+                .catch(() => undefined);
+        }, 300);
+        return () => window.clearTimeout(timer);
+    }, [otherCode, languageCode, languageName, locale]);
+
+    // What the chosen code means, shown under the form so a wrong one is seen before saving.
+    // Null while the server is still being asked about a code typed under "Other".
+    const codeMeaning: string | null = describeLanguageCode(languageCode, locale)
+        || (otherCheck?.code === languageCode ? otherCheck.meaning : null);
+
     const saveLanguage = async () => {
-        if (!languageName.trim() || !languageCode.trim()) return;
+        if (!languageName.trim()) return;
+        if (!languageCode.trim()) { setMessage(t('lang_choose_first')); return; }
+        // A code the server does not know is refused there too, with the same explanation.
+        if (codeMeaning === '') { setMessage(t('lang_code_unknown', { code: languageCode })); return; }
         await run(async () => {
             if (editingLang) await settingsService.updateLanguage(editingLang.id, languageName, languageDescription, languageCode);
             else await settingsService.addLanguage(languageName, languageDescription, languageCode);
@@ -100,6 +143,7 @@ export default function Admin() {
 
     const editLanguage = (language: Language) => {
         setEditingLang(language); setLanguageName(language.name); setLanguageCode(language.code); setLanguageDescription(language.description);
+        setLanguageChosen(true); setOtherCode(Boolean(language.code) && !isListedLanguage(language.code));
     };
 
     const host = health?.publicHost || health?.localAddress;
@@ -153,6 +197,30 @@ export default function Admin() {
     const contact: ContactInfo = contactDraft ?? settings.contact ?? { name: '', phone: '', whatsapp: '', telegram: '', email: '' };
 
     const sfuText = health ? (health.sfu === 'ready' ? t('status_ready') : t('status_unavailable')) : t('status_checking');
+    // A channel whose code means nothing, or a different language from its name: the AI
+    // translator is told the language from these, so the operator is shown how to fix it.
+    const LanguageWarning = ({ language }: { language: Language }) => {
+        const check = settings.languageChecks?.[language.id];
+        if (!check?.problem) return null;
+        const suggested = check.suggestion ? describeLanguageCode(check.suggestion, locale) : '';
+        return (
+            <div className="language-warning" role="alert">
+                <span>
+                    {check.problem === 'mismatch'
+                        ? t('lang_mismatch', { code: language.code, language: describeLanguageCode(language.code, locale) || check.meaning, name: language.name })
+                        : t('lang_unknown_warning', { code: language.code || '?' })}
+                    {' '}{check.suggestion ? '' : t('lang_edit_hint')}
+                </span>
+                {check.suggestion && (
+                    <button type="button" className="btn-secondary" disabled={busy} onClick={() => void run(
+                        () => settingsService.updateLanguage(language.id, language.name, language.description, check.suggestion!), t('language_saved'))}>
+                        {t('lang_use_suggestion', { language: suggested, code: check.suggestion })}
+                    </button>
+                )}
+            </div>
+        );
+    };
+
     const pinFields = (
         <>
             {!settings.pinIsDefault && (<>
@@ -306,16 +374,41 @@ export default function Admin() {
             <div className="card fade-in">
                 <div className="card-header"><Languages size={20} /><h3>{t('languages_title')}</h3></div>
                 <div className="add-language-form">
-                    <input value={languageName} onChange={(event) => setLanguageName(event.target.value)} placeholder={t('lang_name')} className="custom-input" />
-                    <input value={languageCode} onChange={(event) => setLanguageCode(event.target.value.toLowerCase().slice(0, 8))} placeholder={t('iso_code_placeholder')} className="custom-input" style={{ maxWidth: 160 }} />
-                    <button className="btn-primary-small" onClick={saveLanguage} disabled={busy} title={t('save')}>{editingLang ? <Save size={18} /> : <Plus size={18} />}</button>
+                    <input value={languageName} onChange={(event) => changeLanguageName(event.target.value)} placeholder={t('lang_name')} className="custom-input" />
+                    <button className="btn-primary-small" onClick={saveLanguage} disabled={busy || !languageName.trim()} title={t('save')}>{editingLang ? <Save size={18} /> : <Plus size={18} />}</button>
                 </div>
+                <select className="custom-select" aria-label={t('lang_choose')} value={otherCode ? '__other' : languageCode}
+                    onChange={(event) => chooseLanguage(event.target.value)}>
+                    <option value="">{t('lang_choose')}</option>
+                    {languageOptions(locale).map((option) => (
+                        <option key={option.code} value={option.code}>
+                            {option.native && option.native !== option.name ? `${option.name} (${option.native})` : option.name}
+                        </option>
+                    ))}
+                    <option value="__other">{t('lang_other_code')}</option>
+                </select>
+                {otherCode && (
+                    <input value={languageCode} onChange={(event) => setLanguageCode(event.target.value.trim().slice(0, 16))}
+                        placeholder={t('iso_code_placeholder')} className="custom-input mt-4" />
+                )}
+                {languageCode && codeMeaning !== null && (
+                    <p className={`language-code-hint ${codeMeaning ? '' : 'problem'}`}>
+                        {codeMeaning ? t('lang_code_means', { code: languageCode, language: codeMeaning }) : t('lang_code_unknown', { code: languageCode })}
+                    </p>
+                )}
                 <input value={languageDescription} onChange={(event) => setLanguageDescription(event.target.value)} placeholder={t('lang_desc')} className="custom-input" />
                 {editingLang && <button className="btn-secondary mt-4" onClick={resetLanguageForm}>{t('cancel')}</button>}
                 <div className="language-list mt-4">
                     {settings.languages.map((language) => (
                         <div key={language.id} className="language-item">
-                            <div><strong>{language.name}</strong> <code>{language.code}</code><p className="text-muted">{language.description}</p></div>
+                            <div>
+                                <strong>{language.name}</strong> <code>{language.code}</code>
+                                {(describeLanguageCode(language.code, locale) || settings.languageChecks?.[language.id]?.meaning) && (
+                                    <span className="text-muted"> · {describeLanguageCode(language.code, locale) || settings.languageChecks?.[language.id]?.meaning}</span>
+                                )}
+                                <p className="text-muted">{language.description}</p>
+                                <LanguageWarning language={language} />
+                            </div>
                             <div className="language-actions">
                                 <button className="btn-icon-small" onClick={() => editLanguage(language)}><Edit2 size={16} /></button>
                                 <button className="btn-icon-small danger" disabled={settings.languages.length < 2} onClick={() => void run(() => settingsService.removeLanguage(language.id), t('language_removed'))}><Trash2 size={16} /></button>

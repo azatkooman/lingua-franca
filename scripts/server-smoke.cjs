@@ -793,6 +793,41 @@ async function run() {
         return 'refused';
     });
 
+    await check('a channel’s language code is checked, corrected and explained', async () => {
+        const settingsNow = async () => (await json('/api/admin/settings', { headers: authed(token) })).body;
+        const save = (languages) => json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ languages }) });
+        const original = (await settingsNow()).languages.map(({ id, name, code, description }) => ({ id, name, code, description }));
+        try {
+            const refused = await save([...original, { name: 'Klingon', code: 'xx' }]);
+            assert.equal(refused.status, 400);
+            assert.match(refused.body.error, /"xx" is not a language code/);
+            assert.equal((await save([...original, { name: 'Chinese', code: 'cn' }])).status, 200);
+            const chinese = (await settingsNow()).languages.find((language) => language.name === 'Chinese');
+            assert.equal(chinese.code, 'zh', 'the country code became the language code');
+            // "ch" is a real code (Chamorro): accepted, but flagged against the channel's name.
+            assert.equal((await save([...original, { ...chinese, code: 'ch' }])).status, 200);
+            const flagged = await settingsNow();
+            assert.deepEqual(flagged.languageChecks[chinese.id], { meaning: 'Chamorro', problem: 'mismatch', suggestion: 'zh' });
+            // The translator is still told Chinese, from the channel's name.
+            assert.equal((await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ openaiApiKey: 'sk-smoke' }) })).status, 200);
+            const live = await json('/api/realtime/live', {
+                method: 'POST', headers: authed(token),
+                body: JSON.stringify({ sourceChannel: original[1].id, targetChannel: chinese.id, sourceLanguage: 'ru', targetLanguage: 'ch', sdp: 'v=0 offer' }),
+            });
+            assert.equal(live.status, 200);
+            assert.match(openaiCalls.at(-1).body.session.instructions, /^CHINESE ONLY\./);
+            // The Admin form asks the server about codes a browser cannot name.
+            const check = async (code, name, headers = authed(token)) => json(`/api/admin/language-check?code=${code}&name=${encodeURIComponent(name)}`, { headers });
+            assert.deepEqual((await check('haw', 'Hawaiian')).body, { meaning: 'Hawaiian', problem: null, suggestion: null });
+            assert.equal((await check('xx', 'Chinese')).body.problem, 'unknown');
+            assert.equal((await check('xx', 'Chinese', {})).status, 401);
+        } finally {
+            await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ clearOpenaiApiKey: true }) });
+            await save(original);
+        }
+        return 'made-up refused, cn -> zh, ch flagged, AI told Chinese';
+    });
+
     await check('renaming a channel preserves its id, so a live broadcast survives', async () => {
         const { body: before } = await json('/api/admin/settings', { headers: authed(token) });
         const target = before.languages[0];

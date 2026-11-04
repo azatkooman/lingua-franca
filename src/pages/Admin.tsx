@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, CalendarDays, Cpu, Edit2, Globe, Languages, LifeBuoy, LogOut, Mic, Monitor, Plus, Printer, QrCode, RotateCcw, Save, ShieldAlert, Trash2, X } from 'lucide-react';
+import { ArrowLeft, CalendarDays, Cpu, CreditCard, Edit2, Globe, Languages, LifeBuoy, LogOut, Mic, Monitor, Plus, Printer, QrCode, RotateCcw, Save, ShieldAlert, Trash2, X } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
-import { settingsService, type AdminSettings, type ContactInfo, type EventInfo, type Language } from '../lib/SettingsService';
-import { LOCALES, useTranslation, type Locale } from '../lib/i18n';
+import { OPENAI_BILLING_URL, settingsService, type AdminSettings, type ContactInfo, type EventInfo, type Language } from '../lib/SettingsService';
+import { desktopBridge } from '../lib/desktop';
+import { LOCALES, intlLocale, useTranslation, type Locale } from '../lib/i18n';
 import { useGoBack } from '../lib/navigation';
 import { codeFromName, describeLanguageCode, isListedLanguage, languageOptions } from '../lib/languages';
 import { isInternationalNumber } from '../lib/phoneNumbers';
@@ -66,6 +67,9 @@ export default function Admin() {
     const [busy, setBusy] = useState(false);
     // The AI budget as typed, until saved.
     const [budgetDraft, setBudgetDraft] = useState<string | null>(null);
+    // The OpenAI credit left and the warning amount, as typed, until saved.
+    const [balanceDraft, setBalanceDraft] = useState<string | null>(null);
+    const [balanceWarnDraft, setBalanceWarnDraft] = useState<string | null>(null);
 
     const refreshHealth = () => fetchAdminHealth(settingsService.getAdminToken()).then(setHealth);
 
@@ -185,6 +189,16 @@ export default function Admin() {
             setCurrentPin(''); setNewPin(''); setConfirmPin('');
         }, t('pin_changed'));
     };
+
+    // OpenAI's billing page: through the desktop app into the system browser, or a new tab
+    // when Admin is open in a browser.
+    const openBilling = async () => {
+        if (desktopBridge?.openOpenAiBilling) {
+            const result = await desktopBridge.openOpenAiBilling();
+            if (result.error) setMessage(result.error);
+        } else window.open(OPENAI_BILLING_URL, '_blank', 'noopener');
+    };
+    const formatUsd = (value: number) => new Intl.NumberFormat(intlLocale(locale), { style: 'currency', currency: 'USD' }).format(value);
 
     const restartApp = async () => {
         if (!window.confirm(t('restart_confirm'))) return;
@@ -521,6 +535,36 @@ export default function Admin() {
                     }, t('ai_budget_saved'))}>{t('save')}</button>
                 </div>
                 <p className="text-muted">{t('ai_budget_hint')}</p>
+
+                <label className="mt-4">{t('ai_balance_label')}</label>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <input className="custom-input" type="number" min="0" step="0.01" inputMode="decimal" placeholder="0"
+                        value={balanceDraft ?? ''} onChange={(event) => setBalanceDraft(event.target.value)} />
+                    <button className="btn-secondary" disabled={busy || balanceDraft === null} onClick={() => void run(async () => {
+                        await settingsService.setAiBalance(Number(balanceDraft) || 0);
+                        setBalanceDraft(null);
+                    }, t('ai_balance_saved'))}>{t('save')}</button>
+                </div>
+                {settings.aiBalance && (
+                    <p className={`ai-balance-now ${settings.aiBalance.level ?? ''}`}>
+                        {t('ai_balance_now', {
+                            remaining: formatUsd(Math.max(0, settings.aiBalance.remainingUsd)),
+                            amount: formatUsd(settings.aiBalance.amountUsd),
+                            date: new Date(settings.aiBalance.setAt).toLocaleDateString(locale),
+                        })}
+                    </p>
+                )}
+                <p className="text-muted">{t('ai_balance_hint')}</p>
+                <label className="mt-4">{t('ai_balance_warn_label')}</label>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <input className="custom-input" type="number" min="0" step="1" inputMode="decimal" placeholder="0"
+                        value={balanceWarnDraft ?? String(settings.aiBalanceWarnUsd ?? 0)} onChange={(event) => setBalanceWarnDraft(event.target.value)} />
+                    <button className="btn-secondary" disabled={busy || balanceWarnDraft === null} onClick={() => void run(async () => {
+                        await settingsService.setAiBalanceWarning(Number(balanceWarnDraft) || 0);
+                        setBalanceWarnDraft(null);
+                    }, t('ai_balance_saved'))}>{t('save')}</button>
+                </div>
+                <button className="btn-secondary mt-4" onClick={() => void openBilling()}><CreditCard size={18} /> {t('ai_add_credit')}</button>
 
                 <label className="mt-4">{t('ai_silence_label')}</label>
                 <select className="custom-select" value={settings.aiSilencePauseMinutes} disabled={busy}

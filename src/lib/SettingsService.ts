@@ -65,6 +65,18 @@ export interface LanguageCheck {
     suggestion: string | null;
 }
 
+/** The OpenAI credit left: entered by the operator, less this app's AI use since. */
+export interface AiBalance {
+    amountUsd: number;
+    setAt: number;
+    remainingUsd: number;
+    /** 'low' below the warning amount, 'empty' at or below zero. */
+    level: 'low' | 'empty' | null;
+}
+
+/** Where to add OpenAI credit. */
+export const OPENAI_BILLING_URL = 'https://platform.openai.com/settings/organization/billing/overview';
+
 /** Operator-only configuration, fetched separately once an admin session exists. */
 export interface AdminSettings extends AppSettings {
     openaiConfigured: boolean;
@@ -80,6 +92,9 @@ export interface AdminSettings extends AppSettings {
     aiSilencePauseMinutes: number;
     /** Per channel id: what its code means, and whether it is unknown or disagrees with the name. */
     languageChecks?: Record<string, LanguageCheck>;
+    /** Below this credit-left estimate the operator is warned; 0 = only when used up. */
+    aiBalanceWarnUsd: number;
+    aiBalance?: AiBalance | null;
     /** The one voice GPT-Live translates in, for the whole service. */
     aiVoice: string;
     /** Names, terms and style for the translator. */
@@ -131,6 +146,8 @@ export interface LiveStatus {
     aiCostUsd: number;
     aiPricePerMinute: number;
     budgetUsd: number;
+    /** The OpenAI credit-left estimate, or null when no balance was entered. */
+    balance: AiBalance | null;
     since: number;
     now: number;
 }
@@ -450,6 +467,9 @@ class SettingsService {
     }
 
     async setAiBudget(aiBudgetUsd: number) { await this.patchAdminSettings({ aiBudgetUsd }); }
+    /** The OpenAI credit left, as shown on OpenAI's billing page; 0 turns the estimate off. */
+    async setAiBalance(aiBalanceUsd: number) { await this.patchAdminSettings({ aiBalanceUsd }); }
+    async setAiBalanceWarning(aiBalanceWarnUsd: number) { await this.patchAdminSettings({ aiBalanceWarnUsd }); }
     async setSilencePause(aiSilencePauseMinutes: number) { await this.patchAdminSettings({ aiSilencePauseMinutes }); }
     async setAiStyle(style: Partial<Pick<AdminSettings, 'aiVoice' | 'aiInstructions' | 'aiNotes'>>) {
         await this.patchAdminSettings(style);

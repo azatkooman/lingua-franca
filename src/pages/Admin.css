@@ -535,6 +535,22 @@ textarea.custom-input {
     color: var(--text-muted);
 }
 
+.live-balance,
+.ai-balance-now {
+    margin: 0.5rem 0 0;
+    font-weight: 600;
+}
+
+.live-balance.low,
+.ai-balance-now.low {
+    color: #f59e0b;
+}
+
+.live-balance.empty,
+.ai-balance-now.empty {
+    color: var(--danger);
+}
+
 .live-quality {
     display: flex;
     flex-wrap: wrap;

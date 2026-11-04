@@ -8,7 +8,7 @@ import { desktopBridge } from './desktop';
  * Never a sound. The operator's computer may be wired to the PA, or its playback may be the
  * very thing being broadcast ("System output"), so a beep could reach the whole room.
  */
-export type AlertKind = 'ai_failed' | 'input_ended' | 'cant_hear' | 'budget' | 'handover' | 'access_ending';
+export type AlertKind = 'ai_failed' | 'input_ended' | 'cant_hear' | 'budget' | 'balance' | 'handover' | 'access_ending';
 
 export interface OperatorAlert {
     id: number;

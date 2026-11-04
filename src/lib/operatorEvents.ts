@@ -12,6 +12,12 @@ realtimeSocket.on<{ channelId: string; channelName: string; count: number }>('li
     if (count >= CANT_HEAR_THRESHOLD) raiseAlert('cant_hear', tr('alert_cant_hear', { count, channel: channelName }), { channelId });
 });
 
+// The credit-left estimate ran low or out, and OpenAI itself refusing for lack of credit.
+realtimeSocket.on<{ level: 'low' | 'empty'; remainingUsd: number }>('aiBalance', ({ level, remainingUsd }) => {
+    raiseAlert('balance', tr(level === 'empty' ? 'alert_balance_empty' : 'alert_balance_low', { remaining: `$${Math.max(0, remainingUsd).toFixed(2)}` }));
+});
+realtimeSocket.on('aiOutOfCredit', () => raiseAlert('balance', tr('alert_out_of_credit')));
+
 realtimeSocket.on<{ level: number; spentUsd: number; budgetUsd: number }>('aiBudget', ({ level, spentUsd, budgetUsd }) => {
     const spent = `$${spentUsd.toFixed(2)}`;
     const budget = `$${budgetUsd.toFixed(2)}`;

@@ -19,6 +19,9 @@ const { CAPTION_IDLE_MS, TranscriptStore } = require('./lib/transcript.cjs');
 const { readSettingsFile, writeSettingsFile } = require('./lib/settings-file.cjs');
 const { LIVE_MODEL, liveSession } = require('./lib/ai-instructions.cjs');
 const { checkLanguage, isKnownLanguageCode } = require('./lib/languages.cjs');
+const { DEFAULT_WARN_USD, balanceLevel, isOutOfCredit, normalizeAmount, normalizeBalance, remainingUsd } = require('./lib/ai-balance.cjs');
+// Where the operator adds OpenAI credit. Opened in the system browser from Admin.
+const OPENAI_BILLING_URL = 'https://platform.openai.com/settings/organization/billing/overview';
 const { DocumentError, documentText } = require('./lib/document-text.cjs');
 const { ListenerReports } = require('./lib/listener-reports.cjs');
 const { AudioQuality } = require('./lib/audio-quality.cjs');
@@ -91,6 +94,8 @@ const DEFAULT_PIN = '1234';
 let addressDrift = '';
 // Set once the server runs, so quitting can finish every open recording file properly.
 let stopAllRecordings = () => undefined;
+// Writes the AI balance's spending so far, so quitting mid-service keeps it. Set once running.
+let saveAiBalance = () => undefined;
 
 const settingsPath = () => path.join(app.getPath('userData'), 'lingua-franca-settings.json');
 const certificateDirectory = () => path.join(app.getPath('userData'), 'certificate');
@@ -457,6 +462,13 @@ function registerDesktopActions(isDev) {
         }
         return { ok: true };
     });
+    // Opens OpenAI's billing page in the system browser, to add credit. The address is fixed
+    // here: the page cannot use this to open anything else.
+    ipcMain.handle('open-openai-billing', async (event) => {
+        if (!fromApp(event)) return { error: 'Not available here.' };
+        try { await shell.openExternal(OPENAI_BILLING_URL); return { ok: true }; }
+        catch (error) { return { error: error.message }; }
+    });
     ipcMain.handle('save-page-as-pdf', async (event, requestedName) => {
         if (!fromApp(event)) return { error: 'Not available here.' };
         const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
@@ -628,6 +640,10 @@ async function startServers(isDev) {
     const handovers = new Map();
     // Highest budget warning already sent (0, 80, 100), so each is sent once.
     let budgetAlerted = 0;
+    // The balance warning last sent ('low' or 'empty'), so each is sent once per balance entered.
+    let balanceAlerted = null;
+    // Spending counted but not yet written to the settings file.
+    let balanceUnsaved = false;
 
     const adminSessions = new ExpiringMap();
     const interpreterSessions = new ExpiringMap();
@@ -657,7 +673,7 @@ async function startServers(isDev) {
 
     // The operator's view of the settings, with what only this run knows: whether the PIN is
     // still the factory one and whether the settings file had to be recovered.
-    const adminView = () => ({ ...adminSettings(settings, liveChannels), pinIsDefault, settingsRecovery });
+    const adminView = () => ({ ...adminSettings(settings, liveChannels), pinIsDefault, settingsRecovery, aiBalance: balanceView() });
     const emitSettings = () => io.emit('settingsChanged', publicSettings(settings, liveChannels));
     const setChannelState = (channelId, mode, role) => {
         if (mode) liveChannels.set(channelId, { mode, role, updatedAt: Date.now() });
@@ -685,10 +701,35 @@ async function startServers(isDev) {
         return total;
     };
     const aiCostUsd = (now = Date.now()) => aiSpentSeconds(now) / 60 * AI_PRICE_PER_MINUTE;
+    // The balance estimate counts AI time from when the operator last entered the balance,
+    // through each broadcast's balanceSince (null while paused for silence).
+    const balanceRunningUsd = (info, now = Date.now()) => {
+        const balance = normalizeBalance(settings.aiBalance);
+        if (!balance || !info?.balanceSince) return 0;
+        return Math.max(0, now - Math.max(info.balanceSince, balance.setAt)) / 60_000 * AI_PRICE_PER_MINUTE;
+    };
+    /** Moves a broadcast's running cost into the stored spend; `resume` is when it next counts from. */
+    const chargeBalance = (info, resume = null, now = Date.now()) => {
+        const balance = normalizeBalance(settings.aiBalance);
+        if (balance && info?.balanceSince) {
+            settings.aiBalance = { ...balance, spentUsd: balance.spentUsd + balanceRunningUsd(info, now) };
+            balanceUnsaved = true;
+        }
+        if (info) info.balanceSince = resume;
+    };
+    const balanceView = (now = Date.now()) => {
+        const balance = normalizeBalance(settings.aiBalance);
+        if (!balance) return null;
+        let running = 0;
+        for (const info of broadcastInfo.values()) running += balanceRunningUsd(info, now);
+        const remaining = remainingUsd(balance, running);
+        return { amountUsd: balance.amountUsd, setAt: balance.setAt, remainingUsd: remaining, level: balanceLevel(remaining, settings.aiBalanceWarnUsd ?? DEFAULT_WARN_USD) };
+    };
     // Adds a finished AI broadcast's time to the running total before forgetting it.
     const endBroadcast = (channelId) => {
         audioQuality.forgetLink(channelId);
         usage.aiSeconds += billedSeconds(broadcastInfo.get(channelId));
+        chargeBalance(broadcastInfo.get(channelId));
         broadcastInfo.delete(channelId);
     };
     // Only operator sessions; a socket on the plain listener port never holds a token.
@@ -917,6 +958,10 @@ async function startServers(isDev) {
             socket.data.token = String(token || '').slice(0, 256);
             for (const owner of producerOwners.values()) if (owner.socketId === socket.id) owner.token = socket.data.token;
             callback({ ok: true });
+            // An operator who opens Admin after the warning went out still hears that the
+            // credit is low or used up.
+            const balance = adminSessions.has(socket.data.token) ? balanceView() : null;
+            if (balance?.level) socket.emit('aiBalance', { level: balance.level, remainingUsd: balance.remainingUsd });
         });
 
         // Which channel's captions this phone wants. Captions used to go to every phone, which
@@ -1003,8 +1048,8 @@ async function startServers(isDev) {
             for (const id of ids) {
                 const info = broadcastInfo.get(id);
                 if (info?.role !== 'translation' || !ownsChannel(id)) continue;
-                if (paused && info.billedSince) { usage.aiSeconds += billedSeconds(info); info.billedSince = null; }
-                if (!paused && !info.billedSince) info.billedSince = Date.now();
+                if (paused && info.billedSince) { usage.aiSeconds += billedSeconds(info); chargeBalance(info); info.billedSince = null; }
+                if (!paused && !info.billedSince) { info.billedSince = Date.now(); info.balanceSince = info.billedSince; }
             }
             callback({ ok: true });
         });
@@ -1122,7 +1167,8 @@ async function startServers(isDev) {
                 emitListenerCount(channelId);
                 const role = isTest ? 'test' : ROLES.includes(appData?.role) ? appData.role : appData?.mode === 'ai' ? 'translation' : 'interpreter';
                 setChannelState(channelId, appData?.mode === 'ai' && !isTest ? 'ai-active' : 'sfu-active', role);
-                broadcastInfo.set(channelId, { role, since: Date.now(), billedSince: role === 'translation' ? Date.now() : null });
+                const billedSince = role === 'translation' ? Date.now() : null;
+                broadcastInfo.set(channelId, { role, since: Date.now(), billedSince, balanceSince: billedSince });
                 startRecording(channelId, producer, role);
                 producer.on('transportclose', () => {
                     if (producers.get(channelId)?.id === producer.id) closeProducerFor(channelId);
@@ -1485,6 +1531,13 @@ async function startServers(isDev) {
         if (typeof patch.recordingEnabled === 'boolean') next.recordingEnabled = patch.recordingEnabled;
         if (typeof patch.transcriptsEnabled === 'boolean') next.transcriptsEnabled = patch.transcriptsEnabled;
         if (patch.aiBudgetUsd !== undefined) next.aiBudgetUsd = normalizeBudget(patch.aiBudgetUsd);
+        // A balance entered starts the estimate afresh from now; an empty one turns it off.
+        const balanceEntered = patch.aiBalanceUsd !== undefined;
+        if (balanceEntered) {
+            const amountUsd = normalizeAmount(patch.aiBalanceUsd);
+            next.aiBalance = amountUsd ? { amountUsd, setAt: Date.now(), spentUsd: 0 } : null;
+        }
+        if (patch.aiBalanceWarnUsd !== undefined) next.aiBalanceWarnUsd = normalizeAmount(patch.aiBalanceWarnUsd, 10_000);
         if (patch.aiSilencePauseMinutes !== undefined) next.aiSilencePauseMinutes = normalizeSilencePause(patch.aiSilencePauseMinutes);
         if (patch.aiVoice !== undefined) next.aiVoice = normalizeAiVoice(patch.aiVoice);
         if (patch.aiInstructions !== undefined) next.aiInstructions = normalizeLongText(patch.aiInstructions, MAX_AI_INSTRUCTIONS);
@@ -1504,6 +1557,8 @@ async function startServers(isDev) {
             transcripts.retain(keptIds);
         }
         if (patch.aiBudgetUsd !== undefined) budgetAlerted = 0;
+        if (balanceEntered || patch.aiBalanceWarnUsd !== undefined) balanceAlerted = null;
+        if (balanceEntered) for (const info of broadcastInfo.values()) if (info.billedSince) info.balanceSince = Date.now();
         if (pinChanged) {
             pinIsDefault = false;
             adminThrottle.succeed(request.ip || 'unknown');
@@ -1546,6 +1601,8 @@ async function startServers(isDev) {
             aiCostUsd: Math.round(aiSeconds / 60 * AI_PRICE_PER_MINUTE * 1000) / 1000,
             aiPricePerMinute: AI_PRICE_PER_MINUTE,
             budgetUsd: normalizeBudget(settings.aiBudgetUsd),
+            // The credit-left estimate, or null when no balance was entered.
+            balance: balanceView(now),
             since: usage.since,
             // The server's clock, so "on air" times are right on a phone whose clock differs.
             now,
@@ -1682,6 +1739,11 @@ async function startServers(isDev) {
                 body: JSON.stringify({ session, transport: { type: 'webrtc', sdp } }),
             });
             const body = await upstream.json().catch(() => ({}));
+            // Out of credit is told plainly, and to every operator screen, not as a failed connection.
+            if (isOutOfCredit(body)) {
+                emitToOperators('aiOutOfCredit', {});
+                return response.status(402).json({ error: 'OpenAI credit has run out. Add credit at platform.openai.com, then start AI translation again.', code: 'out_of_credit' });
+            }
             if (!upstream.ok || typeof body?.transport?.sdp !== 'string') {
                 return response.status(upstream.ok ? 502 : upstream.status).json({
                     error: `OpenAI GPT-Live: ${body?.error?.message || `HTTP ${upstream.status}`}`,
@@ -1759,6 +1821,13 @@ async function startServers(isDev) {
     listenerServer.on('error', (error) => console.error('Listener HTTP server error:', error.message));
 
     // Interpreter sessions last eight hours; a broadcast must not outlive its session.
+    const BALANCE_SAVE_MS = 60_000;
+    let lastBalanceSave = 0;
+    saveAiBalance = () => {
+        const now = Date.now();
+        for (const info of broadcastInfo.values()) if (info.balanceSince) chargeBalance(info, now, now);
+        if (balanceUnsaved) { balanceUnsaved = false; saveSettings(settings); }
+    };
     sessionSweepTimer = setInterval(() => {
         // A Human-mode broadcast sends nothing that would refresh its operator session, so the
         // session that owns a live channel is kept alive here instead of lapsing under it.
@@ -1773,6 +1842,22 @@ async function startServers(isDev) {
         const level = budgetLevel(spentUsd, budgetUsd);
         if (level > budgetAlerted) emitToOperators('aiBudget', { level, spentUsd, budgetUsd });
         budgetAlerted = level;
+        // The balance estimate: saved about once a minute while AI runs, so a crash or power
+        // cut loses at most a minute of spending; and a warning when it runs low or out.
+        const now = Date.now();
+        if (normalizeBalance(settings.aiBalance) && now - lastBalanceSave >= BALANCE_SAVE_MS) {
+            for (const info of broadcastInfo.values()) if (info.balanceSince) chargeBalance(info, now, now);
+            if (balanceUnsaved) {
+                lastBalanceSave = now;
+                balanceUnsaved = false;
+                try { saveSettings(settings); } catch (error) { console.error('Could not save the AI balance:', error.message); }
+            }
+        }
+        const balance = balanceView(now);
+        if (balance?.level && balance.level !== balanceAlerted && !(balanceAlerted === 'empty' && balance.level === 'low')) {
+            emitToOperators('aiBalance', { level: balance.level, remainingUsd: balance.remainingUsd });
+        }
+        balanceAlerted = balance?.level ?? null;
     }, SESSION_SWEEP_MS);
     sessionSweepTimer.unref?.();
 
@@ -1860,6 +1945,7 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on('before-quit', () => {
     try { stopAllRecordings(); } catch (error) { console.error('Could not finish recordings:', error.message); }
+    try { saveAiBalance(); } catch (error) { console.error('Could not save the AI balance:', error.message); }
     clearInterval(maintenanceTimer);
     clearInterval(sessionSweepTimer);
     clearInterval(dynamicDnsTimer);

@@ -131,6 +131,11 @@ export default function LiveDashboard() {
                             );
                         })}
                     </ul>
+                    {status.balance && (
+                        <p className={`live-balance ${status.balance.level ?? ''}`}>
+                            {t(status.balance.level === 'empty' ? 'live_balance_empty' : 'live_balance', { remaining: money(Math.max(0, status.balance.remainingUsd)) })}
+                        </p>
+                    )}
                     {(status.aiSeconds > 0 || status.budgetUsd > 0) && (
                         <p className={`live-ai ${status.budgetUsd > 0 && status.aiCostUsd >= status.budgetUsd * 0.8 ? 'over-budget' : ''}`}>
                             {t('live_ai_usage', { time: formatDuration(status.aiSeconds, locale), cost: money(status.aiCostUsd) })}

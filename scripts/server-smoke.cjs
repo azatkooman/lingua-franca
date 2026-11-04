@@ -26,10 +26,17 @@ const { zip } = require('./test-zip.cjs');
 // OpenAI is never contacted: its calls are answered here and kept, so a check can see exactly
 // what the app asked for.
 const openaiCalls = [];
+// Set to an OpenAI error body to make the next GPT-Live session request fail with it.
+let openaiRefusal = null;
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, init = {}) => {
     if (!String(url).startsWith('https://api.openai.com/')) return realFetch(url, init);
     openaiCalls.push({ url: String(url), body: init.body ? JSON.parse(init.body) : null });
+    if (openaiRefusal && String(url).endsWith('/v1/live/sessions')) {
+        const refusal = openaiRefusal;
+        openaiRefusal = null;
+        return new Response(JSON.stringify(refusal), { status: 429, headers: { 'Content-Type': 'application/json' } });
+    }
     const reply = String(url).endsWith('/v1/live/sessions')
         ? { status: 201, body: { session: { id: 'live_smoke' }, transport: { type: 'webrtc', sdp: 'v=0 answer' } } }
         : { status: 200, body: { id: 'gpt-live-1', object: 'model' } };
@@ -580,6 +587,82 @@ async function run() {
         const odd = (await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ aiBudgetUsd: -3, aiSilencePauseMinutes: 7 }) })).body;
         assert.deepEqual([odd.aiBudgetUsd, odd.aiSilencePauseMinutes], [0, 0]);
         return 'rounded; invalid becomes off';
+    });
+
+    await check('the OpenAI credit left is estimated, warned about when low, and can be turned off', async () => {
+        const patch = async (body) => (await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify(body) })).body;
+        const operator = await connect(token);
+        try {
+            const warned = waitFor(operator, 'aiBalance', 5000);
+            const saved = await patch({ aiBalanceUsd: '3.456', aiBalanceWarnUsd: 5 });
+            assert.equal(saved.aiBalanceWarnUsd, 5);
+            assert.deepEqual([saved.aiBalance.amountUsd, saved.aiBalance.remainingUsd, saved.aiBalance.level], [3.46, 3.46, 'low']);
+            assert.deepEqual(await warned, { level: 'low', remainingUsd: 3.46 }, 'the operator is warned below $5');
+            const live = (await json('/api/admin/live', { headers: authed(token) })).body;
+            assert.equal(live.balance.remainingUsd, 3.46);
+            // An operator screen opened later is told as soon as it signs in.
+            const later = io(BASE, { transports: ['websocket'], auth: { token: '' }, reconnection: false });
+            sockets.push(later);
+            const told = waitFor(later, 'aiBalance', 5000);
+            await new Promise((resolve) => later.once('connect', resolve));
+            await ask(later, 'setToken', { token });
+            assert.equal((await told).level, 'low');
+            later.close();
+            const stored = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).aiBalance;
+            assert.deepEqual([stored.amountUsd, stored.spentUsd], [3.46, 0], 'kept in the settings file');
+            const off = await patch({ aiBalanceUsd: 0 });
+            assert.equal(off.aiBalance, null);
+            assert.equal((await json('/api/admin/live', { headers: authed(token) })).body.balance, null);
+        } finally {
+            operator.close();
+        }
+        return 'estimate shown, low warning sent, turned off';
+    });
+
+    await check('AI time is taken off the credit left and saved to the settings file', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const patch = (body) => json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify(body) });
+        assert.equal((await patch({ aiBalanceUsd: 10 })).status, 200);
+        const { body: settings } = await json('/api/settings');
+        const channel = settings.languages[1].id;
+        const operator = await connect(token);
+        const transport = await ask(operator, 'createWebRtcTransport', { type: 'producer' });
+        try {
+            assert.ok((await ask(operator, 'produce', {
+                transportId: transport.id, kind: 'audio', rtpParameters: opusRtp(5151), appData: { channelId: channel, mode: 'ai', role: 'translation' },
+            })).id);
+            // The sweep (every second here) saves what has been spent while AI runs.
+            await sleep(2500);
+            const spent = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).aiBalance.spentUsd;
+            // About $0.05 a minute: a second or two is a fraction of a cent, never nothing.
+            assert.ok(spent > 0 && spent < 0.01, `spent ${spent}`);
+        } finally {
+            await ask(operator, 'closeProducer', { channelId: channel });
+            operator.close();
+            await patch({ aiBalanceUsd: 0 });
+        }
+        return 'spending counted and saved';
+    });
+
+    await check('OpenAI running out of credit is reported plainly to the operator', async () => {
+        assert.equal((await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ openaiApiKey: 'sk-smoke' }) })).status, 200);
+        const operator = await connect(token);
+        try {
+            const alerted = waitFor(operator, 'aiOutOfCredit', 5000);
+            openaiRefusal = { error: { message: 'You exceeded your current quota.', type: 'insufficient_quota', code: 'insufficient_quota' } };
+            const { status, body } = await json('/api/realtime/live', {
+                method: 'POST', headers: authed(token), body: JSON.stringify({ sourceLanguage: 'ru', targetLanguage: 'en', sdp: 'v=0 offer' }),
+            });
+            assert.equal(status, 402);
+            assert.equal(body.code, 'out_of_credit');
+            assert.match(body.error, /credit has run out/);
+            await alerted;
+        } finally {
+            openaiRefusal = null;
+            operator.close();
+            await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ clearOpenaiApiKey: true }) });
+        }
+        return '402 out_of_credit, operator alerted';
     });
 
     await check('the translator voice and notes are stored, and notes are cut to the limit', async () => {

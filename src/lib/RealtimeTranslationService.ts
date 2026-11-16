@@ -41,6 +41,8 @@ interface StartContext {
     onStatus: (message: string) => void;
     onUpdate: (update: TranslationUpdate) => void;
     onListeners: (count: number) => void;
+    /** The OpenAI legs closed (paused) or opened again, and whether the operator did it. */
+    onPaused: (paused: boolean, byOperator: boolean) => void;
 }
 
 // The OpenAI leg runs over the public internet, so it needs a reflexive candidate. Host
@@ -99,8 +101,13 @@ class RealtimeTranslationService {
     private silencePauseMs = 0;
     private silentSince = 0;
     private loudChecks = 0;
+    // True while the OpenAI legs are closed, whether for silence or by the operator.
     private pausedForSilence = false;
+    // The operator pressed Pause (songs, a break). Speech does not wake it; only resume() does.
+    private pausedByOperator = false;
     private silenceBusy = false;
+    // Pausing and resuming run one after another, so quick presses cannot interleave them.
+    private pauseQueue: Promise<void> = Promise.resolve();
     // What a channel carries while its OpenAI leg is closed (the silence pause) or
     // reconnecting. Detaching the track instead stopped all RTP, and every phone's
     // no-audio watchdog then tore down its stream and reconnected, all at once.
@@ -114,15 +121,17 @@ class RealtimeTranslationService {
         onStatus: (message: string) => void,
         onUpdate: (update: TranslationUpdate) => void,
         onListeners: (count: number) => void,
-        options: { floorChannel?: boolean } = {},
+        options: { floorChannel?: boolean; onPaused?: (paused: boolean, byOperator: boolean) => void } = {},
     ) {
         if (!targets.length) throw new Error('Select at least one target language.');
         if (!settingsService.getAdminSettings()?.openaiConfigured) throw new Error('Add an OpenAI API key in Admin settings first.');
         this.stopping = false;
         this.muted = false;
         this.pausedForSilence = false;
+        this.pausedByOperator = false;
+        this.pauseQueue = Promise.resolve();
         clearAlerts('ai_failed');
-        this.context = { sourceLanguage, onStatus, onUpdate, onListeners };
+        this.context = { sourceLanguage, onStatus, onUpdate, onListeners, onPaused: options.onPaused ?? (() => undefined) };
         this.targets = new Map(targets.map((target) => [target.id, target]));
         // If the operator hands one of these channels to another broadcaster, stop paying for
         // its OpenAI leg, and stop it from reconnecting and taking the channel back.
@@ -193,6 +202,8 @@ class RealtimeTranslationService {
                 let sum = 0;
                 for (const sample of samples) sum += sample * sample;
                 const loud = Math.sqrt(sum / samples.length) > SILENCE_RMS;
+                // Paused by the operator: speech (or the music it was paused for) does not wake it.
+                if (this.pausedByOperator) return;
                 if (this.pausedForSilence) {
                     this.loudChecks = loud ? this.loudChecks + 1 : 0;
                     if (this.loudChecks >= RESUME_AFTER_CHECKS) void this.resumeFromSilence();
@@ -213,8 +224,55 @@ class RealtimeTranslationService {
         this.silenceContext = null;
     }
 
+    private queuePause(step: () => Promise<void>) {
+        this.pauseQueue = this.pauseQueue.then(step, step);
+        return this.pauseQueue;
+    }
+
+    /**
+     * The operator's Pause, for songs, announcements or a break: OpenAI is closed, so nothing is
+     * billed, and the recordings skip the time. Listeners stay connected and hear silence.
+     */
+    pause() {
+        return this.queuePause(async () => {
+            const context = this.context;
+            if (this.pausedByOperator || this.stopping || !context) return;
+            this.pausedByOperator = true;
+            if (this.pausedForSilence) {
+                // Already closed for silence; now it waits for Resume instead of for speech.
+                context.onPaused(true, true);
+                context.onStatus(tr('ai_paused_operator'));
+                return;
+            }
+            await this.closeLegs(tr('ai_paused_operator'), true);
+        });
+    }
+
+    /** Reopens OpenAI after pause(), or early from the silence pause, before anyone speaks. */
+    resume() {
+        return this.queuePause(async () => {
+            if (!this.pausedForSilence) return;
+            this.pausedByOperator = false;
+            await this.openLegs(tr('ai_resuming_operator'));
+        });
+    }
+
+    isPaused() { return this.pausedForSilence; }
+
+    private pauseForSilence() {
+        return this.queuePause(() => this.closeLegs(tr('ai_paused_silence', { minutes: Math.round(this.silencePauseMs / 60_000) }), false));
+    }
+
+    /** Someone is speaking again: reopen the OpenAI legs on the channels already published. */
+    private resumeFromSilence() {
+        return this.queuePause(async () => {
+            if (this.pausedByOperator) return;
+            await this.openLegs(tr('ai_resuming'));
+        });
+    }
+
     /** Closes every OpenAI leg but keeps the channels published, carrying silence. */
-    private async pauseForSilence() {
+    private async closeLegs(message: string, byOperator: boolean) {
         const context = this.context;
         if (this.pausedForSilence || this.stopping || !context) return;
         this.silenceBusy = true;
@@ -225,21 +283,23 @@ class RealtimeTranslationService {
             this.reconnectTimers.clear();
             this.reconnectAttempts.clear();
             const ids = [...this.targets.keys()];
+            // Told first, so the recordings stop before the channels switch to silence.
+            voiceService.setAiPaused(ids, true, true);
+            context.onPaused(true, byOperator);
             for (const id of ids) {
                 await voiceService.replaceTrack(id, this.silentTrack()).catch(() => false);
                 const session = this.sessions.get(id);
                 this.sessions.delete(id);
                 if (session) this.closeSession(session);
             }
-            voiceService.setAiPaused(ids, true);
-            context.onStatus(tr('ai_paused_silence', { minutes: Math.round(this.silencePauseMs / 60_000) }));
+            context.onStatus(message);
         } finally {
             this.silenceBusy = false;
         }
     }
 
-    /** Someone is speaking again: reopen the OpenAI legs on the channels already published. */
-    private async resumeFromSilence() {
+    /** Reopens the OpenAI legs on the channels already published. */
+    private async openLegs(message: string) {
         const context = this.context;
         if (!this.pausedForSilence || this.stopping || !context) return;
         this.silenceBusy = true;
@@ -247,8 +307,9 @@ class RealtimeTranslationService {
         this.silentSince = performance.now();
         try {
             const targets = [...this.targets.values()];
-            voiceService.setAiPaused(targets.map((target) => target.id), false);
-            context.onStatus(tr('ai_resuming'));
+            voiceService.setAiPaused(targets.map((target) => target.id), false, true);
+            context.onPaused(false, false);
+            context.onStatus(message);
             await Promise.all(targets.map((target) => this.startTarget(target).catch(() => this.scheduleReconnect(target.id))));
             if (this.context === context && !this.stopping) context.onStatus(tr('openai_live'));
         } finally {
@@ -556,6 +617,7 @@ class RealtimeTranslationService {
         this.stopping = true;
         this.stopSilenceWatch();
         this.pausedForSilence = false;
+        this.pausedByOperator = false;
         this.stopReplacedWatch?.();
         this.stopReplacedWatch = null;
         for (const timer of this.reconnectTimers.values()) window.clearTimeout(timer);

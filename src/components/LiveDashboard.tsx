@@ -123,7 +123,7 @@ export default function LiveDashboard() {
                                     </div>
                                     <div className="live-stats">
                                         {channel.reports > 0 && <span className="report-badge"><AlertTriangle size={12} /> {t('live_reports', { count: channel.reports })}</span>}
-                                        {channel.recording && <span className="rec-badge"><Circle size={8} fill="currentColor" /> {t('live_recording')}</span>}
+                                        {channel.recording && <span className={`rec-badge ${channel.recordingPaused ? 'paused' : ''}`}><Circle size={8} fill="currentColor" /> {t(channel.recordingPaused ? 'live_recording_paused' : 'live_recording')}</span>}
                                         <span className="live-count">{t('live_listeners', { count: channel.listeners })}</span>
                                         <span className="text-muted live-peak">{t('live_peak', { count: channel.peakListeners })}</span>
                                     </div>

@@ -76,6 +76,7 @@ export default function AiStyleCard({ settings }: { settings: AdminSettings }) {
                     : t('ai_notes_count', { count: notes.length.toLocaleString(), max: MAX_AI_NOTES.toLocaleString() })}
             </p>
 
+            {unsaved && <p className="ai-notes-unsaved" role="status">{t('ai_notes_unsaved')}</p>}
             <input ref={fileInput} type="file" hidden accept=".pptx,.docx,.txt,.md" onChange={(event) => loadFile(event.target.files?.[0])} />
             <div className="ai-notes-actions">
                 <button className="btn-secondary" disabled={busy} onClick={() => fileInput.current?.click()}><FileText size={18} /> {t('ai_notes_load')}</button>

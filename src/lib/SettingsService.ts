@@ -136,6 +136,7 @@ export interface LiveChannel {
     quality?: { phones: number; loss: number; poor: number; link: { received: number; sent: number } | null };
     /** An AI channel whose OpenAI connection is closed for silence. */
     aiPaused: boolean;
+    recordingPaused?: boolean;
 }
 
 export interface LiveStatus {

@@ -1282,6 +1282,63 @@ async function run() {
         return 'interpreter + original recorded, both stopped';
     });
 
+    await check('pausing AI translation pauses its recordings, not anyone else\'s', async () => {
+        if (!sfuReady) return 'skipped (no media worker)';
+        const patch = (body) => json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify(body) });
+        const { body: settings } = await json('/api/settings');
+        const original = settings.languages;
+        // A third channel, for a human interpreter broadcasting at the same time.
+        const added = (await patch({ languages: [...original, { id: 'pause-check', name: 'Kazakh', code: 'kk' }] })).body;
+        const other = added.languages.find((language) => language.name === 'Kazakh')?.id;
+        assert.ok(other, 'the third channel was added');
+        const [source, target] = original.map((language) => language.id);
+        assert.equal((await patch({ recordingEnabled: true })).status, 200);
+        const operator = await connect(token);
+        const human = await connect(await login());
+        const transport = await ask(operator, 'createWebRtcTransport', { type: 'producer' });
+        const live = async () => (await json('/api/admin/live', { headers: authed(token) })).body.channels;
+        const state = async (id) => { const entry = (await live()).find((channel) => channel.id === id); return [entry.recording, entry.recordingPaused, entry.aiPaused]; };
+        try {
+            assert.ok((await ask(operator, 'produce', {
+                transportId: transport.id, kind: 'audio', rtpParameters: opusRtp(5252), appData: { channelId: target, mode: 'ai', role: 'translation' },
+            })).id);
+            assert.ok((await ask(operator, 'produce', {
+                transportId: transport.id, kind: 'audio', rtpParameters: opusRtp(5353), appData: { channelId: source, recordOnly: true },
+            })).id);
+            assert.ok((await produce(human, other, 5454)).id, 'a human interpreter on another channel');
+            await sleep(500);
+            assert.deepEqual(await state(target), [true, false, false]);
+
+            assert.equal((await ask(operator, 'setAiPaused', { channelIds: [target], paused: true, wholeBroadcast: true })).ok, true);
+            assert.deepEqual(await state(target), [true, true, true], 'the translation recording pauses with it');
+            assert.deepEqual(await state(source), [true, true, false], 'so does the original speech');
+            assert.deepEqual((await state(other)).slice(0, 2), [true, false], 'another broadcaster keeps recording');
+
+            // Recording switched on during the pause starts paused.
+            await patch({ recordingEnabled: false });
+            await sleep(300);
+            await patch({ recordingEnabled: true });
+            await sleep(500);
+            assert.deepEqual(await state(target), [true, true, true], 'a recording started while paused is paused');
+
+            assert.equal((await ask(operator, 'setAiPaused', { channelIds: [target], paused: false, wholeBroadcast: true })).ok, true);
+            assert.deepEqual(await state(target), [true, false, false]);
+            assert.deepEqual((await state(source)).slice(0, 2), [true, false]);
+
+            // One channel failing on its own (no wholeBroadcast) stops its cost but keeps recording.
+            await ask(operator, 'setAiPaused', { channelIds: [target], paused: true });
+            assert.deepEqual(await state(target), [true, false, true]);
+        } finally {
+            await patch({ recordingEnabled: false });
+            await ask(operator, 'closeProducer', { channelId: target });
+            await ask(human, 'closeProducer', { channelId: other });
+            operator.close();
+            human.close();
+            await patch({ languages: original });
+        }
+        return 'AI and original paused and resumed, the human channel untouched';
+    });
+
     await check('a recording captures real Opus audio, with pauses kept as silence', async () => {
         if (!sfuReady || !routers.length) return 'skipped (no media worker)';
         const { startChannelRecording } = require('../lib/recorder.cjs');

@@ -127,10 +127,26 @@ h1 {
   background: var(--tint-strong);
 }
 
+/* Same shape as .btn-primary. It used to set only the colour, so the Stop button came out
+   small, square-cornered and wrapped beside the full-width Mute button. */
 .btn-danger {
   background: var(--danger);
   color: white;
+  padding: 1rem 1.5rem;
+  border-radius: var(--radius-md);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  transition: all var(--transition-smooth);
   box-shadow: 0 4px 12px var(--danger-glow);
+  width: 100%;
+  font-size: 1.1rem;
+}
+
+.btn-danger:active {
+  transform: scale(0.97);
 }
 
 .btn-danger:hover {
@@ -288,6 +304,15 @@ h1 {
 
 .rec-badge svg {
   animation: status-blink 1.6s ease-in-out infinite;
+}
+
+/* Recording paused with the AI translation: no blinking, in the paused colour. */
+.rec-badge.paused {
+  color: #f59e0b;
+}
+
+.rec-badge.paused svg {
+  animation: none;
 }
 
 @keyframes status-blink {

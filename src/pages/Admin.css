@@ -646,6 +646,12 @@ textarea.custom-input {
     color: var(--danger);
 }
 
+/* A loaded file or edit that is not saved is not sent to OpenAI. */
+.ai-notes-unsaved {
+    color: #f59e0b;
+    font-weight: 600;
+}
+
 .ai-notes-actions {
     display: flex;
     gap: 0.75rem;

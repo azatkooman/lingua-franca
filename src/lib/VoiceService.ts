@@ -612,9 +612,12 @@ export class VoiceService {
         for (const track of this.sourceStream?.getAudioTracks() || []) track.enabled = !muted;
     }
 
-    /** Tells the server these AI channels stopped (or restarted) running up OpenAI time. */
-    setAiPaused(channelIds: string[], paused: boolean) {
-        realtimeSocket.emit('setAiPaused', { channelIds, paused }, () => undefined);
+    /**
+     * Tells the server these AI channels stopped (or restarted) running up OpenAI time. With
+     * wholeBroadcast, this device's recordings pause (or resume) with them.
+     */
+    setAiPaused(channelIds: string[], paused: boolean, wholeBroadcast = false) {
+        realtimeSocket.emit('setAiPaused', { channelIds, paused, wholeBroadcast }, () => undefined);
     }
 
     /** How the AI channel's internet link to OpenAI is doing, for the dashboard. */

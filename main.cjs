@@ -628,6 +628,9 @@ async function startServers(isDev) {
     // producer id -> { producer, channelId, socketId }: the original speech in AI mode when it
     // is recorded but not broadcast. Never consumable, never shown as live.
     const recordOnlyProducers = new Map();
+    // Producer ids whose recording is paused because their AI translation is paused, so the
+    // files skip that time instead of holding minutes of silence.
+    const pausedRecordingProducers = new Set();
     const peakListeners = new Map();
     // AI time since the app started or the dashboard was reset.
     const usage = { aiSeconds: 0, since: Date.now() };
@@ -763,6 +766,7 @@ async function startServers(isDev) {
         }).then((handle) => {
             entry.handle = handle;
             if (entry.stopRequested || producer.closed) handle.stop();
+            else if (pausedRecordingProducers.has(producer.id)) handle.setPaused(true);
         }).catch((error) => {
             activeRecordings.delete(producer.id);
             fs.rmSync(recordingStore.metaPath(file.name), { force: true });
@@ -1040,9 +1044,11 @@ async function startServers(isDev) {
             callback({ ok: true });
         });
 
-        // The AI legs were closed for silence (or reopened): stop (or restart) counting their
-        // time, so the dashboard's cost and the budget warning reflect what OpenAI bills.
-        on('setAiPaused', ({ channelIds, paused } = {}, callback) => {
+        // The AI legs were closed (paused by the operator or for silence) or reopened: stop (or
+        // restart) counting their time, so the dashboard's cost and the budget warning reflect
+        // what OpenAI bills. When the whole broadcast pauses, its recordings (every translation
+        // and the original speech) pause too, so each file plays as one piece with no gap.
+        on('setAiPaused', ({ channelIds, paused, wholeBroadcast } = {}, callback) => {
             if (!socketIsAdmin()) return callback({ error: 'Administrator login required.' });
             const ids = Array.isArray(channelIds) ? channelIds.slice(0, 32).map((value) => String(value).slice(0, 80)) : [];
             for (const id of ids) {
@@ -1050,6 +1056,20 @@ async function startServers(isDev) {
                 if (info?.role !== 'translation' || !ownsChannel(id)) continue;
                 if (paused && info.billedSince) { usage.aiSeconds += billedSeconds(info); chargeBalance(info); info.billedSince = null; }
                 if (!paused && !info.billedSince) { info.billedSince = Date.now(); info.balanceSince = info.billedSince; }
+            }
+            if (wholeBroadcast === true) {
+                const owned = [
+                    ...[...producers].filter(([channelId]) => producerOwners.get(channelId)?.socketId === socket.id).map(([, producer]) => producer),
+                    ...[...recordOnlyProducers.values()].filter((entry) => entry.socketId === socket.id).map((entry) => entry.producer),
+                ];
+                for (const producer of owned) {
+                    if (paused && !pausedRecordingProducers.has(producer.id)) {
+                        pausedRecordingProducers.add(producer.id);
+                        producer.observer.once('close', () => pausedRecordingProducers.delete(producer.id));
+                    }
+                    if (!paused) pausedRecordingProducers.delete(producer.id);
+                    activeRecordings.get(producer.id)?.handle?.setPaused(Boolean(paused));
+                }
             }
             callback({ ok: true });
         });
@@ -1576,6 +1596,7 @@ async function startServers(isDev) {
     expressApp.get('/api/admin/live', requireAdmin, (_request, response) => {
         const now = Date.now();
         const recordingChannels = new Set([...activeRecordings.values()].map((entry) => entry.channelId));
+        const pausedRecordingChannels = new Set([...activeRecordings].filter(([producerId]) => pausedRecordingProducers.has(producerId)).map(([, entry]) => entry.channelId));
         const aiSeconds = aiSpentSeconds(now);
         response.json({
             channels: settings.languages.map((language) => {
@@ -1587,6 +1608,8 @@ async function startServers(isDev) {
                     since: info?.since || null, paused: Boolean(producer?.paused),
                     listeners: countListeners(language.id), peakListeners: peakListeners.get(language.id) || 0,
                     recording: recordingChannels.has(language.id),
+                    // Skipping time while the AI translation is paused.
+                    recordingPaused: pausedRecordingChannels.has(language.id),
                     // Phones on this channel that tapped "I can't hear" in the last two minutes.
                     reports: listenerReports.count(language.id),
                     // Sound lost on phones' Wi-Fi, and on an AI channel's internet link to OpenAI.

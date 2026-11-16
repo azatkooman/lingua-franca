@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Cpu, Mic, Radio, RefreshCw, ShieldAlert, Square } from 'lucide-react';
+import { ArrowLeft, Cpu, Mic, MicOff, Pause, Play, Radio, RefreshCw, ShieldAlert, Square } from 'lucide-react';
 import { SYSTEM_AUDIO_DEVICE_ID, voiceService } from '../lib/VoiceService';
 import { settingsService, type AdminSettings, type AppSettings } from '../lib/SettingsService';
 import { realtimeTranslationService, type TranslationUpdate } from '../lib/RealtimeTranslationService';
@@ -40,6 +40,9 @@ export default function Interpreter() {
     const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([]);
     const [selectedMic, setSelectedMic] = useState('');
     const [isMuted, setIsMuted] = useState(false);
+    // AI mode: OpenAI closed by the operator's Pause or by the silence pause.
+    const [aiPaused, setAiPaused] = useState(false);
+    const [pauseBusy, setPauseBusy] = useState(false);
     const [signalLevel, setSignalLevel] = useState(0);
     const [listeners, setListeners] = useState(0);
     const [microphoneAccess, setMicrophoneAccess] = useState('checking');
@@ -147,7 +150,7 @@ export default function Interpreter() {
     }, [refreshMicrophones, isDesktopApp]);
 
     const stopBroadcast = useCallback(async () => {
-        setIsLive(false); setIsMuted(false); setStatus(t('offline')); setSignalLevel(0); setListeners(0);
+        setIsLive(false); setIsMuted(false); setAiPaused(false); setStatus(t('offline')); setSignalLevel(0); setListeners(0);
         meterCleanup.current?.(); meterCleanup.current = null;
         if (mode === 'ai') realtimeTranslationService.stop();
         // Always release the capture device and the send transports, including in AI mode --
@@ -268,7 +271,9 @@ export default function Interpreter() {
                 const source = languages.find((language) => language.id === sourceChannelId);
                 const targetLanguages = languages.filter((language) => targetIds.has(language.id) && language.id !== sourceChannelId);
                 if (!source || !targetLanguages.length) throw new Error(t('choose_source_target'));
-                await realtimeTranslationService.start(source, targetLanguages, selectedMic, setStatus, updateTranscript, setListeners, { floorChannel });
+                await realtimeTranslationService.start(source, targetLanguages, selectedMic, setStatus, updateTranscript, setListeners, {
+                    floorChannel, onPaused: (paused) => setAiPaused(paused),
+                });
                 const stream = voiceService.getBroadcastStream();
                 if (stream) meterCleanup.current = voiceService.createLevelMeter(stream, setSignalLevel);
                 setStatus(t('openai_live'));
@@ -303,6 +308,12 @@ export default function Interpreter() {
     const toggleMute = () => {
         const next = !isMuted; setIsMuted(next);
         if (mode === 'ai') realtimeTranslationService.setMuted(next); else voiceService.setMuted(next);
+    };
+
+    const togglePause = async () => {
+        setPauseBusy(true);
+        try { await (aiPaused ? realtimeTranslationService.resume() : realtimeTranslationService.pause()); }
+        finally { setPauseBusy(false); }
     };
 
     return (
@@ -405,6 +416,7 @@ export default function Interpreter() {
                     <p className={isLive ? 'text-accent' : 'text-muted'}>{status}</p>
                     {isLive && <p className="text-muted">{t('listeners_connected', { count: listeners })}</p>}
                     {isLive && isMuted && <p className="text-danger">{t('mute_warning')}</p>}
+                    {isLive && mode === 'ai' && aiPaused && <p className="ai-paused-note" role="status">{t('ai_paused_note')}</p>}
                     {accessEnding && <p className="address-warning">{t('access_ending', { time: accessEndsAt })}</p>}
                     {isLive && originalActive && <p className="text-muted">{t('original_mute_note')}</p>}
                 </div>
@@ -428,10 +440,22 @@ export default function Interpreter() {
                     </div>
                 )}
 
-                <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
-                    <button className={isLive ? 'btn-danger' : 'btn-primary'} disabled={starting} onClick={() => void (isLive ? stopBroadcast() : startBroadcast())}>{isLive ? <><Square size={18} /> {t('stop_audio')}</> : <><Radio size={18} /> {t('start_broadcast')}</>}</button>
-                    {isLive && <button className="btn-secondary" onClick={toggleMute}>{isMuted ? t('unmute_source') : t('mute_source')}</button>}
-                </div>
+                {isLive && (
+                    <div className="live-controls">
+                        {mode === 'ai' && (
+                            <button className={aiPaused ? 'btn-primary' : 'btn-secondary'} disabled={pauseBusy} onClick={() => void togglePause()}>
+                                {aiPaused ? <><Play size={18} /> {t('ai_resume')}</> : <><Pause size={18} /> {t('ai_pause')}</>}
+                            </button>
+                        )}
+                        <button className="btn-secondary" onClick={toggleMute}>
+                            {isMuted ? <><Mic size={18} /> {t('unmute_source')}</> : <><MicOff size={18} /> {t('mute_source')}</>}
+                        </button>
+                    </div>
+                )}
+                <button className={`broadcast-button ${isLive ? 'btn-danger' : 'btn-primary'}`} disabled={starting}
+                    onClick={() => void (isLive ? stopBroadcast() : startBroadcast())}>
+                    {isLive ? <><Square size={18} fill="currentColor" /> {t('stop_broadcast')}</> : <><Radio size={18} /> {t('start_broadcast')}</>}
+                </button>
             </div>
 
             {mode === 'ai' && transcript.length > 0 && (

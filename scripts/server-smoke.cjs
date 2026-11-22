@@ -39,7 +39,7 @@ globalThis.fetch = async (url, init = {}) => {
     }
     const reply = String(url).endsWith('/v1/live/sessions')
         ? { status: 201, body: { session: { id: 'live_smoke' }, transport: { type: 'webrtc', sdp: 'v=0 answer' } } }
-        : { status: 200, body: { id: 'gpt-live-1', object: 'model' } };
+        : { status: 200, body: { id: 'gpt-live-1.1', object: 'model' } };
     return new Response(JSON.stringify(reply.body), { status: reply.status, headers: { 'Content-Type': 'application/json' } });
 };
 
@@ -687,7 +687,7 @@ async function run() {
             const sent = openaiCalls.at(-1);
             assert.equal(sent.url, 'https://api.openai.com/v1/live/sessions');
             assert.deepEqual(sent.body.transport, { type: 'webrtc', sdp: 'v=0 offer' });
-            assert.equal(sent.body.session.model, 'gpt-live-1');
+            assert.equal(sent.body.session.model, 'gpt-live-1.1');
             assert.equal(sent.body.session.audio.output.voice, 'marin', 'the voice saved last');
             assert.match(sent.body.session.instructions, /^ENGLISH ONLY\./);
             assert.match(sent.body.session.instructions, /Translate the speaker's Russian speech into English/);
@@ -697,7 +697,7 @@ async function run() {
             // The pre-service check looks the model up rather than opening a session.
             const { body: preflight } = await json('/api/admin/preflight', { headers: authed(token) });
             assert.equal(preflight.checks.find((entry) => entry.id === 'openai').status, 'ok');
-            assert.equal(openaiCalls.at(-1).url, 'https://api.openai.com/v1/models/gpt-live-1');
+            assert.equal(openaiCalls.at(-1).url, 'https://api.openai.com/v1/models/gpt-live-1.1');
         } finally {
             await json('/api/admin/settings', { method: 'PATCH', headers: authed(token), body: JSON.stringify({ clearOpenaiApiKey: true }) });
         }
